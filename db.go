@@ -1,7 +1,9 @@
 package microfts
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,7 +12,7 @@ import (
 	"github.com/bmatsuo/lmdb-go/lmdb"
 )
 
-// CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-build-index.md
+// CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-build-index.md, seq-stale.md
 
 // Record prefixes for content DB keys.
 const (
@@ -55,11 +57,21 @@ type SearchResult struct {
 
 // FileInfo is stored as JSON in N records.
 type FileInfo struct {
-	Filename        string  `json:"filename"`
-	ChunkOffsets    []int64 `json:"chunkOffsets"`
-	ChunkStartLines []int   `json:"chunkStartLines"`
-	ChunkEndLines   []int   `json:"chunkEndLines"`
-	ChunkingStrategy string `json:"chunkingStrategy"`
+	Filename         string  `json:"filename"`
+	ChunkOffsets     []int64 `json:"chunkOffsets"`
+	ChunkStartLines  []int   `json:"chunkStartLines"`
+	ChunkEndLines    []int   `json:"chunkEndLines"`
+	ChunkingStrategy string  `json:"chunkingStrategy"`
+	ModTime          int64   `json:"modTime"`
+	ContentHash      string  `json:"contentHash"`
+}
+
+// FileStatus is returned by CheckFile and StaleFiles.
+type FileStatus struct {
+	Path     string
+	Status   string // "fresh", "stale", "missing"
+	FileID   uint64
+	Strategy string
 }
 
 // Options configures database creation and opening.
@@ -286,20 +298,26 @@ func (db *DB) AddFile(fpath, strategy string) error {
 		return fmt.Errorf("chunker: %w", err)
 	}
 
+	modTime, err := fileModTime(fpath)
+	if err != nil {
+		return err
+	}
+
 	data, err := os.ReadFile(fpath)
 	if err != nil {
 		return err
 	}
 
+	hash := contentHash(data)
 	boundaries := normalizeBoundaries(offsets, int64(len(data)))
 	startLines, endLines := computeChunkLines(data, boundaries)
 
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines)
+		return db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines, modTime, hash)
 	})
 }
 
-func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, data []byte, boundaries []int64, startLines, endLines []int) error {
+func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, data []byte, boundaries []int64, startLines, endLines []int, modTime int64, contentHash string) error {
 	fileid, err := db.allocFileID(txn)
 	if err != nil {
 		return err
@@ -357,6 +375,8 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, data []byte, b
 		ChunkStartLines:  startLines,
 		ChunkEndLines:    endLines,
 		ChunkingStrategy: strategy,
+		ModTime:          modTime,
+		ContentHash:      contentHash,
 	}
 	infoJSON, err := json.Marshal(info)
 	if err != nil {
@@ -443,10 +463,15 @@ func (db *DB) Reindex(fpath, strategy string) error {
 	if err != nil {
 		return fmt.Errorf("chunker: %w", err)
 	}
+	modTime, err := fileModTime(fpath)
+	if err != nil {
+		return err
+	}
 	data, err := os.ReadFile(fpath)
 	if err != nil {
 		return err
 	}
+	hash := contentHash(data)
 	boundaries := normalizeBoundaries(offsets, int64(len(data)))
 	startLines, endLines := computeChunkLines(data, boundaries)
 
@@ -454,7 +479,7 @@ func (db *DB) Reindex(fpath, strategy string) error {
 		if err := db.removeFileInTxn(txn, fpath); err != nil {
 			return err
 		}
-		return db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines)
+		return db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines, modTime, hash)
 	})
 }
 
@@ -686,7 +711,153 @@ func (db *DB) RemoveStrategy(name string) error {
 	return db.saveSettings()
 }
 
+// --- Staleness ---
+
+// Seq: seq-stale.md
+
+// CheckFile checks whether an indexed file is fresh, stale, or missing on disk.
+func (db *DB) CheckFile(fpath string) (FileStatus, error) {
+	var status FileStatus
+	status.Path = fpath
+
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		finalKey := FinalKey(fpath)
+		val, err := txn.Get(db.contentDBI, finalKey)
+		if lmdb.IsNotFound(err) {
+			return fmt.Errorf("file not indexed: %s", fpath)
+		} else if err != nil {
+			return err
+		}
+		fileid := binary.BigEndian.Uint64(val)
+		status.FileID = fileid
+
+		info, err := readFileInfo(txn, db.contentDBI, fileid)
+		if err != nil {
+			return err
+		}
+		status.Strategy = info.ChunkingStrategy
+		status.Status = classifyFile(info)
+		return nil
+	})
+	return status, err
+}
+
+// StaleFiles returns the status of every indexed file.
+func (db *DB) StaleFiles() ([]FileStatus, error) {
+	type fileEntry struct {
+		fileid uint64
+		info   FileInfo
+	}
+	var entries []fileEntry
+
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		cursor, err := txn.OpenCursor(db.contentDBI)
+		if err != nil {
+			return err
+		}
+		defer cursor.Close()
+
+		key, val, err := cursor.Get([]byte{prefixN}, nil, lmdb.SetRange)
+		for err == nil && len(key) > 0 && key[0] == prefixN {
+			if len(key) == 9 {
+				fileid := binary.BigEndian.Uint64(key[1:])
+				data := make([]byte, len(val))
+				copy(data, val)
+				var info FileInfo
+				if jsonErr := json.Unmarshal(data, &info); jsonErr == nil {
+					entries = append(entries, fileEntry{fileid, info})
+				}
+			}
+			key, val, err = cursor.Get(nil, nil, lmdb.Next)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var statuses []FileStatus
+	for _, e := range entries {
+		statuses = append(statuses, FileStatus{
+			Path:     e.info.Filename,
+			FileID:   e.fileid,
+			Strategy: e.info.ChunkingStrategy,
+			Status:   classifyFile(e.info),
+		})
+	}
+	return statuses, nil
+}
+
+// RefreshStale reindexes all stale files. If strategy is empty, each file's
+// existing strategy is used. Returns the list of stale and missing files found.
+func (db *DB) RefreshStale(strategy string) ([]FileStatus, error) {
+	statuses, err := db.StaleFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []FileStatus
+	for _, fs := range statuses {
+		switch fs.Status {
+		case "stale":
+			strat := strategy
+			if strat == "" {
+				strat = fs.Strategy
+			}
+			if err := db.Reindex(fs.Path, strat); err != nil {
+				return result, fmt.Errorf("refresh %s: %w", fs.Path, err)
+			}
+			fs.Status = "refreshed"
+			result = append(result, fs)
+		case "missing":
+			result = append(result, fs)
+		}
+	}
+	return result, nil
+}
+
+// classifyFile determines whether a file is fresh, stale, or missing by
+// comparing disk state to stored metadata. File I/O happens here, outside
+// any LMDB transaction.
+func classifyFile(info FileInfo) string {
+	fi, err := os.Stat(info.Filename)
+	if os.IsNotExist(err) {
+		return "missing"
+	}
+	if err != nil {
+		return "missing"
+	}
+	if fi.ModTime().UnixNano() == info.ModTime {
+		return "fresh"
+	}
+	data, err := os.ReadFile(info.Filename)
+	if err != nil {
+		return "missing"
+	}
+	h := sha256.Sum256(data)
+	if hex.EncodeToString(h[:]) == info.ContentHash {
+		return "fresh"
+	}
+	return "stale"
+}
+
 // --- Helpers ---
+
+// fileModTime returns the file's modification time. Call this before reading
+// file data so the recorded mod time precedes the read — if the file changes
+// between stat and read, it will appear stale on next check (safe direction).
+func fileModTime(fpath string) (int64, error) {
+	fi, err := os.Stat(fpath)
+	if err != nil {
+		return 0, err
+	}
+	return fi.ModTime().UnixNano(), nil
+}
+
+func contentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
 
 func readCounts(txn *lmdb.Txn, dbi lmdb.DBI) ([]byte, error) {
 	raw, err := txn.Get(dbi, []byte{prefixC})

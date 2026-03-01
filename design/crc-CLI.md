@@ -1,5 +1,5 @@
 # CLI
-**Requirements:** R1, R34, R39, R41, R48, R49, R50, R57, R58, R59, R60, R61, R62
+**Requirements:** R1, R34, R39, R41, R48, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74
 
 Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB, formats output.
 
@@ -14,6 +14,8 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 - reindex: reindex a file with a new strategy (--strategy)
 - build-index: rebuild index (--cutoff)
 - strategy add/remove/list: manage chunking strategies
+- stale: list stale/missing files as `status\tpath`
+- -r (global flag): refresh stale files before subcommand; alone = refresh + exit
 - chunk-lines: output byte offsets at each newline
 - chunk-lines-overlap: output byte offsets for overlapping line windows (--lines, --overlap)
 - chunk-words-overlap: output byte offsets for overlapping word windows (--words, --overlap, --pattern)
@@ -26,3 +28,4 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 - seq-add.md
 - seq-search.md
 - seq-build-index.md
+- seq-stale.md

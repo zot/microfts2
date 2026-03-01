@@ -1,5 +1,5 @@
 # DB
-**Requirements:** R1, R2, R14, R15, R16, R17, R18, R19, R20, R21, R27, R28, R29, R30, R33, R35, R36, R37, R38, R39, R40, R41, R42, R43, R44, R22, R23, R24, R32, R51, R52, R53, R54, R55, R56
+**Requirements:** R1, R2, R14, R15, R16, R17, R18, R19, R20, R21, R27, R28, R29, R30, R33, R35, R36, R37, R38, R39, R40, R41, R42, R43, R44, R22, R23, R24, R32, R51, R52, R53, R54, R55, R56, R63, R64, R65, R66, R67, R68, R69
 
 Main database handle. Manages LMDB environment with two named subdatabases (content and index). Provides the public library API.
 
@@ -8,6 +8,8 @@ Main database handle. Manages LMDB environment with two named subdatabases (cont
 - contentDBI: content subdatabase handle
 - indexDBI: index subdatabase handle (nil if not built)
 - settings: loaded from I record (character set, chunking strategies, case-insensitive, active trigrams, cutoff)
+- FileInfo.ModTime: Unix nanoseconds at index time
+- FileInfo.ContentHash: SHA-256 hex string at index time
 - charSet: CharSet instance configured from settings
 - contentName: subdatabase name (default "ftscontent")
 - indexName: subdatabase name (default "ftsindex")
@@ -21,6 +23,9 @@ Main database handle. Manages LMDB environment with two named subdatabases (cont
 - Search(query): build index if needed, extract trigrams, intersect posting lists, return results
 - BuildIndex(cutoff): compute active trigrams from C counts at cutoff, rebuild index from T records
 - Reindex(path, strategy): remove old records, re-add with new strategy
+- CheckFile(path): stat + hash to determine fresh/stale/missing
+- StaleFiles(): scan N records, CheckFile each, return []FileStatus
+- RefreshStale(strategy): reindex all stale files (empty strategy = use existing)
 - AddStrategy(name, cmd): add chunking strategy to I record
 - RemoveStrategy(name): remove chunking strategy from I record
 
@@ -35,3 +40,4 @@ Main database handle. Manages LMDB environment with two named subdatabases (cont
 - seq-add.md
 - seq-search.md
 - seq-build-index.md
+- seq-stale.md

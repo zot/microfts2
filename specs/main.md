@@ -178,3 +178,45 @@ Options:
 - ContentDBName, IndexDBName — defaults "ftscontent"/"ftsindex"
 
 SearchResult: `{ Path string, StartLine int, EndLine int }`
+
+# Staleness Detection
+
+Each file's N record JSON stores the file's modification time (Unix nanoseconds) and a content hash (SHA-256) at the time it was indexed.
+
+A file is **stale** when it exists on disk and either:
+- its modification time differs from the stored value, AND
+- its content hash differs from the stored value
+
+A file is **missing** when it no longer exists on disk.
+
+Checking modification time first avoids hashing when the file hasn't changed. When mod time matches, the file is considered fresh without hashing.
+
+## Library API
+
+```go
+type FileStatus struct {
+    Path     string
+    Status   string // "fresh", "stale", "missing"
+    FileID   uint64
+}
+
+func (db *DB) CheckFile(fpath string) (FileStatus, error)
+func (db *DB) StaleFiles() ([]FileStatus, error)
+func (db *DB) RefreshStale(strategy string) ([]FileStatus, error)
+```
+
+- `CheckFile`: check a single file's staleness
+- `StaleFiles`: return status of all indexed files (fresh, stale, or missing)
+- `RefreshStale`: reindex all stale files using the given strategy (empty string = use each file's existing strategy). Returns the list of files that were refreshed. Missing files are skipped (not deleted).
+
+## CLI
+
+- `microfts stale -db <path>`
+  List all stale and missing files. Output: one line per file, `status\tpath` (tab-separated).
+
+- `-r` flag (global, before subcommand):
+  Refresh all stale files before executing the subcommand. Uses each file's existing chunking strategy.
+  - `microfts -r -db <path>` — refresh only, no subcommand
+  - `microfts search -r -db <path> <query>` — refresh then search
+  - When used without a subcommand, just refreshes and exits (printing refreshed files)
+  - Missing files are reported but not deleted

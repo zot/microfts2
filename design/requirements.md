@@ -133,3 +133,19 @@
 
 - **R43:** Index can be rebuilt from content DB without re-reading source files
 - **R44:** Rebuilding with a different cutoff only requires iterating T records
+
+## Feature: Staleness Detection
+**Source:** specs/main.md
+
+- **R63:** N record JSON stores file modification time (Unix nanoseconds) and content hash (SHA-256) at index time
+- **R64:** A file is stale when its mod time differs from stored AND its content hash differs from stored
+- **R65:** A file is missing when it no longer exists on disk
+- **R66:** Mod time is checked first; if it matches, the file is fresh without hashing
+- **R67:** `CheckFile` checks a single file's staleness status
+- **R68:** `StaleFiles` returns status of all indexed files (fresh, stale, missing)
+- **R69:** `RefreshStale` reindexes all stale files using their existing strategy (or a given override). Missing files are skipped.
+- **R70:** CLI `stale` subcommand lists stale and missing files as `status\tpath`
+- **R71:** CLI `-r` global flag refreshes stale files before executing any subcommand
+- **R72:** `-r` without a subcommand refreshes and exits, printing refreshed files
+- **R73:** `-r` combined with a subcommand (e.g. `search`) refreshes first, then runs the subcommand
+- **R74:** Missing files are reported by `-r` but not deleted

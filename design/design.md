@@ -28,6 +28,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-add.md → `db.go`, `chunker.go`, `charset.go`, `bitset.go`, `keychain.go`
 - [x] seq-search.md → `db.go`, `charset.go`
 - [x] seq-build-index.md → `db.go`, `bitset.go`
+- [x] seq-stale.md → `db.go`, `cmd/microfts/main.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`

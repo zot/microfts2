@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // CRC: crc-DB.md
@@ -219,6 +220,152 @@ func TestDBLongFilename(t *testing.T) {
 	}
 	if results[0].Path != fp {
 		t.Errorf("Path = %q, want %q", results[0].Path, fp)
+	}
+}
+
+func TestDBCheckFileFresh(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
+
+	if err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := db.CheckFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "fresh" {
+		t.Errorf("Status = %q, want fresh", status.Status)
+	}
+}
+
+func TestDBCheckFileStale(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
+
+	if err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify the file content and ensure mod time changes
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(fp, []byte("changed content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := db.CheckFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "stale" {
+		t.Errorf("Status = %q, want stale", status.Status)
+	}
+}
+
+func TestDBCheckFileMissing(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
+
+	if err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	os.Remove(fp)
+
+	status, err := db.CheckFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "missing" {
+		t.Errorf("Status = %q, want missing", status.Status)
+	}
+}
+
+func TestDBStaleFiles(t *testing.T) {
+	db, dir := testDB(t)
+	fresh := writeTestFile(t, dir, "fresh.txt", "stays the same\n")
+	stale := writeTestFile(t, dir, "stale.txt", "will change\n")
+	missing := writeTestFile(t, dir, "missing.txt", "will vanish\n")
+
+	for _, fp := range []string{fresh, stale, missing} {
+		if err := db.AddFile(fp, "line"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(stale, []byte("different content\n"), 0644)
+	os.Remove(missing)
+
+	statuses, err := db.StaleFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	counts := map[string]int{}
+	for _, s := range statuses {
+		counts[s.Status]++
+	}
+	if counts["fresh"] != 1 {
+		t.Errorf("fresh count = %d, want 1", counts["fresh"])
+	}
+	if counts["stale"] != 1 {
+		t.Errorf("stale count = %d, want 1", counts["stale"])
+	}
+	if counts["missing"] != 1 {
+		t.Errorf("missing count = %d, want 1", counts["missing"])
+	}
+}
+
+func TestDBRefreshStale(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "original content\n")
+
+	if err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify searchable
+	results, err := db.Search("original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("search for 'original' returned no results")
+	}
+
+	// Modify file
+	time.Sleep(10 * time.Millisecond)
+	os.WriteFile(fp, []byte("updated content\n"), 0644)
+
+	// Refresh
+	refreshed, err := db.RefreshStale("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refreshed) == 0 {
+		t.Fatal("RefreshStale returned empty list")
+	}
+	if refreshed[0].Status != "refreshed" {
+		t.Errorf("Status = %q, want refreshed", refreshed[0].Status)
+	}
+
+	// Old content gone, new content searchable
+	results, err = db.Search("original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Errorf("search for 'original' after refresh returned %d results, want 0", len(results))
+	}
+
+	results, err = db.Search("updated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("search for 'updated' after refresh returned no results")
 	}
 }
 

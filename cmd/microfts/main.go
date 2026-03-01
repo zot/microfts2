@@ -13,12 +13,29 @@ import (
 
 // CRC: crc-CLI.md
 
+var globalRefresh bool
+
 func main() {
+	globalRefresh, os.Args = extractRefreshFlag(os.Args)
+
 	if len(os.Args) < 2 {
+		if globalRefresh {
+			fmt.Fprintln(os.Stderr, "-r requires -db flag")
+			os.Exit(1)
+		}
 		usage()
 	}
 
 	cmd := os.Args[1]
+	// If first arg is a flag, not a subcommand — standalone refresh mode
+	if strings.HasPrefix(cmd, "-") {
+		if globalRefresh {
+			cmdRefreshOnly()
+			return
+		}
+		usage()
+	}
+
 	os.Args = append(os.Args[:1], os.Args[2:]...)
 	flag.CommandLine = flag.NewFlagSet(cmd, flag.ExitOnError)
 
@@ -37,6 +54,8 @@ func main() {
 		cmdBuildIndex()
 	case "strategy":
 		cmdStrategy()
+	case "stale":
+		cmdStale()
 	case "chunk-lines":
 		cmdChunkLines()
 	case "chunk-lines-overlap":
@@ -49,10 +68,25 @@ func main() {
 	}
 }
 
+func extractRefreshFlag(args []string) (bool, []string) {
+	found := false
+	var result []string
+	for _, a := range args {
+		if a == "-r" && !found {
+			found = true
+		} else {
+			result = append(result, a)
+		}
+	}
+	return found, result
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: microfts <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, build-index, strategy,")
+	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
+	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, build-index, strategy, stale,")
 	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap")
+	fmt.Fprintln(os.Stderr, "flags:")
+	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
 	os.Exit(1)
 }
 
@@ -124,6 +158,7 @@ func cmdAdd() {
 		fatal("open", err)
 	}
 	defer db.Close()
+	doRefresh(db)
 
 	for _, fp := range fs.Args() {
 		if err := db.AddFile(fp, *strategy); err != nil {
@@ -149,6 +184,7 @@ func cmdSearch() {
 		fatal("open", err)
 	}
 	defer db.Close()
+	doRefresh(db)
 
 	results, err := db.Search(query)
 	if err != nil {
@@ -174,6 +210,7 @@ func cmdDelete() {
 		fatal("open", err)
 	}
 	defer db.Close()
+	doRefresh(db)
 
 	for _, fp := range fs.Args() {
 		if err := db.RemoveFile(fp); err != nil {
@@ -198,6 +235,7 @@ func cmdReindex() {
 		fatal("open", err)
 	}
 	defer db.Close()
+	doRefresh(db)
 
 	for _, fp := range fs.Args() {
 		if err := db.Reindex(fp, *strategy); err != nil {
@@ -222,11 +260,78 @@ func cmdBuildIndex() {
 		fatal("open", err)
 	}
 	defer db.Close()
+	doRefresh(db)
 
 	if err := db.BuildIndex(*cutoff); err != nil {
 		fatal("build-index", err)
 	}
 	fmt.Printf("index built (%d active trigrams)\n", len(db.Settings().ActiveTrigrams))
+}
+
+func cmdRefreshOnly() {
+	flag.CommandLine = flag.NewFlagSet("refresh", flag.ExitOnError)
+	fs := flag.CommandLine
+	dbPath, contentDB, indexDB := dbFlags(fs)
+	fs.Parse(os.Args[1:])
+
+	if *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "-r: -db required")
+		os.Exit(1)
+	}
+
+	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	if err != nil {
+		fatal("open", err)
+	}
+	defer db.Close()
+
+	refreshed, err := db.RefreshStale("")
+	if err != nil {
+		fatal("refresh", err)
+	}
+	for _, fs := range refreshed {
+		fmt.Printf("%s\t%s\n", fs.Status, fs.Path)
+	}
+}
+
+func doRefresh(db *microfts.DB) {
+	if !globalRefresh {
+		return
+	}
+	refreshed, err := db.RefreshStale("")
+	if err != nil {
+		fatal("refresh", err)
+	}
+	for _, fs := range refreshed {
+		fmt.Fprintf(os.Stderr, "%s\t%s\n", fs.Status, fs.Path)
+	}
+}
+
+func cmdStale() {
+	fs := flag.CommandLine
+	dbPath, contentDB, indexDB := dbFlags(fs)
+	fs.Parse(os.Args[1:])
+
+	if *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "stale: -db required")
+		os.Exit(1)
+	}
+
+	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	if err != nil {
+		fatal("open", err)
+	}
+	defer db.Close()
+
+	statuses, err := db.StaleFiles()
+	if err != nil {
+		fatal("stale", err)
+	}
+	for _, s := range statuses {
+		if s.Status != "fresh" {
+			fmt.Printf("%s\t%s\n", s.Status, s.Path)
+		}
+	}
 }
 
 func cmdStrategy() {
