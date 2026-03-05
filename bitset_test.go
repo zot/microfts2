@@ -1,4 +1,4 @@
-package microfts
+package microfts2
 
 import "testing"
 
@@ -8,7 +8,7 @@ func TestBitsetSetAndTest(t *testing.T) {
 	var b Bitset
 	b.Set(0)
 	b.Set(100)
-	b.Set(262143) // max trigram
+	b.Set(16777215) // max trigram (2^24 - 1)
 
 	if !b.Test(0) {
 		t.Error("expected bit 0 set")
@@ -16,8 +16,8 @@ func TestBitsetSetAndTest(t *testing.T) {
 	if !b.Test(100) {
 		t.Error("expected bit 100 set")
 	}
-	if !b.Test(262143) {
-		t.Error("expected bit 262143 set")
+	if !b.Test(16777215) {
+		t.Error("expected bit 16777215 set")
 	}
 	if b.Test(1) {
 		t.Error("expected bit 1 unset")

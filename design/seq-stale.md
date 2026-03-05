@@ -10,20 +10,21 @@ DB
  |
  |  look up fileid from F records
  |  read N record -> FileInfo (has ModTime, ContentHash)
- |  stat file on disk
- |    if file missing: return {status: "missing"}
- |  if disk mod time == stored mod time:
- |    return {status: "fresh"}
- |  compute SHA-256 of file contents
- |  if hash == stored hash:
- |    return {status: "fresh"}  (mod time changed, content same)
- |  return {status: "stale"}
+ |  classifyFile(info):
+ |    stat file on disk
+ |      if file missing: return "missing"
+ |    if disk mod time == stored mod time:
+ |      return "fresh"
+ |    compute SHA-256 of file contents
+ |    if hash == stored hash:
+ |      return "fresh"  (mod time changed, content same)
+ |    return "stale"
  |
  |  === StaleFiles() ===
  |
  |  scan all N records (prefix 'N')
  |  for each FileInfo:
- |    CheckFile(info.Filename)
+ |    classifyFile(info)
  |    collect FileStatus
  |  return []FileStatus
  |
@@ -32,7 +33,7 @@ DB
  |  call StaleFiles()
  |  for each stale file:
  |    determine strategy: param if non-empty, else file's existing strategy
- |    Reindex(file.Path, strategy)
+ |    Reindex(file.Path, strategy)  [incremental index update]
  |    collect into refreshed list
- |  return refreshed []FileStatus
+ |  return (refreshed []FileStatus, nil)
 ```

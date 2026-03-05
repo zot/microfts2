@@ -1,35 +1,76 @@
 # Sequence: Search
-**Requirements:** R30, R31, R32, R33, R34, R35
+**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108
 
 Participants: DB, CharSet
+
+## Literal Search (Search)
 
 ```
 DB                                        CharSet
  |                                          |
- |  if index DB does not exist:             |
- |    BuildIndex (see seq-build-index.md)   |
+ |  resolve scoring function from opts      |
+ |  (default: coverage)                     |
  |                                          |
  |-- Trigrams(query) ---------------------> |
  | <-- queryTrigrams[] -------------------- |
  |                                          |
- |  filter to active trigrams only          |
- |  if no active trigrams: return all chunks (degenerate case)
+ |  read A record (packed sorted trigrams)  |
+ |  build map for O(1) active lookup       |
+ |  filter query trigrams to active set    |
+ |  if none: return empty results           |
  |                                          |
  |  for each active query trigram:          |
  |    scan index DB range:                  |
- |      key=[trigram,0,0]..[trigram+1,0,0]  |
- |    collect set of (fileid, chunknum)     |
+ |      [trigram,0,0,0]..[trigram+1,0,0,0]  |
+ |    collect (fileid, chunknum, count)     |
  |                                          |
- |  intersect all sets                      |
+ |  intersect candidate sets by            |
+ |    (fileid, chunknum)                    |
+ |  accumulate chunkCounts map per chunk    |
  |                                          |
  |  for each (fileid, chunknum) in result:  |
- |    look up filename from F records       |
- |    look up chunk offsets from N record   |
- |    compute start/end lines               |
+ |    look up FileInfo from N record        |
+ |    (filename, chunk start/end lines,     |
+ |     chunkTokenCount)                     |
+ |    score = scoreFunc(queryTrigrams,      |
+ |      chunkCounts, chunkTokenCount)       |
  |                                          |
  |  sort by filename, then chunknum         |
- |  return []SearchResult                   |
+ |  return *SearchResults{Results, Status}  |
 ```
 
-SearchResult struct: Path string, StartLine int, EndLine int
+## Regex Search (SearchRegex)
+
+```
+DB
+ |
+ |  resolve scoring function from opts
+ |  (default: coverage)
+ |
+ |  parse pattern with regexp/syntax
+ |  extract trigram query from AST:
+ |    boolean AND/OR expression of trigrams
+ |    (rsc codesearch approach)
+ |
+ |  evaluate trigram query against full index:
+ |    AND nodes: intersect candidate sets
+ |    OR nodes: union candidate sets
+ |    leaf trigram: scan index DB range
+ |      [trigram,0,0,0]..[trigram+1,0,0,0]
+ |    collect (fileid, chunknum, count) per scan
+ |
+ |  for each (fileid, chunknum) in result:
+ |    look up FileInfo from N record
+ |    score = scoreFunc(queryTrigrams,
+ |      chunkCounts, chunkTokenCount)
+ |
+ |  sort by filename, then chunknum
+ |  return *SearchResults{Results, Status}
+```
+
+SearchResult struct: Path string, StartLine int, EndLine int, Score float64
+SearchResults struct: Results []SearchResult, Status IndexStatus
+ScoreFunc type: func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64
 CLI prints: `filepath:startline-endline`
+CLI `-regex` flag selects SearchRegex path
+CLI `-score coverage|density` selects scoring strategy

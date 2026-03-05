@@ -76,7 +76,7 @@ All commands require `-db <path>`. Optional: `-content-db`, `-index-db` for cust
 ## Library API
 
 ```go
-import "microfts"
+import "microfts2"
 
 // Lifecycle
 db, err := microfts.Create(path, microfts.Options{CharSet: "abc..."})

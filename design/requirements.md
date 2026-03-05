@@ -9,12 +9,12 @@
 ## Feature: Character Set and Trigrams
 **Source:** specs/main.md
 
-- **R3:** Configurable character set — up to 63 characters plus space, set at initialization, immutable after
+- **R3:** Configurable character set — up to 255 characters plus space, set at initialization, immutable after
 - **R4:** No spaces allowed in the character set string
 - **R5:** Unmapped characters treated as space; runs of spaces collapsed
-- **R6:** 6 bits per character, 18 bits per trigram, 256K possible trigrams
-- **R7:** Trigram bitset per chunk: 32KB (2^18 bits = 2^15 bytes)
-- **R8:** 64-bit trigram counts stored in a single 2M record
+- **R6:** 8 bits per character, 24 bits per trigram, 16M possible trigrams
+- **R7:** A record: sparse packed sorted trigram list (3 bytes per trigram, only active trigrams stored)
+- **R8:** C records: sparse individual LMDB records `C[trigram:3] → count:8`, one per non-zero trigram
 - **R9:** Case-insensitive mode (recommended for punctuation character sets)
 
 ## Feature: Character Aliases
@@ -35,22 +35,22 @@
 ## Feature: Two-Tree Storage
 **Source:** specs/main.md
 
-- **R14:** Content DB stores trigram bitsets, file metadata, and settings — this is the durable data
-- **R15:** Index DB stores the inverted index (trigram → file+chunk set) — can be dropped and rebuilt from content DB
+- **R14:** Content DB stores file metadata, trigram frequency counts, active set, and settings
+- **R15:** Index DB stores the trigram-to-chunk inverted index with occurrence counts, maintained incrementally
 
 ## Feature: Content DB Records
 **Source:** specs/main.md
 
-- **R16:** `C` record: 2M of 64-bit trigram counts
+- **R16:** `C` records: sparse `C[trigram:3] → count:8`, only non-zero trigrams stored
 - **R17:** `I` record: JSON database settings (chunking strategies, case-insensitive flag, character set, active trigrams)
-- **R18:** `T` records: `[fileid:8][chunknum:8]` → trigram bitset for that chunk
-- **R19:** `N` records: `[fileid:8]` → JSON with chunk offsets and chunking strategy name
+- **R19:** `N` records: `[fileid:8]` → JSON with chunk offsets, token counts, and chunking strategy name
 - **R20:** `F` records: filename → fileid mapping using key chains for names exceeding 511 bytes
 
 ## Feature: Index DB Records
 **Source:** specs/main.md
 
-- **R21:** Index entries: `[trigram:3][fileid:8][chunknum:8]` as keys in a set (empty values)
+- **R21:** Forward index entries: `[trigram:3][count:2 desc][fileid:8][chunknum:8]` as keys (empty values); count stored as `0xFFFF - count` for descending sort, capped at 65535
+- **R102:** Reverse index entries: `R[fileid:8]` → packed `[chunknum:8][numTrigrams:2][[trigram:3][count:2]]...` groups; one record per file, used for removal
 
 ## Feature: Data-in-Key Pattern
 **Source:** specs/main.md
@@ -65,23 +65,23 @@
 - **R25:** Filenames exceeding LMDB's 511-byte key limit use multiple chained keys
 - **R26:** `F` records use name-part byte to chain: part 255 indicates final segment, value holds fileid
 
-## Feature: Active Trigrams
+## Feature: Full Trigram Index
 **Source:** specs/main.md
 
-- **R27:** Trigrams below a configurable frequency percentile cutoff are indexed (active trigrams)
-- **R28:** Active trigram list and cutoff stored in the `I` record
+- **R27:** Index DB contains entries for ALL trigrams present in the content, not a frequency-selected subset
+- **R28:** searchCutoff stored in the I record; active trigrams (bottom searchCutoff% by frequency) stored as a sparse packed sorted trigram list in the A record for literal query filtering
 
 ## Feature: Adding Files
 **Source:** specs/main.md
 
-- **R29:** Adding a file: create `F` record (assigns fileid), create `T` records for each chunk, create `N` record
+- **R29:** Adding a file: create `F` record (assigns fileid), chunk and compute trigram counts, create `N` record (with token counts), update C records (per-trigram, insert/increment), write forward and reverse index entries
 
 ## Feature: Searching
 **Source:** specs/main.md
 
 - **R30:** If the index DB does not exist, compute it before searching
-- **R31:** Compute trigrams for search string
-- **R32:** Intersect file+chunk sets for each active trigram in the query
+- **R31:** Literal search: compute trigrams for search string, filter to active set (bottom searchCutoff%)
+- **R32:** Literal search: intersect file+chunk sets for each active query trigram
 - **R33:** Results sorted by filename then chunk number
 - **R34:** CLI output: one result per line, `filepath:startline-endline`
 - **R35:** Library returns struct slices with file path, start line, end line
@@ -89,7 +89,7 @@
 ## Feature: Index Computation
 **Source:** specs/main.md
 
-- **R36:** For each `T` record, for each active trigram in the bitset, add an index entry to the index DB
+- **R36:** Build-index: cursor scan all C records, sort by count, take bottom searchCutoff% → write A record as packed sorted trigram list; index entries are maintained incrementally, build-index only recomputes the active set
 
 ## Feature: CLI Commands
 **Source:** specs/main.md
@@ -106,7 +106,7 @@
 
 - **R51:** `Create`/`Open`/`Close`/`Settings` lifecycle functions
 - **R52:** `AddFile`/`RemoveFile`/`Reindex` content management methods
-- **R53:** `Search` returns `[]SearchResult` with Path, StartLine, EndLine
+- **R53:** `Search` accepts variadic `SearchOption` and returns `*SearchResults` with Results slice and IndexStatus
 - **R54:** `BuildIndex` accepts cutoff percentile parameter
 - **R55:** `AddStrategy`/`RemoveStrategy` for runtime strategy management
 - **R56:** `Options` struct configures creation (CharSet, CaseInsensitive, Aliases) and opening (ContentDBName, IndexDBName)
@@ -128,12 +128,6 @@
 - **R41:** Settable via CLI flags and library API
 - **R42:** Not stored in the I record — required to open the databases
 
-## Feature: Index Rebuild
-**Source:** specs/main.md
-
-- **R43:** Index can be rebuilt from content DB without re-reading source files
-- **R44:** Rebuilding with a different cutoff only requires iterating T records
-
 ## Feature: Staleness Detection
 **Source:** specs/main.md
 
@@ -149,3 +143,61 @@
 - **R72:** `-r` without a subcommand refreshes and exits, printing refreshed files
 - **R73:** `-r` combined with a subcommand (e.g. `search`) refreshes first, then runs the subcommand
 - **R74:** Missing files are reported by `-r` but not deleted
+
+## Feature: A Record (Active Trigram Set)
+**Source:** specs/main.md
+
+- **R75:** `A` record in content DB: sparse packed sorted trigram list (3 bytes each) of bottom searchCutoff% trigrams by frequency
+- **R76:** `BuildIndex` cursor-scans all C records, sorts by count, writes A record as packed sorted trigram list
+- **R77:** `AddFile`/`Reindex` write forward and reverse index entries for all of the file's trigrams
+- **R78:** `RemoveFile` reads the file's reverse index entry to find and delete its forward index entries
+
+## Feature: Incremental Index Update
+**Source:** specs/main.md
+
+- **R79:** `AddFile` always writes forward and reverse index entries (index is always maintained)
+- **R80:** `RemoveFile` uses the reverse index entry to delete forward entries, then deletes the reverse entry
+- **R81:** Index is always maintained incrementally — no separate "index exists" check needed
+
+## Feature: Regex Search
+**Source:** specs/main.md
+
+- **R82:** `SearchRegex(pattern string, opts ...SearchOption)` searches using a Go regexp pattern against the full trigram index
+- **R83:** `IndexStatus` struct: `Built bool`
+- **R84:** Trigram query extracted from regex AST as boolean AND/OR expression, using rsc's approach (github.com/google/codesearch/regexp)
+- **R85:** `Search` returns `*SearchResults` containing both results and IndexStatus
+- **R86:** `RefreshStale` returns `([]FileStatus, error)` — no IndexStatus
+- **R87:** AND nodes in the trigram query intersect candidate sets; OR nodes union them
+- **R88:** Regex search queries the full index, not filtered to active set
+- **R89:** CLI `search -regex` flag switches to regex mode
+
+## Feature: Ark Integration
+**Source:** specs/main.md
+
+- **R91:** `Env()` method returns the underlying `*lmdb.Env` for sharing with other libraries in the same process
+- **R92:** `AddFile` returns `(uint64, error)` — the fileid alongside the error
+- **R93:** `Reindex` returns `(uint64, error)` — the fileid alongside the error
+- **R94:** `FileInfoByID(fileid uint64)` returns `(FileInfo, error)` — resolves fileid to filename, chunk offsets, line numbers, strategy, modTime, contentHash
+- **R95:** `FileInfo` is the exported struct type matching the N record JSON fields (including `ChunkTokenCounts`)
+- **R96:** `ScoreFile(query, fpath string, fn ScoreFunc)` returns `([]ScoredChunk, error)` — per-chunk scores using the given scoring function
+- **R97:** Coverage score = matching active trigrams / total active query trigrams, per chunk (default strategy)
+- **R98:** `ScoredChunk` struct: `StartLine int, EndLine int, Score float64`
+- **R99:** `SearchResult` gains `Score float64` field — per-chunk score in the general search path
+- **R100:** CLI `score` subcommand: `microfts score -db <path> <query> <file>...` — output `filepath:startline-endline\tscore`
+
+## Feature: Scoring Strategies
+**Source:** specs/main.md
+
+- **R103:** `ScoreFunc` type: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
+- **R104:** `SearchOption` functional option type for configuring search behavior
+- **R105:** `WithCoverage()` option: score = matching active trigrams / total active query trigrams (default)
+- **R106:** `WithDensity()` option: token-density scoring for long queries — tokenize on spaces, token strength = min trigram count, score = sum strengths / chunk token count
+- **R107:** `WithScoring(fn ScoreFunc)` option: use a custom scoring function
+- **R108:** CLI `search -score coverage|density` flag selects scoring strategy (default: coverage)
+- **R109:** N record stores `chunkTokenCounts` array — token count per chunk, computed during AddFile
+- **R110:** (inferred) AddFile computes trigram counts per chunk (map[uint32]int) instead of presence-only bitsets
+
+## Feature: MaxDBs Option
+**Source:** specs/main.md
+
+- **R101:** `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`

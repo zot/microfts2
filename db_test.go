@@ -1,4 +1,4 @@
-package microfts
+package microfts2
 
 import (
 	"os"
@@ -67,41 +67,40 @@ func TestDBAddAndSearch(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
-	results, err := db.Search("hello")
+	sr, err := db.Search("hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results")
 	}
-	if results[0].Path != fp {
-		t.Errorf("Path = %q, want %q", results[0].Path, fp)
+	if sr.Results[0].Path != fp {
+		t.Errorf("Path = %q, want %q", sr.Results[0].Path, fp)
 	}
 }
 
-func TestDBSearchBuildsIndex(t *testing.T) {
+func TestDBSearchFindsContent(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "searchable content here\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
-	if db.indexExists {
-		t.Error("index should not exist before search")
+
+	// Build index so active set is available
+	if err := db.BuildIndex(100); err != nil {
+		t.Fatal(err)
 	}
 
-	results, err := db.Search("searchable")
+	sr, err := db.Search("searchable")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !db.indexExists {
-		t.Error("index should exist after search")
-	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results")
 	}
 }
@@ -110,19 +109,19 @@ func TestDBRemoveFile(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "removable content\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RemoveFile(fp); err != nil {
 		t.Fatal(err)
 	}
 
-	results, err := db.Search("removable")
+	sr, err := db.Search("removable")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results after remove, got %d", len(results))
+	if len(sr.Results) != 0 {
+		t.Errorf("expected 0 results after remove, got %d", len(sr.Results))
 	}
 }
 
@@ -132,7 +131,7 @@ func TestDBRebuildWithDifferentCutoff(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		content := strings.Repeat("unique"+string(rune('a'+i))+" ", 20) + "\n"
 		fp := writeTestFile(t, dir, "test"+string(rune('0'+i))+".txt", content)
-		if err := db.AddFile(fp, "line"); err != nil {
+		if _, err := db.AddFile(fp, "line"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -140,12 +139,12 @@ func TestDBRebuildWithDifferentCutoff(t *testing.T) {
 	if err := db.BuildIndex(50); err != nil {
 		t.Fatal(err)
 	}
-	active50 := len(db.settings.ActiveTrigrams)
+	active50 := len(db.activeTrigrams)
 
 	if err := db.BuildIndex(30); err != nil {
 		t.Fatal(err)
 	}
-	active30 := len(db.settings.ActiveTrigrams)
+	active30 := len(db.activeTrigrams)
 
 	if active30 >= active50 {
 		t.Errorf("30%% cutoff (%d active) should have fewer trigrams than 50%% (%d)", active30, active50)
@@ -159,30 +158,30 @@ func TestDBReindex(t *testing.T) {
 
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Search before reindex
-	results, err := db.Search("hello")
+	sr, err := db.Search("hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results before reindex")
 	}
 
 	// Reindex with different strategy
-	if err := db.Reindex(fp, "fixed10"); err != nil {
+	if _, err := db.Reindex(fp, "fixed10"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Search after reindex should still find content
-	results, err = db.Search("hello")
+	sr, err = db.Search("hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results after reindex")
 	}
 }
@@ -202,7 +201,7 @@ func TestDBLongFilename(t *testing.T) {
 		t.Fatalf("test path only %d bytes, need > 511", len(fp))
 	}
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -211,15 +210,15 @@ func TestDBLongFilename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := db.Search("nested")
+	sr, err := db.Search("nested")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results for long filename")
 	}
-	if results[0].Path != fp {
-		t.Errorf("Path = %q, want %q", results[0].Path, fp)
+	if sr.Results[0].Path != fp {
+		t.Errorf("Path = %q, want %q", sr.Results[0].Path, fp)
 	}
 }
 
@@ -227,7 +226,7 @@ func TestDBCheckFileFresh(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -244,7 +243,7 @@ func TestDBCheckFileStale(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,7 +266,7 @@ func TestDBCheckFileMissing(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,7 +288,7 @@ func TestDBStaleFiles(t *testing.T) {
 	missing := writeTestFile(t, dir, "missing.txt", "will vanish\n")
 
 	for _, fp := range []string{fresh, stale, missing} {
-		if err := db.AddFile(fp, "line"); err != nil {
+		if _, err := db.AddFile(fp, "line"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -320,24 +319,24 @@ func TestDBStaleFiles(t *testing.T) {
 
 func TestDBRefreshStale(t *testing.T) {
 	db, dir := testDB(t)
-	fp := writeTestFile(t, dir, "test.txt", "original content\n")
+	fp := writeTestFile(t, dir, "test.txt", "original content hello\n")
 
-	if err := db.AddFile(fp, "line"); err != nil {
+	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify searchable
-	results, err := db.Search("original")
+	sr, err := db.Search("original")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
+	if len(sr.Results) == 0 {
 		t.Fatal("search for 'original' returned no results")
 	}
 
-	// Modify file
+	// Modify file — keep "content" so shared trigrams remain searchable
 	time.Sleep(10 * time.Millisecond)
-	os.WriteFile(fp, []byte("updated content\n"), 0644)
+	os.WriteFile(fp, []byte("changed content hello\n"), 0644)
 
 	// Refresh
 	refreshed, err := db.RefreshStale("")
@@ -351,21 +350,22 @@ func TestDBRefreshStale(t *testing.T) {
 		t.Errorf("Status = %q, want refreshed", refreshed[0].Status)
 	}
 
-	// Old content gone, new content searchable
-	results, err = db.Search("original")
+	// Old-unique content gone from index
+	sr, err = db.Search("original")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 0 {
-		t.Errorf("search for 'original' after refresh returned %d results, want 0", len(results))
+	if len(sr.Results) != 0 {
+		t.Errorf("search for 'original' after refresh returned %d results, want 0", len(sr.Results))
 	}
 
-	results, err = db.Search("updated")
+	// Shared content still searchable via incremental index
+	sr, err = db.Search("content hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
-		t.Fatal("search for 'updated' after refresh returned no results")
+	if len(sr.Results) == 0 {
+		t.Fatal("search for 'content hello' after refresh returned no results")
 	}
 }
 
@@ -393,5 +393,302 @@ func TestDBCustomDBNames(t *testing.T) {
 	defer db2.Close()
 	if db2.settings.CharacterSet != "abcdefghijklmnopqrstuvwxyz" {
 		t.Error("settings not preserved with custom DB names")
+	}
+}
+
+func TestDBIndexStatus(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world testing\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No index yet — search should auto-build
+	sr, err := db.Search("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sr.Status.Built {
+		t.Error("IndexStatus.Built should be true after search")
+	}
+}
+
+func TestDBIncrementalIndex(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "a.txt", "alpha bravo charlie\n")
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build index with 100% so all trigrams are active
+	if err := db.BuildIndex(100); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add another file — should get incremental index entries
+	fp2 := writeTestFile(t, dir, "b.txt", "alpha delta echo\n")
+	if _, err := db.AddFile(fp2, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Search for shared content should find both files
+	sr, err := db.Search("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 2 {
+		t.Errorf("search 'alpha' returned %d results, want 2", len(sr.Results))
+	}
+
+	// Remove first file — index entries should be cleaned up
+	if err := db.RemoveFile(fp1); err != nil {
+		t.Fatal(err)
+	}
+	sr, err = db.Search("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Errorf("after remove, search 'alpha' returned %d results, want 1", len(sr.Results))
+	}
+}
+
+func TestDBSearchReturnsIndexStatus(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "searchable content here\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	sr, err := db.Search("searchable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sr.Status.Built {
+		t.Error("SearchResults.Status.Built should be true")
+	}
+}
+
+func TestDBBuildIndexCutoff(t *testing.T) {
+	db, dir := testDB(t)
+	// Add diverse files to create trigram distribution
+	for i := 0; i < 5; i++ {
+		content := strings.Repeat("word"+string(rune('a'+i))+" ", 20) + "\n"
+		fp := writeTestFile(t, dir, "f"+string(rune('0'+i))+".txt", content)
+		if _, err := db.AddFile(fp, "line"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Build with higher cutoff — active set should be larger
+	if err := db.BuildIndex(60); err != nil {
+		t.Fatal(err)
+	}
+	active60 := len(db.activeTrigrams)
+
+	if err := db.BuildIndex(30); err != nil {
+		t.Fatal(err)
+	}
+	active30 := len(db.activeTrigrams)
+
+	if active30 >= active60 {
+		t.Errorf("cutoff 30%% (%d active) should be less than cutoff 60%% (%d)", active30, active60)
+	}
+
+	// Settings should reflect the configured values
+	if db.settings.SearchCutoff != 30 {
+		t.Errorf("SearchCutoff = %d, want 30", db.settings.SearchCutoff)
+	}
+}
+
+func TestDBEnv(t *testing.T) {
+	db, _ := testDB(t)
+	env := db.Env()
+	if env == nil {
+		t.Fatal("Env() returned nil")
+	}
+}
+
+func TestDBAddFileReturnsFileid(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")
+	fp2 := writeTestFile(t, dir, "b.txt", "foo bar\n")
+
+	id1, err := db.AddFile(fp1, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := db.AddFile(fp2, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 == 0 {
+		t.Error("first fileid should be non-zero")
+	}
+	if id2 <= id1 {
+		t.Errorf("second fileid (%d) should be greater than first (%d)", id2, id1)
+	}
+}
+
+func TestDBReindexReturnsFileid(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddStrategy("fixed10", "awk 'BEGIN{for(i=10;i<=600;i+=10)print i}'")
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\n")
+
+	origID, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newID, err := db.Reindex(fp, "fixed10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newID == 0 {
+		t.Error("reindex fileid should be non-zero")
+	}
+	if newID == origID {
+		t.Logf("reindex allocated new fileid %d (orig was %d)", newID, origID)
+	}
+}
+
+func TestDBFileInfoByID(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar\n")
+
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Filename != fp {
+		t.Errorf("Filename = %q, want %q", info.Filename, fp)
+	}
+	if info.ChunkingStrategy != "line" {
+		t.Errorf("ChunkingStrategy = %q, want line", info.ChunkingStrategy)
+	}
+	if len(info.ChunkStartLines) == 0 {
+		t.Error("ChunkStartLines should not be empty")
+	}
+}
+
+func TestDBScoreFile(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
+
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build index so active set is established
+	if err := db.BuildIndex(100); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks, err := db.ScoreFile("hello", fp, ScoreCoverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("ScoreFile returned no chunks")
+	}
+
+	// The chunk containing "hello" should have a positive score
+	foundPositive := false
+	for _, c := range chunks {
+		if c.Score > 0 {
+			foundPositive = true
+		}
+		if c.Score < 0 || c.Score > 1 {
+			t.Errorf("Score %f out of range [0,1]", c.Score)
+		}
+	}
+	if !foundPositive {
+		t.Error("expected at least one chunk with positive score")
+	}
+}
+
+func TestDBSearchRegex(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "a.txt", "hello world\nfoo bar baz\n")
+	fp2 := writeTestFile(t, dir, "b.txt", "goodbye moon\nalpha beta\n")
+
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddFile(fp2, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Regex matching "hel" trigram (present in "hello")
+	sr, err := db.SearchRegex("hel+o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("SearchRegex returned no results")
+	}
+	// Should find the file containing "hello"
+	found := false
+	for _, r := range sr.Results {
+		if r.Path == fp1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %q in results", fp1)
+	}
+}
+
+func TestDBSearchRegexMatchAll(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")
+	fp2 := writeTestFile(t, dir, "b.txt", "foo bar baz\n")
+
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddFile(fp2, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Match-everything pattern should return all chunks
+	sr, err := db.SearchRegex(".*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("SearchRegex(\".*\") returned no results, expected all chunks")
+	}
+}
+
+func TestDBSearchReturnsScore(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\n")
+
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	sr, err := db.Search("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("search returned no results")
+	}
+	// Matching chunk should have a positive score
+	found := false
+	for _, r := range sr.Results {
+		if r.Score > 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected at least one result with positive Score")
 	}
 }

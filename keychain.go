@@ -1,4 +1,4 @@
-package microfts
+package microfts2
 
 // CRC: crc-KeyChain.md
 

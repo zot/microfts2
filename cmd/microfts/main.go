@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"microfts"
+	"microfts2"
 )
 
 // CRC: crc-CLI.md
@@ -56,6 +56,8 @@ func main() {
 		cmdStrategy()
 	case "stale":
 		cmdStale()
+	case "score":
+		cmdScore()
 	case "chunk-lines":
 		cmdChunkLines()
 	case "chunk-lines-overlap":
@@ -83,7 +85,7 @@ func extractRefreshFlag(args []string) (bool, []string) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, build-index, strategy, stale,")
+	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, build-index, strategy, stale, score,")
 	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
@@ -104,8 +106,8 @@ func dbFlags(fs *flag.FlagSet) (dbPath, contentDB, indexDB *string) {
 	return
 }
 
-func openOpts(contentDB, indexDB string) microfts.Options {
-	return microfts.Options{
+func openOpts(contentDB, indexDB string) microfts2.Options {
+	return microfts2.Options{
 		ContentDBName: contentDB,
 		IndexDBName:   indexDB,
 	}
@@ -128,7 +130,7 @@ func cmdInit() {
 
 	aliases := parseAliases(*aliasStr)
 
-	db, err := microfts.Create(*dbPath, microfts.Options{
+	db, err := microfts2.Create(*dbPath, microfts2.Options{
 		CharSet:       *charset,
 		CaseInsensitive: *caseInsensitive,
 		Aliases:       aliases,
@@ -153,7 +155,7 @@ func cmdAdd() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -161,7 +163,7 @@ func cmdAdd() {
 	doRefresh(db)
 
 	for _, fp := range fs.Args() {
-		if err := db.AddFile(fp, *strategy); err != nil {
+		if _, err := db.AddFile(fp, *strategy); err != nil {
 			fatal("add "+fp, err)
 		}
 	}
@@ -170,6 +172,8 @@ func cmdAdd() {
 func cmdSearch() {
 	fs := flag.CommandLine
 	dbPath, contentDB, indexDB := dbFlags(fs)
+	useRegex := fs.Bool("regex", false, "treat query as a Go regexp pattern")
+	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" || fs.NArg() == 0 {
@@ -177,20 +181,36 @@ func cmdSearch() {
 		os.Exit(1)
 	}
 
+	var opt microfts2.SearchOption
+	switch *scoreMode {
+	case "coverage":
+		opt = microfts2.WithCoverage()
+	case "density":
+		opt = microfts2.WithDensity()
+	default:
+		fmt.Fprintf(os.Stderr, "search: unknown score mode: %s\n", *scoreMode)
+		os.Exit(1)
+	}
+
 	query := strings.Join(fs.Args(), " ")
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
 	defer db.Close()
 	doRefresh(db)
 
-	results, err := db.Search(query)
+	var sr *microfts2.SearchResults
+	if *useRegex {
+		sr, err = db.SearchRegex(query, opt)
+	} else {
+		sr, err = db.Search(query, opt)
+	}
 	if err != nil {
 		fatal("search", err)
 	}
-	for _, r := range results {
+	for _, r := range sr.Results {
 		fmt.Printf("%s:%d-%d\n", r.Path, r.StartLine, r.EndLine)
 	}
 }
@@ -205,7 +225,7 @@ func cmdDelete() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -230,7 +250,7 @@ func cmdReindex() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -238,7 +258,7 @@ func cmdReindex() {
 	doRefresh(db)
 
 	for _, fp := range fs.Args() {
-		if err := db.Reindex(fp, *strategy); err != nil {
+		if _, err := db.Reindex(fp, *strategy); err != nil {
 			fatal("reindex "+fp, err)
 		}
 	}
@@ -247,7 +267,7 @@ func cmdReindex() {
 func cmdBuildIndex() {
 	fs := flag.CommandLine
 	dbPath, contentDB, indexDB := dbFlags(fs)
-	cutoff := fs.Int("cutoff", 50, "active trigram frequency percentile cutoff")
+	cutoff := fs.Int("cutoff", 50, "search cutoff percentile")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" {
@@ -255,7 +275,7 @@ func cmdBuildIndex() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -265,7 +285,7 @@ func cmdBuildIndex() {
 	if err := db.BuildIndex(*cutoff); err != nil {
 		fatal("build-index", err)
 	}
-	fmt.Printf("index built (%d active trigrams)\n", len(db.Settings().ActiveTrigrams))
+	fmt.Println("index built")
 }
 
 func cmdRefreshOnly() {
@@ -279,7 +299,7 @@ func cmdRefreshOnly() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -289,12 +309,12 @@ func cmdRefreshOnly() {
 	if err != nil {
 		fatal("refresh", err)
 	}
-	for _, fs := range refreshed {
-		fmt.Printf("%s\t%s\n", fs.Status, fs.Path)
+	for _, s := range refreshed {
+		fmt.Printf("%s\t%s\n", s.Status, s.Path)
 	}
 }
 
-func doRefresh(db *microfts.DB) {
+func doRefresh(db *microfts2.DB) {
 	if !globalRefresh {
 		return
 	}
@@ -302,8 +322,8 @@ func doRefresh(db *microfts.DB) {
 	if err != nil {
 		fatal("refresh", err)
 	}
-	for _, fs := range refreshed {
-		fmt.Fprintf(os.Stderr, "%s\t%s\n", fs.Status, fs.Path)
+	for _, s := range refreshed {
+		fmt.Fprintf(os.Stderr, "%s\t%s\n", s.Status, s.Path)
 	}
 }
 
@@ -317,7 +337,7 @@ func cmdStale() {
 		os.Exit(1)
 	}
 
-	db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -330,6 +350,37 @@ func cmdStale() {
 	for _, s := range statuses {
 		if s.Status != "fresh" {
 			fmt.Printf("%s\t%s\n", s.Status, s.Path)
+		}
+	}
+}
+
+func cmdScore() {
+	fs := flag.CommandLine
+	dbPath, contentDB, indexDB := dbFlags(fs)
+	fs.Parse(os.Args[1:])
+
+	if *dbPath == "" || fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "score: -db, query, and at least one file required")
+		os.Exit(1)
+	}
+
+	query := fs.Arg(0)
+	files := fs.Args()[1:]
+
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	if err != nil {
+		fatal("open", err)
+	}
+	defer db.Close()
+	doRefresh(db)
+
+	for _, fp := range files {
+		chunks, err := db.ScoreFile(query, fp, microfts2.ScoreCoverage)
+		if err != nil {
+			fatal("score "+fp, err)
+		}
+		for _, c := range chunks {
+			fmt.Printf("%s:%d-%d\t%.4f\n", fp, c.StartLine, c.EndLine, c.Score)
 		}
 	}
 }
@@ -354,7 +405,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy add: -db, -name, -cmd required")
 			os.Exit(1)
 		}
-		db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 		if err != nil {
 			fatal("open", err)
 		}
@@ -370,7 +421,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy remove: -db, -name required")
 			os.Exit(1)
 		}
-		db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 		if err != nil {
 			fatal("open", err)
 		}
@@ -385,7 +436,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy list: -db required")
 			os.Exit(1)
 		}
-		db, err := microfts.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 		if err != nil {
 			fatal("open", err)
 		}

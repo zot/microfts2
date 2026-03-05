@@ -1,4 +1,4 @@
-package microfts
+package microfts2
 
 import "testing"
 
@@ -104,17 +104,47 @@ func TestCharSetTrigramRoundtrip(t *testing.T) {
 	}
 }
 
+func TestCharSetEncodeTrigram(t *testing.T) {
+	cs, _ := NewCharSet("abcdefghijklmnopqrstuvwxyz", false, nil)
+
+	// Valid 3-char trigram
+	tri, ok := cs.EncodeTrigram("abc")
+	if !ok {
+		t.Fatal("EncodeTrigram(\"abc\") returned false")
+	}
+	want := TrigramValue(cs.Encode('a'), cs.Encode('b'), cs.Encode('c'))
+	if tri != want {
+		t.Errorf("EncodeTrigram(\"abc\") = %d, want %d", tri, want)
+	}
+
+	// All-space trigram (unmapped chars)
+	_, ok = cs.EncodeTrigram("!!!")
+	if ok {
+		t.Error("EncodeTrigram(\"!!!\") should return false for all-space")
+	}
+
+	// Wrong length
+	_, ok = cs.EncodeTrigram("ab")
+	if ok {
+		t.Error("EncodeTrigram(\"ab\") should return false for 2-char input")
+	}
+	_, ok = cs.EncodeTrigram("abcd")
+	if ok {
+		t.Error("EncodeTrigram(\"abcd\") should return false for 4-char input")
+	}
+}
+
 func TestCharSetValidation(t *testing.T) {
 	_, err := NewCharSet("a b", false, nil)
 	if err == nil {
 		t.Error("expected error for charset with space")
 	}
 	long := ""
-	for i := 0; i < 64; i++ {
-		long += string(rune('a' + i))
+	for i := 0; i < 256; i++ {
+		long += string(rune('!' + i))
 	}
 	_, err = NewCharSet(long, false, nil)
 	if err == nil {
-		t.Error("expected error for charset > 63 characters")
+		t.Error("expected error for charset > 255 characters")
 	}
 }

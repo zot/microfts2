@@ -1,12 +1,12 @@
-package microfts
+package microfts2
 
 import "math/bits"
 
 // CRC: crc-Bitset.md
 
-const BitsetSize = 32768 // 2^15 bytes = 2^18 bits
+const BitsetSize = 2097152 // 2^21 bytes = 2^24 bits
 
-// Bitset is a fixed-size bitset for 262,144 trigrams (2^18).
+// Bitset is a fixed-size bitset for 16,777,216 trigrams (2^24).
 type Bitset [BitsetSize]byte
 
 // Set sets the bit for the given trigram.

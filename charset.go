@@ -1,4 +1,4 @@
-package microfts
+package microfts2
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 
 // CRC: crc-CharSet.md
 
-// CharSet maps characters to 6-bit values and extracts trigrams from text.
+// CharSet maps characters to 8-bit values and extracts trigrams from text.
 type CharSet struct {
 	chars           string
 	lookup          [256]uint8   // ASCII fast path
@@ -22,8 +22,8 @@ type CharSet struct {
 // (e.g. {'\n': '^'} for line-start matching).
 func NewCharSet(chars string, caseInsensitive bool, aliases map[rune]rune) (*CharSet, error) {
 	runes := []rune(chars)
-	if len(runes) > 63 {
-		return nil, fmt.Errorf("character set too large: %d (max 63)", len(runes))
+	if len(runes) > 255 {
+		return nil, fmt.Errorf("character set too large: %d (max 255)", len(runes))
 	}
 	if strings.ContainsRune(chars, ' ') {
 		return nil, fmt.Errorf("character set must not contain spaces")
@@ -53,7 +53,7 @@ func (cs *CharSet) setRune(ch rune, v uint8) {
 	}
 }
 
-// Encode maps a rune to its 6-bit value. Applies aliases first.
+// Encode maps a rune to its 8-bit value. Applies aliases first.
 // Unmapped runes return 0 (space).
 func (cs *CharSet) Encode(ch rune) uint8 {
 	if cs.aliases != nil {
@@ -70,16 +70,33 @@ func (cs *CharSet) Encode(ch rune) uint8 {
 	return cs.runeLookup[ch]
 }
 
-// TrigramValue computes the 18-bit trigram from three 6-bit values.
+// TrigramValue computes the 24-bit trigram from three 8-bit values.
 func TrigramValue(a, b, c uint8) uint32 {
-	return uint32(a)<<12 | uint32(b)<<6 | uint32(c)
+	return uint32(a)<<16 | uint32(b)<<8 | uint32(c)
+}
+
+// EncodeTrigram converts a 3-character string trigram to our 24-bit encoding.
+// Returns the encoded trigram and true, or 0 and false if the trigram would be
+// all-space (not useful for index filtering).
+func (cs *CharSet) EncodeTrigram(s string) (uint32, bool) {
+	runes := []rune(s)
+	if len(runes) != 3 {
+		return 0, false
+	}
+	a := cs.Encode(runes[0])
+	b := cs.Encode(runes[1])
+	c := cs.Encode(runes[2])
+	if a == 0 && b == 0 && c == 0 {
+		return 0, false
+	}
+	return TrigramValue(a, b, c), true
 }
 
 // TrigramChars decodes a trigram value to its three characters.
 func (cs *CharSet) TrigramChars(trigram uint32) (rune, rune, rune) {
-	a := uint8((trigram >> 12) & 0x3F)
-	b := uint8((trigram >> 6) & 0x3F)
-	c := uint8(trigram & 0x3F)
+	a := uint8((trigram >> 16) & 0xFF)
+	b := uint8((trigram >> 8) & 0xFF)
+	c := uint8(trigram & 0xFF)
 	return cs.valRune(a), cs.valRune(b), cs.valRune(c)
 }
 
@@ -94,9 +111,8 @@ func (cs *CharSet) valRune(v uint8) rune {
 	return ' '
 }
 
-// Trigrams extracts all trigrams from text.
-// Unmapped characters become space; consecutive spaces collapse.
-func (cs *CharSet) Trigrams(text string) []uint32 {
+// encode maps text to a sequence of encoded values with space collapsing.
+func (cs *CharSet) encode(text string) []uint8 {
 	encoded := make([]uint8, 0, len(text))
 	lastSpace := true
 	for _, ch := range text {
@@ -111,6 +127,13 @@ func (cs *CharSet) Trigrams(text string) []uint32 {
 		encoded = append(encoded, v)
 		lastSpace = false
 	}
+	return encoded
+}
+
+// Trigrams extracts all trigrams from text.
+// Unmapped characters become space; consecutive spaces collapse.
+func (cs *CharSet) Trigrams(text string) []uint32 {
+	encoded := cs.encode(text)
 	if len(encoded) < 3 {
 		return nil
 	}
@@ -119,4 +142,17 @@ func (cs *CharSet) Trigrams(text string) []uint32 {
 		result = append(result, TrigramValue(encoded[i], encoded[i+1], encoded[i+2]))
 	}
 	return result
+}
+
+// TrigramCounts extracts trigrams with occurrence counts.
+func (cs *CharSet) TrigramCounts(text string) map[uint32]int {
+	encoded := cs.encode(text)
+	if len(encoded) < 3 {
+		return nil
+	}
+	counts := make(map[uint32]int)
+	for i := 0; i <= len(encoded)-3; i++ {
+		counts[TrigramValue(encoded[i], encoded[i+1], encoded[i+2])]++
+	}
+	return counts
 }
