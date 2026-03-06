@@ -6,31 +6,40 @@
 - **R1:** Go CLI command, also usable as a Go library
 - **R2:** LMDB-backed storage using named subdatabases
 
-## Feature: Character Set and Trigrams
+## Feature: Raw Byte Trigrams
 **Source:** specs/main.md
 
-- **R3:** Configurable character set — up to 255 characters plus space, set at initialization, immutable after
-- **R4:** No spaces allowed in the character set string
-- **R5:** Unmapped characters treated as space; runs of spaces collapsed
-- **R6:** 8 bits per character, 24 bits per trigram, 16M possible trigrams
+- **R3:** Raw byte trigrams — every byte is its own value, no character set mapping
+- **R4:** Whitespace bytes (space, tab, newline, carriage return) are word boundaries; runs collapse
+- **R5:** All non-whitespace bytes are indexed; UTF-8 multibyte characters produce cross-boundary byte trigrams
+- **R6:** 8 bits per byte, 24 bits per trigram, 16M possible trigrams
 - **R7:** A record: sparse packed sorted trigram list (3 bytes per trigram, only active trigrams stored)
 - **R8:** C records: sparse individual LMDB records `C[trigram:3] → count:8`, one per non-zero trigram
-- **R9:** Case-insensitive mode (recommended for punctuation character sets)
+- **R9:** Case-insensitive mode: `bytes.ToLower()` on input before trigram extraction
+- **R111:** AddFile rejects non-UTF-8 content with an error (utf8.Valid check before indexing)
+- **R112:** Character-internal byte trigrams are skipped: a 3-byte window entirely within one multibyte character is not emitted
+- **R113:** 3-byte characters (CJK): 1 internal trigram skipped per character; 4-byte characters (emoji): 2 internal trigrams skipped
+- **R114:** 2-byte and ASCII characters produce no internal trigrams; behavior unchanged for these
 
-## Feature: Character Aliases
+## Feature: Byte Aliases
 **Source:** specs/main.md
 
-- **R45:** Character aliases map input characters to charset characters before encoding
-- **R46:** Aliases stored in I record as characterAliases object
-- **R47:** Applied during Encode before charset lookup (e.g. newline → `^` for line-start matching)
+- **R45:** Byte aliases map input bytes to replacement bytes before trigram extraction
+- **R46:** Aliases stored in I record as aliases object
+- **R47:** Applied before trigram extraction (e.g. newline → `^` for line-start matching)
+- **R115:** Both source and target bytes in aliases must be ASCII (< 0x80) — aliasing UTF-8 continuation or leading bytes would corrupt multibyte characters and break character-internal trigram skipping
 
 ## Feature: Chunking Strategies
 **Source:** specs/main.md
 
-- **R10:** Chunking strategies are configurable and added/removed dynamically
+- **R10:** Chunking strategies are configurable and added/removed dynamically (external commands or Go functions)
 - **R11:** Each strategy is a name mapped to an external command: `[cmd] [filename]` returns a list of file offsets
 - **R12:** Each file tracks which chunking strategy was used to index it
 - **R13:** Files can be reindexed with a different strategy to allow migration
+- **R116:** `AddStrategyFunc(name, fn ChunkFunc)` registers a Go function as a chunking strategy; `ChunkFunc` type: `func(path string, content []byte) ([]int64, error)`
+- **R117:** Func strategies are in-memory only — not persisted to I record cmd field (re-register on Open); I record stores name with empty cmd
+- **R118:** When AddFile/Reindex uses a func strategy, call the function directly instead of exec
+- **R119:** Built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap) register as func strategies
 
 ## Feature: Two-Tree Storage
 **Source:** specs/main.md
@@ -42,7 +51,7 @@
 **Source:** specs/main.md
 
 - **R16:** `C` records: sparse `C[trigram:3] → count:8`, only non-zero trigrams stored
-- **R17:** `I` record: JSON database settings (chunking strategies, case-insensitive flag, character set, active trigrams)
+- **R17:** `I` record: JSON database settings (chunking strategies, case-insensitive flag, aliases, search cutoff)
 - **R19:** `N` records: `[fileid:8]` → JSON with chunk offsets, token counts, and chunking strategy name
 - **R20:** `F` records: filename → fileid mapping using key chains for names exceeding 511 bytes
 
@@ -80,9 +89,9 @@
 **Source:** specs/main.md
 
 - **R30:** If the index DB does not exist, compute it before searching
-- **R31:** Literal search: compute trigrams for search string, filter to active set (bottom searchCutoff%)
-- **R32:** Literal search: intersect file+chunk sets for each active query trigram
-- **R33:** Results sorted by filename then chunk number
+- **R31:** Literal search: compute trigrams for search string, skip character-internal trigrams, filter to active set (bottom searchCutoff%)
+- **R32:** Literal search: for each active query trigram, scan index by trigram prefix (ignoring count field) to collect candidate (fileid, chunknum) pairs; intersect candidate sets across all active query trigrams; collect per-trigram counts from index keys for surviving candidates
+- **R33:** Results scored using the selected scoring function (coverage or density), sorted by score descending
 - **R34:** CLI output: one result per line, `filepath:startline-endline`
 - **R35:** Library returns struct slices with file path, start line, end line
 
@@ -96,7 +105,7 @@
 
 - **R37:** CLI `delete` command removes files from the database
 - **R38:** CLI `reindex` command re-chunks files with a different strategy
-- **R39:** CLI `init` command creates a new database with charset, case-insensitive, and alias options
+- **R39:** CLI `init` command creates a new database with case-insensitive and alias options
 - **R48:** CLI `build-index` command explicitly builds/rebuilds the index with configurable cutoff
 - **R49:** CLI `strategy` subcommands: `add`, `remove`, `list` for managing chunking strategies
 - **R50:** All CLI commands require `-db` flag; shared optional flags `-content-db`, `-index-db`
@@ -109,7 +118,7 @@
 - **R53:** `Search` accepts variadic `SearchOption` and returns `*SearchResults` with Results slice and IndexStatus
 - **R54:** `BuildIndex` accepts cutoff percentile parameter
 - **R55:** `AddStrategy`/`RemoveStrategy` for runtime strategy management
-- **R56:** `Options` struct configures creation (CharSet, CaseInsensitive, Aliases) and opening (ContentDBName, IndexDBName)
+- **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (ContentDBName, IndexDBName)
 
 ## Feature: Built-in Chunking Strategies
 **Source:** specs/main.md
@@ -169,6 +178,7 @@
 - **R86:** `RefreshStale` returns `([]FileStatus, error)` — no IndexStatus
 - **R87:** AND nodes in the trigram query intersect candidate sets; OR nodes union them
 - **R88:** Regex search queries the full index, not filtered to active set
+- **R127:** Regex search always verifies: read each candidate chunk from disk, run compiled regex against chunk text, discard non-matches (trigram query is a superset filter)
 - **R89:** CLI `search -regex` flag switches to regex mode
 
 ## Feature: Ark Integration
@@ -183,7 +193,10 @@
 - **R97:** Coverage score = matching active trigrams / total active query trigrams, per chunk (default strategy)
 - **R98:** `ScoredChunk` struct: `StartLine int, EndLine int, Score float64`
 - **R99:** `SearchResult` gains `Score float64` field — per-chunk score in the general search path
-- **R100:** CLI `score` subcommand: `microfts score -db <path> <query> <file>...` — output `filepath:startline-endline\tscore`
+- **R100:** CLI `score` subcommand: `microfts score -db <path> [-score coverage|density] <query> <file>...` — output `filepath:startline-endline\tscore`
+- **R120:** `AddFileWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
+- **R121:** `ReindexWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
+- **R122:** Original `AddFile`/`Reindex` signatures unchanged (no breaking change); WithContent variants avoid a redundant file read in ark's hot path
 
 ## Feature: Scoring Strategies
 **Source:** specs/main.md
@@ -201,3 +214,15 @@
 **Source:** specs/main.md
 
 - **R101:** `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
+
+## Feature: C Record BigEndian
+**Source:** specs/main.md
+
+- **R123:** C record values (`count:8`) use big-endian encoding, consistent with all other integer fields in LMDB keys and values
+
+## Feature: WithVerify Post-filter
+**Source:** specs/main.md
+
+- **R124:** `WithVerify()` search option: after trigram intersection, read chunk text from disk and verify each query term appears as a case-insensitive substring; discard chunks that fail
+- **R125:** Query tokenization for verify: split on spaces; double-quoted strings are a single term with quotes stripped (e.g. `"hello world" foo` → terms `hello world`, `foo`)
+- **R126:** CLI `-verify` flag on search command passes `WithVerify()` to the library

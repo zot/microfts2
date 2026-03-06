@@ -1,18 +1,18 @@
 # Sequence: Search
-**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108
+**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127
 
-Participants: DB, CharSet
+Participants: DB, Trigrams
 
 ## Literal Search (Search)
 
 ```
-DB                                        CharSet
+DB                                        Trigrams
  |                                          |
  |  resolve scoring function from opts      |
  |  (default: coverage)                     |
  |                                          |
  |-- Trigrams(query) ---------------------> |
- | <-- queryTrigrams[] -------------------- |
+ | <-- queryTrigrams[] (char-internal skip) |
  |                                          |
  |  read A record (packed sorted trigrams)  |
  |  build map for O(1) active lookup       |
@@ -35,7 +35,18 @@ DB                                        CharSet
  |    score = scoreFunc(queryTrigrams,      |
  |      chunkCounts, chunkTokenCount)       |
  |                                          |
- |  sort by filename, then chunknum         |
+ |  if WithVerify:                          |
+ |    tokenize query into terms             |
+ |    (space-split, "quoted" = single term) |
+ |    for each result:                      |
+ |      read chunk text from disk           |
+ |        (FileInfo.ChunkOffsets + file)    |
+ |      lowercase chunk text                |
+ |      for each term:                      |
+ |        if term not found as substring:   |
+ |          discard result                  |
+ |                                          |
+ |  sort by score descending                |
  |  return *SearchResults{Results, Status}  |
 ```
 
@@ -64,7 +75,13 @@ DB
  |    score = scoreFunc(queryTrigrams,
  |      chunkCounts, chunkTokenCount)
  |
- |  sort by filename, then chunknum
+ |  verify (always):                       |
+ |    compile pattern with regexp.Compile   |
+ |    for each result:                      |
+ |      read chunk text from disk           |
+ |      if !regex.Match(chunk): discard     |
+ |
+ |  sort by score descending
  |  return *SearchResults{Results, Status}
 ```
 

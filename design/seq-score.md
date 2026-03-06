@@ -1,10 +1,10 @@
 # Sequence: Score File
 **Requirements:** R96, R97, R98, R103
 
-Participants: DB, CharSet
+Participants: DB, Trigrams
 
 ```
-DB                                        CharSet
+DB                                        Trigrams
  |                                          |
  |  look up fileid from F records           |
  |  read FileInfo from N record             |

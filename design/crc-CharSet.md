@@ -1,21 +1,19 @@
-# CharSet
-**Requirements:** R3, R4, R5, R6, R9, R31, R45, R46, R47, R110
+# Trigrams
+**Requirements:** R3, R4, R5, R6, R9, R31, R45, R46, R47, R110, R112, R113, R114, R115
 
-Maps characters to 8-bit values. Extracts trigrams from text. Unmapped characters become space (0); consecutive spaces collapse to one.
+Raw byte trigram extraction. Every byte is its own value — no character set mapping. Whitespace bytes are boundaries; runs collapse. Case insensitivity via bytes.ToLower(). Byte aliases applied before extraction. Character-internal byte trigrams (windows entirely within a multibyte UTF-8 character) are skipped.
 
 ## Knows
-- chars: the character set string (up to 255 chars, no spaces)
-- lookup: map[rune]uint8 — character to 8-bit value (1-255); absent = 0 = space
-- aliases: map[rune]rune — input character substitutions applied before lookup
-- caseInsensitive: fold case before lookup
+- aliases: map[byte]byte — input byte substitutions applied before extraction
+- caseInsensitive: fold case via bytes.ToLower before extraction
 
 ## Does
-- New(chars, caseInsensitive, aliases): validate charset, build lookup table
-- Encode(ch): apply alias, then map rune to 8-bit value (0 if unmapped)
-- Trigrams(text): slide 3-char window over encoded text, collapse space runs, return []uint32
-- TrigramCounts(text): like Trigrams but returns map[uint32]int — count of each trigram occurrence
-- TrigramValue(a, b, c): compute (a<<16 | b<<8 | c), 24-bit result
-- TrigramChars(trigram): decode trigram to 3 characters (for debugging)
+- New(caseInsensitive, aliases): create trigram extractor
+- ValidateAliases(aliases): returns error if any source or target byte ≥ 0x80
+- ExtractTrigrams(data []byte): slide 3-byte window, skip whitespace and character-internal windows, return []uint32
+- TrigramCounts(data []byte): like ExtractTrigrams but returns map[uint32]int — count per trigram
+- TrigramValue(a, b, c byte): compute (a<<16 | b<<8 | c), 24-bit result
+- EncodeTrigram(s string): convert 3-byte string to 24-bit trigram (for regex integration)
 
 ## Collaborators
 - none (leaf type)

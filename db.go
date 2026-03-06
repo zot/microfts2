@@ -1,6 +1,7 @@
 package microfts2
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/binary"
@@ -8,7 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
+	"strings"
+	"unicode/utf8"
 
 	"regexp/syntax"
 
@@ -34,22 +38,26 @@ const (
 const prefixR = 'R'
 
 // DB is the main database handle.
+// ChunkFunc is a Go function that computes chunk boundaries for a file.
+// It receives the file path and content, and returns byte offsets.
+type ChunkFunc func(path string, content []byte) ([]int64, error)
+
 type DB struct {
 	env            *lmdb.Env
 	contentDBI     lmdb.DBI
 	indexDBI        lmdb.DBI
 	activeTrigrams []uint32 // sorted, loaded from A record
 	settings       Settings
-	charSet        *CharSet
+	trigrams       *Trigrams
 	contentName    string
 	indexName      string
+	funcStrategies map[string]ChunkFunc // in-memory Go function strategies
 }
 
 // Settings is stored as JSON in the I record.
 type Settings struct {
-	CharacterSet       string            `json:"characterSet"`
 	CaseInsensitive    bool              `json:"caseInsensitive"`
-	CharacterAliases   map[string]string `json:"characterAliases,omitempty"`
+	Aliases            map[string]string `json:"aliases,omitempty"`
 	ChunkingStrategies map[string]string `json:"chunkingStrategies"`
 	SearchCutoff       int               `json:"searchCutoff"`
 	NextFileID         uint64            `json:"nextFileID"`
@@ -104,6 +112,9 @@ type SearchOption func(*searchConfig)
 
 type searchConfig struct {
 	scoreFunc ScoreFunc
+	onlyIDs   map[uint64]struct{} // if non-nil, only include these file IDs
+	exceptIDs map[uint64]struct{} // if non-nil, exclude these file IDs
+	verify    bool                // post-filter: verify query terms in chunk text
 }
 
 // WithCoverage uses coverage scoring (default): matching / total active query trigrams.
@@ -119,6 +130,24 @@ func WithDensity() SearchOption {
 // WithScoring uses a custom scoring function.
 func WithScoring(fn ScoreFunc) SearchOption {
 	return func(c *searchConfig) { c.scoreFunc = fn }
+}
+
+// WithOnly restricts search to chunks from the given file IDs.
+func WithOnly(ids map[uint64]struct{}) SearchOption {
+	return func(c *searchConfig) { c.onlyIDs = ids }
+}
+
+// WithExcept excludes chunks from the given file IDs.
+func WithExcept(ids map[uint64]struct{}) SearchOption {
+	return func(c *searchConfig) { c.exceptIDs = ids }
+}
+
+// WithVerify enables post-filter verification: after trigram intersection,
+// read chunk text from disk and verify each query term appears as a
+// case-insensitive substring. Eliminates trigram false positives.
+// R124, R125
+func WithVerify() SearchOption {
+	return func(c *searchConfig) { c.verify = true }
 }
 
 func defaultSearchConfig() searchConfig {
@@ -177,13 +206,12 @@ type FileStatus struct {
 
 // Options configures database creation and opening.
 type Options struct {
-	CharSet       string
 	CaseInsensitive bool
-	Aliases       map[rune]rune
-	ContentDBName string
-	IndexDBName   string
-	MaxDBs        int   // LMDB max named databases, default 2
-	MapSize       int64 // bytes, default 1GB
+	Aliases         map[byte]byte
+	ContentDBName   string
+	IndexDBName     string
+	MaxDBs          int   // LMDB max named databases, default 2
+	MapSize         int64 // bytes, default 1GB
 }
 
 func (o *Options) contentDB() string {
@@ -345,12 +373,12 @@ func filterActiveQueryTrigrams(activeSet map[uint32]bool, queryTrigrams []uint32
 	return active
 }
 
-// countTokens counts space-separated tokens in text.
-func countTokens(text string) int {
+// countTokens counts space-separated tokens in data.
+func countTokens(data []byte) int {
 	n := 0
 	inWord := false
-	for _, ch := range text {
-		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+	for _, b := range data {
+		if isWhitespace(b) {
 			inWord = false
 		} else if !inWord {
 			inWord = true
@@ -364,6 +392,10 @@ func countTokens(text string) int {
 
 // Seq: seq-init.md
 func Create(path string, opts Options) (*DB, error) {
+	// CRC: crc-DB.md | R115
+	if err := ValidateAliases(opts.Aliases); err != nil {
+		return nil, fmt.Errorf("create: %w", err)
+	}
 	env, err := lmdb.NewEnv()
 	if err != nil {
 		return nil, fmt.Errorf("lmdb NewEnv: %w", err)
@@ -385,27 +417,21 @@ func Create(path string, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("lmdb Open %s: %w", path, err)
 	}
 
-	charSet, err := NewCharSet(opts.CharSet, opts.CaseInsensitive, opts.Aliases)
-	if err != nil {
-		env.Close()
-		return nil, err
-	}
-
 	settings := Settings{
-		CharacterSet:       opts.CharSet,
 		CaseInsensitive:    opts.CaseInsensitive,
-		CharacterAliases:   aliasesToJSON(opts.Aliases),
+		Aliases:            byteAliasesToJSON(opts.Aliases),
 		ChunkingStrategies: make(map[string]string),
 		SearchCutoff:       50,
 		NextFileID:         1,
 	}
 
 	db := &DB{
-		env:         env,
-		charSet:     charSet,
-		contentName: opts.contentDB(),
-		indexName:   opts.indexDB(),
-		settings:    settings,
+		env:            env,
+		trigrams:       NewTrigrams(opts.CaseInsensitive, opts.Aliases),
+		contentName:    opts.contentDB(),
+		indexName:      opts.indexDB(),
+		settings:       settings,
+		funcStrategies: make(map[string]ChunkFunc),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
@@ -453,9 +479,10 @@ func Open(path string, opts Options) (*DB, error) {
 	}
 
 	db := &DB{
-		env:         env,
-		contentName: opts.contentDB(),
-		indexName:   opts.indexDB(),
+		env:            env,
+		contentName:    opts.contentDB(),
+		indexName:      opts.indexDB(),
+		funcStrategies: make(map[string]ChunkFunc),
 	}
 
 	// Open content DB and load settings in a write txn (ensures DBI handle is committed)
@@ -495,11 +522,7 @@ func Open(path string, opts Options) (*DB, error) {
 		return nil, err
 	}
 
-	db.charSet, err = NewCharSet(db.settings.CharacterSet, db.settings.CaseInsensitive, aliasesFromJSON(db.settings.CharacterAliases))
-	if err != nil {
-		env.Close()
-		return nil, err
-	}
+	db.trigrams = NewTrigrams(db.settings.CaseInsensitive, byteAliasesFromJSON(db.settings.Aliases))
 
 	return db, nil
 }
@@ -526,24 +549,38 @@ func (db *DB) Env() *lmdb.Env {
 
 // Seq: seq-add.md
 func (db *DB) AddFile(fpath, strategy string) (uint64, error) {
-	cmd, ok := db.settings.ChunkingStrategies[strategy]
-	if !ok {
-		return 0, fmt.Errorf("unknown chunking strategy: %s", strategy)
-	}
+	fileid, _, err := db.addFileCore(fpath, strategy)
+	return fileid, err
+}
 
-	offsets, err := RunChunker(cmd, fpath)
-	if err != nil {
-		return 0, fmt.Errorf("chunker: %w", err)
+// CRC: crc-DB.md | R120
+func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error) {
+	return db.addFileCore(fpath, strategy)
+}
+
+// Seq: seq-add.md | R118
+func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
+	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
+		return 0, nil, fmt.Errorf("unknown chunking strategy: %s", strategy)
 	}
 
 	modTime, err := fileModTime(fpath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	data, err := os.ReadFile(fpath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
+	}
+
+	if !utf8.Valid(data) {
+		return 0, nil, fmt.Errorf("file contains invalid UTF-8: %s", fpath)
+	}
+
+	offsets, err := db.runStrategy(strategy, fpath, data)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	hash := contentHash(data)
@@ -556,7 +593,19 @@ func (db *DB) AddFile(fpath, strategy string) (uint64, error) {
 		fileid, txnErr = db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines, modTime, hash)
 		return txnErr
 	})
-	return fileid, err
+	return fileid, data, err
+}
+
+// runStrategy dispatches to func strategy or external chunker.
+func (db *DB) runStrategy(strategy, fpath string, data []byte) ([]int64, error) {
+	if fn, ok := db.funcStrategies[strategy]; ok {
+		return fn(fpath, data)
+	}
+	cmd := db.settings.ChunkingStrategies[strategy]
+	if cmd == "" {
+		return nil, fmt.Errorf("func strategy %q not registered (re-register with AddStrategyFunc after Open)", strategy)
+	}
+	return RunChunker(cmd, fpath)
 }
 
 func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, data []byte, boundaries []int64, startLines, endLines []int, modTime int64, hash string) (uint64, error) {
@@ -586,11 +635,11 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, data []byte, b
 	for i := 0; i < len(boundaries)-1; i++ {
 		start := boundaries[i]
 		end := boundaries[i+1]
-		chunkText := string(data[start:end])
+		chunkData := data[start:end]
 		chunknum := uint64(i)
 
-		triCounts := db.charSet.TrigramCounts(chunkText)
-		tokenCounts[i] = countTokens(chunkText)
+		triCounts := db.trigrams.TrigramCounts(chunkData)
+		tokenCounts[i] = countTokens(chunkData)
 
 		var entries []chunkTrigramEntry
 		for tri, cnt := range triCounts {
@@ -690,22 +739,35 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 // --- Reindex ---
 
 func (db *DB) Reindex(fpath, strategy string) (uint64, error) {
-	cmd, ok := db.settings.ChunkingStrategies[strategy]
-	if !ok {
-		return 0, fmt.Errorf("unknown chunking strategy: %s", strategy)
+	fileid, _, err := db.reindexCore(fpath, strategy)
+	return fileid, err
+}
+
+// CRC: crc-DB.md | R121
+func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error) {
+	return db.reindexCore(fpath, strategy)
+}
+
+func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
+	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
+		return 0, nil, fmt.Errorf("unknown chunking strategy: %s", strategy)
 	}
-	offsets, err := RunChunker(cmd, fpath)
-	if err != nil {
-		return 0, fmt.Errorf("chunker: %w", err)
-	}
+
 	modTime, err := fileModTime(fpath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+
 	data, err := os.ReadFile(fpath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
+
+	offsets, err := db.runStrategy(strategy, fpath, data)
+	if err != nil {
+		return 0, nil, err
+	}
+
 	hash := contentHash(data)
 	boundaries := normalizeBoundaries(offsets, int64(len(data)))
 	startLines, endLines := computeChunkLines(data, boundaries)
@@ -719,7 +781,7 @@ func (db *DB) Reindex(fpath, strategy string) (uint64, error) {
 		fileid, txnErr = db.addFileInTxn(txn, fpath, strategy, data, boundaries, startLines, endLines, modTime, hash)
 		return txnErr
 	})
-	return fileid, err
+	return fileid, data, err
 }
 
 // --- Search ---
@@ -733,7 +795,7 @@ type chunkCandidate struct {
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error) {
 	cfg := applySearchOpts(opts)
 
-	queryTrigrams := db.charSet.Trigrams(query)
+	queryTrigrams := db.trigrams.ExtractTrigrams([]byte(query))
 	if len(queryTrigrams) == 0 {
 		return &SearchResults{Status: IndexStatus{Built: true}}, nil
 	}
@@ -776,11 +838,15 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			candidates = next
 		}
 
-		results = resolveResults(txn, db.contentDBI, candidates, active, cfg.scoreFunc)
+		results = resolveResults(txn, db.contentDBI, candidates, active, cfg)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.verify {
+		results = verifyResults(results, query)
 	}
 
 	sortResults(results)
@@ -790,11 +856,142 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	}, nil
 }
 
+// parseQueryTerms splits a query into terms: space-delimited words,
+// with double-quoted phrases treated as single terms (quotes stripped).
+// R125
+func parseQueryTerms(query string) []string {
+	var terms []string
+	s := query
+	for len(s) > 0 {
+		s = strings.TrimLeft(s, " ")
+		if len(s) == 0 {
+			break
+		}
+		if s[0] == '"' {
+			end := strings.IndexByte(s[1:], '"')
+			if end >= 0 {
+				terms = append(terms, s[1:1+end])
+				s = s[2+end:]
+				continue
+			}
+		}
+		end := strings.IndexByte(s, ' ')
+		if end < 0 {
+			terms = append(terms, s)
+			break
+		}
+		terms = append(terms, s[:end])
+		s = s[end+1:]
+	}
+	return terms
+}
+
+// verifyResults reads chunk text from disk and discards results where
+// any query term is absent as a case-insensitive substring.
+// R124
+func verifyResults(results []SearchResult, query string) []SearchResult {
+	terms := parseQueryTerms(query)
+	if len(terms) == 0 {
+		return results
+	}
+	// Lowercase all terms for case-insensitive comparison
+	lowerTerms := make([][]byte, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = bytes.ToLower([]byte(t))
+	}
+
+	// Cache file contents by path
+	fileCache := make(map[string][]byte)
+	var verified []SearchResult
+	for _, r := range results {
+		content, ok := fileCache[r.Path]
+		if !ok {
+			data, err := os.ReadFile(r.Path)
+			if err != nil {
+				continue // file unreadable, discard
+			}
+			content = data
+			fileCache[r.Path] = content
+		}
+
+		// Extract chunk text by line range
+		chunk := extractChunkByLines(content, r.StartLine, r.EndLine)
+		lowerChunk := bytes.ToLower(chunk)
+
+		match := true
+		for _, term := range lowerTerms {
+			if !bytes.Contains(lowerChunk, term) {
+				match = false
+				break
+			}
+		}
+		if match {
+			verified = append(verified, r)
+		}
+	}
+	return verified
+}
+
+// extractChunkByLines returns the bytes spanning lines start..end (1-based inclusive).
+func extractChunkByLines(content []byte, startLine, endLine int) []byte {
+	line := 1
+	chunkStart := -1
+	for i, b := range content {
+		if line == startLine && chunkStart < 0 {
+			chunkStart = i
+		}
+		if b == '\n' {
+			if line == endLine {
+				return content[chunkStart : i+1]
+			}
+			line++
+		}
+	}
+	// Handle last line without trailing newline
+	if chunkStart >= 0 {
+		return content[chunkStart:]
+	}
+	return nil
+}
+
+// verifyResultsRegex reads chunk text from disk and discards results
+// where the compiled regex does not match.
+func verifyResultsRegex(results []SearchResult, re *regexp.Regexp) []SearchResult {
+	fileCache := make(map[string][]byte)
+	var verified []SearchResult
+	for _, r := range results {
+		content, ok := fileCache[r.Path]
+		if !ok {
+			data, err := os.ReadFile(r.Path)
+			if err != nil {
+				continue
+			}
+			content = data
+			fileCache[r.Path] = content
+		}
+		chunk := extractChunkByLines(content, r.StartLine, r.EndLine)
+		if re.Match(chunk) {
+			verified = append(verified, r)
+		}
+	}
+	return verified
+}
+
 // resolveResults maps candidates to SearchResults, scoring each chunk.
-func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, fn ScoreFunc) []SearchResult {
+func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, cfg searchConfig) []SearchResult {
 	infoCache := make(map[uint64]*FileInfo)
 	var results []SearchResult
 	for id, cc := range candidates {
+		if cfg.onlyIDs != nil {
+			if _, ok := cfg.onlyIDs[id.fileid]; !ok {
+				continue
+			}
+		}
+		if cfg.exceptIDs != nil {
+			if _, ok := cfg.exceptIDs[id.fileid]; ok {
+				continue
+			}
+		}
 		info, ok := infoCache[id.fileid]
 		if !ok {
 			fi, err := readFileInfo(txn, dbi, id.fileid)
@@ -810,7 +1007,7 @@ func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCa
 			if idx < len(info.ChunkTokenCounts) {
 				tokenCount = info.ChunkTokenCounts[idx]
 			}
-			score := fn(active, cc.counts, tokenCount)
+			score := cfg.scoreFunc(active, cc.counts, tokenCount)
 			results = append(results, SearchResult{
 				Path:      info.Filename,
 				StartLine: info.ChunkStartLines[idx],
@@ -829,6 +1026,11 @@ func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCa
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error) {
 	cfg := applySearchOpts(opts)
 
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("compile regex: %w", err)
+	}
+
 	re, err := syntax.Parse(pattern, syntax.Perl)
 	if err != nil {
 		return nil, fmt.Errorf("parse regex: %w", err)
@@ -844,19 +1046,20 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 		}
 		defer cursor.Close()
 
-		candidates := evalTrigramQuery(q, cursor, db.charSet)
+		candidates := evalTrigramQuery(q, cursor, db.trigrams)
 		if candidates == nil {
 			// QAll: match everything — scan all N records for chunk IDs
 			candidates = allChunks(txn, db.contentDBI)
 		}
 
-		results = resolveResults(txn, db.contentDBI, candidates, nil, cfg.scoreFunc)
+		results = resolveResults(txn, db.contentDBI, candidates, nil, cfg)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	results = verifyResultsRegex(results, compiled)
 	sortResults(results)
 	return &SearchResults{
 		Results: results,
@@ -865,7 +1068,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 }
 
 // evalTrigramQuery recursively evaluates a codesearch trigram query against the index.
-func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, cs *CharSet) map[chunkID]*chunkCandidate {
+func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, tg *Trigrams) map[chunkID]*chunkCandidate {
 	switch q.Op {
 	case csindex.QAll:
 		return nil
@@ -874,7 +1077,7 @@ func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, cs *CharSet) map[ch
 	case csindex.QAnd:
 		var result map[chunkID]*chunkCandidate
 		for _, tri := range q.Trigram {
-			encoded, ok := cs.EncodeTrigram(tri)
+			encoded, ok := tg.EncodeTrigram(tri)
 			if !ok {
 				continue
 			}
@@ -892,7 +1095,7 @@ func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, cs *CharSet) map[ch
 			}
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQuery(sub, cursor, cs)
+			subSet := evalTrigramQuery(sub, cursor, tg)
 			if subSet == nil {
 				continue
 			}
@@ -906,7 +1109,7 @@ func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, cs *CharSet) map[ch
 	case csindex.QOr:
 		result := make(map[chunkID]*chunkCandidate)
 		for _, tri := range q.Trigram {
-			encoded, ok := cs.EncodeTrigram(tri)
+			encoded, ok := tg.EncodeTrigram(tri)
 			if !ok {
 				continue
 			}
@@ -921,7 +1124,7 @@ func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, cs *CharSet) map[ch
 			})
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQuery(sub, cursor, cs)
+			subSet := evalTrigramQuery(sub, cursor, tg)
 			if subSet == nil {
 				return nil
 			}
@@ -1014,7 +1217,7 @@ func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
 // Seq: seq-score.md
 // ScoreFile returns per-chunk scores for a single file using the given scoring function.
 func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc) ([]ScoredChunk, error) {
-	queryTrigrams := db.charSet.Trigrams(query)
+	queryTrigrams := db.trigrams.ExtractTrigrams([]byte(query))
 	if len(queryTrigrams) == 0 {
 		return nil, nil
 	}
@@ -1103,6 +1306,59 @@ func (db *DB) BuildIndex(cutoff int) error {
 	})
 }
 
+// --- Trigram inspection ---
+
+// TrigramInfo describes a single trigram from a query.
+type TrigramInfo struct {
+	Trigram string  `json:"trigram"`
+	Code    uint32  `json:"code"`
+	Active  bool    `json:"active"`
+	DocFreq int     `json:"docFreq"`
+}
+
+// QueryTrigrams extracts trigrams from a query string and reports which are
+// active at the current cutoff and their document frequency (C record count).
+func (db *DB) QueryTrigrams(query string) ([]TrigramInfo, error) {
+	rawTrigrams := db.trigrams.ExtractTrigrams([]byte(query))
+	if len(rawTrigrams) == 0 {
+		return nil, nil
+	}
+
+	// Deduplicate while preserving order
+	seen := make(map[uint32]bool)
+	var unique []uint32
+	for _, tri := range rawTrigrams {
+		if !seen[tri] {
+			seen[tri] = true
+			unique = append(unique, tri)
+		}
+	}
+
+	// Build active set for O(1) lookup
+	activeSet := make(map[uint32]bool, len(db.activeTrigrams))
+	for _, t := range db.activeTrigrams {
+		activeSet[t] = true
+	}
+
+	var results []TrigramInfo
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		for _, tri := range unique {
+			info := TrigramInfo{
+				Trigram: DecodeTrigram(tri),
+				Code:    tri,
+				Active:  activeSet[tri],
+			}
+			cKey := makeCKey(tri)
+			if val, err := txn.Get(db.contentDBI, cKey); err == nil && len(val) == 8 {
+				info.DocFreq = int(binary.BigEndian.Uint64(val))
+			}
+			results = append(results, info)
+		}
+		return nil
+	})
+	return results, err
+}
+
 // --- Strategy management ---
 
 func (db *DB) AddStrategy(name, cmd string) error {
@@ -1110,8 +1366,16 @@ func (db *DB) AddStrategy(name, cmd string) error {
 	return db.saveSettings()
 }
 
+// CRC: crc-DB.md | R116, R117
+func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
+	db.funcStrategies[name] = fn
+	db.settings.ChunkingStrategies[name] = "" // empty cmd marks func strategy
+	return db.saveSettings()
+}
+
 func (db *DB) RemoveStrategy(name string) error {
 	delete(db.settings.ChunkingStrategies, name)
+	delete(db.funcStrategies, name)
 	return db.saveSettings()
 }
 
@@ -1260,7 +1524,7 @@ func scanCRecords(txn *lmdb.Txn, dbi lmdb.DBI) []trigramCount {
 	for err == nil && len(key) == 4 && key[0] == prefixC {
 		tri := uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
 		if len(val) == 8 {
-			c := binary.LittleEndian.Uint64(val)
+			c := binary.BigEndian.Uint64(val)
 			if c > 0 {
 				result = append(result, trigramCount{tri, c})
 			}
@@ -1332,11 +1596,11 @@ func incrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) error {
 	var c uint64
 	val, err := txn.Get(dbi, key)
 	if err == nil && len(val) == 8 {
-		c = binary.LittleEndian.Uint64(val)
+		c = binary.BigEndian.Uint64(val)
 	}
 	c++
 	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, c)
+	binary.BigEndian.PutUint64(buf, c)
 	return txn.Put(dbi, key, buf, 0)
 }
 
@@ -1347,20 +1611,26 @@ func decrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) {
 	if err != nil || len(val) != 8 {
 		return
 	}
-	c := binary.LittleEndian.Uint64(val)
+	c := binary.BigEndian.Uint64(val)
 	if c <= 1 {
 		txn.Del(dbi, key, nil)
 		return
 	}
 	c--
 	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, c)
+	binary.BigEndian.PutUint64(buf, c)
 	txn.Put(dbi, key, buf, 0)
 }
 
 // sortResults sorts search results by filename then start line.
+// Seq: seq-search.md | R33
 func sortResults(results []SearchResult) {
 	slices.SortFunc(results, func(a, b SearchResult) int {
+		// Sort by score descending (higher scores first)
+		if c := cmp.Compare(b.Score, a.Score); c != 0 {
+			return c
+		}
+		// Tie-break by path then start line
 		if c := cmp.Compare(a.Path, b.Path); c != 0 {
 			return c
 		}
@@ -1420,27 +1690,25 @@ func (db *DB) allocFileID(txn *lmdb.Txn) (uint64, error) {
 	return fileid, nil
 }
 
-func aliasesToJSON(aliases map[rune]rune) map[string]string {
+func byteAliasesToJSON(aliases map[byte]byte) map[string]string {
 	if len(aliases) == 0 {
 		return nil
 	}
 	m := make(map[string]string, len(aliases))
 	for k, v := range aliases {
-		m[string(k)] = string(v)
+		m[string([]byte{k})] = string([]byte{v})
 	}
 	return m
 }
 
-func aliasesFromJSON(m map[string]string) map[rune]rune {
+func byteAliasesFromJSON(m map[string]string) map[byte]byte {
 	if len(m) == 0 {
 		return nil
 	}
-	aliases := make(map[rune]rune, len(m))
+	aliases := make(map[byte]byte, len(m))
 	for k, v := range m {
-		kr := []rune(k)
-		vr := []rune(v)
-		if len(kr) > 0 && len(vr) > 0 {
-			aliases[kr[0]] = vr[0]
+		if len(k) > 0 && len(v) > 0 {
+			aliases[k[0]] = v[0]
 		}
 	}
 	return aliases

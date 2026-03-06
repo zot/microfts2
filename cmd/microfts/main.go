@@ -118,9 +118,8 @@ func openOpts(contentDB, indexDB string) microfts2.Options {
 func cmdInit() {
 	fs := flag.CommandLine
 	dbPath, contentDB, indexDB := dbFlags(fs)
-	charset := fs.String("charset", "abcdefghijklmnopqrstuvwxyz0123456789", "character set")
 	caseInsensitive := fs.Bool("case-insensitive", false, "case insensitive indexing")
-	aliasStr := fs.String("aliases", "", "character aliases as from=to pairs, comma-separated (e.g. '\\n=^')")
+	aliasStr := fs.String("aliases", "", "byte aliases as from=to pairs, comma-separated (e.g. '\\n=^')")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" {
@@ -131,11 +130,10 @@ func cmdInit() {
 	aliases := parseAliases(*aliasStr)
 
 	db, err := microfts2.Create(*dbPath, microfts2.Options{
-		CharSet:       *charset,
 		CaseInsensitive: *caseInsensitive,
-		Aliases:       aliases,
-		ContentDBName: *contentDB,
-		IndexDBName:   *indexDB,
+		Aliases:         aliases,
+		ContentDBName:   *contentDB,
+		IndexDBName:     *indexDB,
 	})
 	if err != nil {
 		fatal("init", err)
@@ -174,6 +172,7 @@ func cmdSearch() {
 	dbPath, contentDB, indexDB := dbFlags(fs)
 	useRegex := fs.Bool("regex", false, "treat query as a Go regexp pattern")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
+	verify := fs.Bool("verify", false, "post-filter: verify query terms in chunk text")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" || fs.NArg() == 0 {
@@ -201,11 +200,17 @@ func cmdSearch() {
 	defer db.Close()
 	doRefresh(db)
 
+	var opts []microfts2.SearchOption
+	opts = append(opts, opt)
+	if *verify {
+		opts = append(opts, microfts2.WithVerify())
+	}
+
 	var sr *microfts2.SearchResults
 	if *useRegex {
-		sr, err = db.SearchRegex(query, opt)
+		sr, err = db.SearchRegex(query, opts...)
 	} else {
-		sr, err = db.Search(query, opt)
+		sr, err = db.Search(query, opts...)
 	}
 	if err != nil {
 		fatal("search", err)
@@ -357,10 +362,22 @@ func cmdStale() {
 func cmdScore() {
 	fs := flag.CommandLine
 	dbPath, contentDB, indexDB := dbFlags(fs)
+	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" || fs.NArg() < 2 {
 		fmt.Fprintln(os.Stderr, "score: -db, query, and at least one file required")
+		os.Exit(1)
+	}
+
+	var fn microfts2.ScoreFunc
+	switch *scoreMode {
+	case "coverage":
+		fn = microfts2.ScoreCoverage
+	case "density":
+		fn = microfts2.ScoreDensityFunc
+	default:
+		fmt.Fprintf(os.Stderr, "score: unknown score mode: %s\n", *scoreMode)
 		os.Exit(1)
 	}
 
@@ -375,7 +392,7 @@ func cmdScore() {
 	doRefresh(db)
 
 	for _, fp := range files {
-		chunks, err := db.ScoreFile(query, fp, microfts2.ScoreCoverage)
+		chunks, err := db.ScoreFile(query, fp, fn)
 		if err != nil {
 			fatal("score "+fp, err)
 		}
@@ -451,39 +468,38 @@ func cmdStrategy() {
 	}
 }
 
-func parseAliases(s string) map[rune]rune {
+func parseAliases(s string) map[byte]byte {
 	if s == "" {
 		return nil
 	}
-	aliases := make(map[rune]rune)
+	aliases := make(map[byte]byte)
 	for _, pair := range strings.Split(s, ",") {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		from := unescapeChar(strings.TrimSpace(parts[0]))
-		to := unescapeChar(strings.TrimSpace(parts[1]))
-		if from != 0 && to != 0 {
-			aliases[from] = to
+		from := unescapeByte(strings.TrimSpace(parts[0]))
+		to := unescapeByte(strings.TrimSpace(parts[1]))
+		if from >= 0 && to >= 0 {
+			aliases[byte(from)] = byte(to)
 		}
 	}
 	return aliases
 }
 
-func unescapeChar(s string) rune {
+func unescapeByte(s string) int {
 	switch s {
 	case `\n`:
-		return '\n'
+		return int('\n')
 	case `\t`:
-		return '\t'
+		return int('\t')
 	case `\r`:
-		return '\r'
+		return int('\r')
 	default:
-		runes := []rune(s)
-		if len(runes) == 1 {
-			return runes[0]
+		if len(s) == 1 {
+			return int(s[0])
 		}
-		return 0
+		return -1
 	}
 }
 

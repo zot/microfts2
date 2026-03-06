@@ -1,16 +1,20 @@
 # Sequence: Add File
-**Requirements:** R10, R11, R12, R19, R20, R25, R26, R29, R77, R79, R81, R92, R102, R109, R110
+**Requirements:** R10, R11, R12, R19, R20, R25, R26, R29, R77, R79, R81, R92, R102, R109, R110, R111, R116, R118, R120, R121, R122
 
-Participants: DB, Chunker, CharSet, KeyChain
+Participants: DB, Chunker, Trigrams, KeyChain
 
 ```
-DB                      Chunker       CharSet      KeyChain
+DB                      Chunker       Trigrams      KeyChain
  |                        |              |            |
- |-- Run(cmd, path) ----> |              |            |
- | <-- offsets[] -------- |              |            |
- |                                       |            |
  |  stat file (mod time before read)     |            |
  |  read file, compute SHA-256           |            |
+ |  validate UTF-8 (reject if invalid)  |            |
+ |                                       |            |
+ |  if funcStrategy[name] exists:        |            |
+ |    offsets = fn(path, content)        |            |
+ |  else:                                |            |
+ |-- Run(cmd, path) ----> |              |            |
+ | <-- offsets[] -------- |              |            |
  |                                       |            |
  |-- Encode(filename) --------------------------------> |
  | <-- F key/value pairs --------------------------------|
@@ -40,4 +44,5 @@ DB                      Chunker       CharSet      KeyChain
  |      strategy, modTime, hash}         |            |
  |                                       |            |
  |  return (fileid, nil)                 |            |
+ |  WithContent: return (fileid, content, nil)       |
 ```

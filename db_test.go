@@ -14,9 +14,7 @@ func testDB(t *testing.T) (*DB, string) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "testdb")
-	db, err := Create(dbPath, Options{
-		CharSet: "abcdefghijklmnopqrstuvwxyz0123456789",
-	})
+	db, err := Create(dbPath, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,14 +37,9 @@ func TestDBCreateAndOpen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "testdb")
 
-	db, err := Create(dbPath, Options{
-		CharSet: "abcdefghijklmnopqrstuvwxyz0123456789",
-	})
+	db, err := Create(dbPath, Options{})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if db.settings.CharacterSet != "abcdefghijklmnopqrstuvwxyz0123456789" {
-		t.Error("charset not preserved")
 	}
 	db.Close()
 
@@ -55,9 +48,6 @@ func TestDBCreateAndOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	if db2.settings.CharacterSet != "abcdefghijklmnopqrstuvwxyz0123456789" {
-		t.Error("charset not preserved after reopen")
-	}
 	if db2.settings.NextFileID != 1 {
 		t.Errorf("NextFileID = %d, want 1", db2.settings.NextFileID)
 	}
@@ -374,7 +364,6 @@ func TestDBCustomDBNames(t *testing.T) {
 	dbPath := filepath.Join(dir, "testdb")
 
 	db, err := Create(dbPath, Options{
-		CharSet:       "abcdefghijklmnopqrstuvwxyz",
 		ContentDBName: "myc",
 		IndexDBName:   "myi",
 	})
@@ -391,7 +380,7 @@ func TestDBCustomDBNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	if db2.settings.CharacterSet != "abcdefghijklmnopqrstuvwxyz" {
+	if db2.settings.SearchCutoff != 50 {
 		t.Error("settings not preserved with custom DB names")
 	}
 }
@@ -690,5 +679,253 @@ func TestDBSearchReturnsScore(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected at least one result with positive Score")
+	}
+}
+
+func TestDBAddFileRejectsInvalidUTF8(t *testing.T) {
+	db, dir := testDB(t)
+	// Write a file with invalid UTF-8 bytes
+	fp := filepath.Join(dir, "bad.txt")
+	if err := os.WriteFile(fp, []byte{0xFF, 0xFE, 0x80, 'h', 'e', 'l', 'l', 'o', '\n'}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.AddFile(fp, "line")
+	if err == nil {
+		t.Fatal("AddFile should reject non-UTF-8 content")
+	}
+	if !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Errorf("error should mention invalid UTF-8, got: %v", err)
+	}
+}
+
+func TestDBAddFileCJKContent(t *testing.T) {
+	db, dir := testDB(t)
+	// Valid UTF-8 CJK content should be accepted and searchable
+	fp := writeTestFile(t, dir, "cjk.txt", "你好世界\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BuildIndex(50); err != nil {
+		t.Fatal(err)
+	}
+	// Search for cross-boundary bytes of 你好
+	sr, err := db.Search("你好")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("CJK search returned no results")
+	}
+}
+
+func TestDBAddStrategyFunc(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "testdb")
+	db, err := Create(dbPath, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Register a func strategy that puts each line in its own chunk
+	lineFunc := func(path string, content []byte) ([]int64, error) {
+		var offsets []int64
+		for i, b := range content {
+			if b == '\n' {
+				offsets = append(offsets, int64(i+1))
+			}
+		}
+		return offsets, nil
+	}
+	if err := db.AddStrategyFunc("linefunc", lineFunc); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := writeTestFile(t, dir, "hello.txt", "hello world\ngoodbye world\n")
+	fileid, err := db.AddFile(fp, "linefunc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileid == 0 {
+		t.Error("expected non-zero fileid")
+	}
+
+	sr, err := db.Search("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("search with func strategy returned no results")
+	}
+}
+
+func TestDBAddFileWithContent(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "content.txt", "the quick brown fox\n")
+
+	fileid, content, err := db.AddFileWithContent(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileid == 0 {
+		t.Error("expected non-zero fileid")
+	}
+	if string(content) != "the quick brown fox\n" {
+		t.Errorf("content mismatch: got %q", content)
+	}
+}
+
+func TestDBReindexWithContent(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "reindex.txt", "original content\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update file and reindex
+	os.WriteFile(fp, []byte("updated content\n"), 0644)
+
+	fileid, content, err := db.ReindexWithContent(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileid == 0 {
+		t.Error("expected non-zero fileid")
+	}
+	if string(content) != "updated content\n" {
+		t.Errorf("content mismatch: got %q", content)
+	}
+}
+
+func TestParseQueryTerms(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"hello world", []string{"hello", "world"}},
+		{`"hello world" foo`, []string{"hello world", "foo"}},
+		{`foo "bar baz" qux`, []string{"foo", "bar baz", "qux"}},
+		{`"quoted only"`, []string{"quoted only"}},
+		{"  spaced  ", []string{"spaced"}},
+		{"", nil},
+		{`unclosed "quote`, []string{"unclosed", `"quote`}},
+	}
+	for _, tt := range tests {
+		got := parseQueryTerms(tt.input)
+		if len(got) != len(tt.want) {
+			t.Errorf("parseQueryTerms(%q) = %v, want %v", tt.input, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("parseQueryTerms(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+			}
+		}
+	}
+}
+
+func TestSearchWithVerify(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Build a corpus with enough variety so trigrams survive the active set cutoff.
+	// "daneel" has trigrams dan, ane, nee, eel.
+	// A chunk with "danger" + "caneen" + "heels" shares those trigrams
+	// but doesn't contain the word "daneel" — a false positive without verify.
+	fp1 := writeTestFile(t, dir, "real.txt",
+		"daneel olivaw is a robot\nhe serves humanity\npatient and tireless\n")
+	fp2 := writeTestFile(t, dir, "false.txt",
+		"The danger of caneen and heels\nUnrelated content here\nMore filler text\n")
+	// Add more files for corpus diversity
+	fp3 := writeTestFile(t, dir, "filler1.txt",
+		"Alpha beta gamma delta\nEpsilon zeta eta theta\nIota kappa lambda mu\n")
+	fp4 := writeTestFile(t, dir, "filler2.txt",
+		"Quick brown fox jumps\nLazy dog sleeps all day\nThe sun shines bright\n")
+
+	db.AddFile(fp1, "line")
+	db.AddFile(fp2, "line")
+	db.AddFile(fp3, "line")
+	db.AddFile(fp4, "line")
+	db.BuildIndex(100)
+
+	// Without verify: should find candidates
+	sr, err := db.Search("daneel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noVerifyCount := len(sr.Results)
+
+	// With verify: only the real match survives
+	sr, err = db.Search("daneel", WithVerify())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, r := range sr.Results {
+		if r.Path == fp2 {
+			t.Error("WithVerify should have filtered out false positive")
+		}
+		if r.Path == fp1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("WithVerify should have kept the real match")
+	}
+	if noVerifyCount < len(sr.Results) {
+		t.Error("verify should not add results")
+	}
+}
+
+func TestSearchWithVerifyQuotedTerms(t *testing.T) {
+	db, dir := testDB(t)
+
+	fp1 := writeTestFile(t, dir, "match.txt", "the quick brown fox\n")
+	fp2 := writeTestFile(t, dir, "partial.txt", "brown dogs are quick\n")
+
+	db.AddFile(fp1, "line")
+	db.AddFile(fp2, "line")
+	db.BuildIndex(50)
+
+	// "quick brown" as a quoted phrase — must appear as substring
+	sr, err := db.Search(`"quick brown"`, WithVerify())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range sr.Results {
+		if r.Path == fp2 {
+			t.Error("quoted phrase should not match when words are separated")
+		}
+	}
+}
+
+func TestSearchRegexVerifies(t *testing.T) {
+	db, dir := testDB(t)
+
+	fp1 := writeTestFile(t, dir, "match.txt", "the cat sat on the mat\n")
+	fp2 := writeTestFile(t, dir, "nomatch.txt", "category matters catalog\n")
+
+	db.AddFile(fp1, "line")
+	db.AddFile(fp2, "line")
+	db.BuildIndex(50)
+
+	// regex `\bcat\b` should only match whole word "cat"
+	sr, err := db.SearchRegex(`\bcat\b`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range sr.Results {
+		if r.Path == fp2 {
+			t.Error("regex verify should have filtered out 'category/catalog'")
+		}
+	}
+	found := false
+	for _, r := range sr.Results {
+		if r.Path == fp1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("regex verify should have kept the real match")
 	}
 }

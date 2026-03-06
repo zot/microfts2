@@ -5,12 +5,29 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
 
 ## configurable chunking strategies
 
-- add/remove chunking strategies dynamically
+- add/remove chunking strategies dynamically (external commands or Go functions)
+  - external: `AddStrategy(name, cmd)` — command is persisted in I record
+  - function: `AddStrategyFunc(name, fn)` — in-memory only, must re-register on Open
+  - `ChunkFunc` type: `func(path string, content []byte) ([]int64, error)` — returns byte offsets
+  - when AddFile/Reindex uses a func strategy, calls the function directly (no exec)
+  - I record stores name with empty cmd for func strategies (marks as registered)
+  - built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap) register as func strategies
 - files track their indexed chunking strategy
   - can reindex with a different strategy -- allows migration to better strategies
-- configurable character set -- supports up to 255 characters plus space, unindexed character == space (runs are collapsed)
-- character aliases -- map input characters to charset characters before encoding (e.g. newline → `^` for line-start matching)
-  - 8 bits / character, 24 bits per trigram
+- raw byte trigrams -- every byte is its own value, no character set mapping
+  - whitespace bytes (space, tab, newline, carriage return) are word boundaries; runs collapse
+  - all non-whitespace bytes are indexed
+  - case insensitivity: bytes.ToLower() on input before trigram extraction
+  - byte aliases: map byte→byte before extraction (e.g. newline → `^` for line-start matching). Both source and target bytes must be ASCII (< 0x80) — aliasing UTF-8 continuation or leading bytes would corrupt multibyte characters and break character-internal trigram skipping.
+  - UTF-8 required — AddFile rejects non-UTF-8 content with an error (utf8.Valid check)
+  - character-internal byte trigrams are skipped during extraction
+    - a 3-byte window that falls entirely within a single multibyte character is not emitted
+    - 3-byte characters (CJK): 1 internal trigram skipped per character
+    - 4-byte characters (emoji): 2 internal trigrams skipped per character
+    - 2-byte characters: no internal trigrams possible, no skipping needed
+    - ASCII: no multibyte characters, identical behavior
+    - cross-boundary trigrams preserved — effectively encode character bigrams for CJK search
+  - 8 bits / byte, 24 bits per trigram
   - 16M possible trigrams (2^24 = 16,777,216)
   - active trigrams (A record): sparse packed sorted trigram list (3 bytes each, only active trigrams stored)
   - trigram counts (C records): sparse individual LMDB records, one per non-zero trigram
@@ -42,16 +59,12 @@ Subdatabase names are parameters: defaults 'ftscontent' and 'ftsindex', settable
 These are not stored in the I record -- they're needed to open the databases in the first place.
 
 - content db:
-  - C [trigram: 3] -> count: 8 — per-trigram occurrence count, sparse (only non-zero trigrams stored)
+  - C [trigram: 3] -> count: 8 (big-endian) — per-trigram occurrence count, sparse (only non-zero trigrams stored)
   - 'I' -> JSON -- database settings
     - chunkingStrategies: object
-      - {name: cmd}: [cmd] [filename] -> list of file offsets
-    - characterAliases: object -- maps input characters to charset characters (e.g. {"\n": "^"})
+      - {name: cmd}: [cmd] [filename] -> list of file offsets; empty cmd means func strategy (in-memory only)
+    - aliases: object -- maps input bytes to replacement bytes before trigram extraction (e.g. {"\n": "^"})
     - caseInsensitive: boolean
-    - characterSet: string -- this is set during initialization and cannot be changed
-      - a string of up to 256 characters
-      - No spaces allowed
-      - For punctuation, case-insensitive is recommended
     - searchCutoff: number -- frequency percentile for literal search (default 50, bottom N% used in literal queries)
   - 'N' [fileid: 8] -> JSON -- information about file
     - filename: string -- full file path
@@ -88,8 +101,10 @@ The index is the authoritative record of which trigrams appear in which chunks a
 # The process
 
 We add a file to the database with a chosen chunking strategy:
+- read file content, check utf8.Valid
 - create the F record for the file to get its fileid
-- chunk the file, compute trigrams per chunk with counts
+- chunk: if strategy has a ChunkFunc, call it directly with (path, content); otherwise exec external command
+- compute trigrams per chunk with counts
 - create the N record (including chunkTokenCounts)
 - update C records (increment count for each trigram; insert if first occurrence)
 - write forward index entries: [trigram][desc-count][fileid][chunknum]
@@ -101,12 +116,18 @@ When removing a file:
 - delete the R record
 - remove F/N records, update C records (decrement counts; delete record if count reaches zero)
 
-When searching for a literal string
+When searching for a literal string:
 - if the index does not exist, compute the index
-- compute the trigrams for the string
+- compute the trigrams for the string, skip character-internal trigrams
 - filter to active trigrams (bottom `searchCutoff`% by frequency)
-- intersect file+chunk sets from the index for each active query trigram
-- output the file names and chunks, sorted by filename and chunknum
+- for each active query trigram, scan the index by trigram prefix
+  (ignoring count field) to collect candidate (fileid, chunknum) pairs
+- intersect candidate sets across all active query trigrams
+- for each surviving candidate, collect per-trigram counts from the
+  index keys
+- score each candidate using the selected scoring function
+  (coverage or density)
+- sort by score descending, return top-k
 - CLI output format: one result per line, `filepath:startline-endline`
 - library returns struct slices with the same information, plus IndexStatus
 
@@ -115,6 +136,7 @@ When searching for a regex pattern
 - extract a trigram query (boolean AND/OR expression) from the regex AST, using rsc's approach (github.com/google/codesearch/regexp)
 - evaluate the trigram query against the full index (not filtered to active set)
 - AND nodes intersect candidate sets, OR nodes union them
+- verify: read each candidate chunk from disk, run the compiled regex against the chunk text, discard non-matches (always, not opt-in — trigram query is a superset filter)
 - output format same as literal search
 - library returns struct slices with the same information, plus IndexStatus
 
@@ -162,14 +184,16 @@ Chunk boundaries are at byte offsets of the first word in each window. Each chun
 
 All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index-db`.
 
-- `microfts init -db <path> [-charset <chars>] [-case-insensitive] [-aliases <from=to,...>]`
-  Create a new database. Character set is immutable after creation.
+- `microfts init -db <path> [-case-insensitive] [-aliases <from=to,...>]`
+  Create a new database.
 - `microfts add -db <path> -strategy <name> <file>...`
   Add files using the named chunking strategy.
-- `microfts search -db <path> [-regex] [-score coverage|density] <query>...`
+- `microfts search -db <path> [-regex] [-score coverage|density] [-verify] <query>...`
   Search for text. Builds index on demand if needed. Output: `filepath:startline-endline`
   With `-regex`, query is a Go regexp pattern; trigram query extracted from the regex AST.
   With `-score`, select scoring strategy (default: coverage).
+  With `-verify`, post-filter results: for each candidate chunk, read the chunk text from disk, tokenize the query into terms, and verify that every term appears as a case-insensitive substring in the chunk text. Chunks that fail are discarded. This eliminates false positives where trigrams match independently but the actual words are absent.
+  Query tokenization for verify: split on spaces, but quoted strings (double quotes) are treated as a single term with quotes stripped. E.g. `"hello world" foo` produces terms `hello world` and `foo`.
 - `microfts delete -db <path> <file>...`
   Remove files from the database.
 - `microfts reindex -db <path> -strategy <name> <file>...`
@@ -190,7 +214,7 @@ All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index
   Output byte offsets for overlapping word windows.
 - `microfts stale -db <path>`
   List all stale and missing files. Output: one line per file, `status\tpath` (tab-separated).
-- `microfts score -db <path> <query> <file>...`
+- `microfts score -db <path> [-score coverage|density] <query> <file>...`
   Score named files against a query. Output: one line per chunk, `filepath:startline-endline\tscore`.
 
 - `-r` flag (global, before subcommand):
@@ -212,8 +236,10 @@ func (db *DB) Env() *lmdb.Env
 
 // Content
 func (db *DB) AddFile(fpath, strategy string) (uint64, error)
+func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) RemoveFile(fpath string) error
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
+func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error)
 
 // Search
@@ -226,11 +252,14 @@ func (db *DB) BuildIndex(cutoff int) error
 
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error
+func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error
 func (db *DB) RemoveStrategy(name string) error
 ```
 
+ChunkFunc: `func(path string, content []byte) ([]int64, error)`
+
 Options:
-- CharSet, CaseInsensitive, Aliases — creation-time only
+- CaseInsensitive, Aliases — creation-time only
 - ContentDBName, IndexDBName — defaults "ftscontent"/"ftsindex"
 - MaxDBs — LMDB max named databases, default 2
 
@@ -242,7 +271,7 @@ ScoredChunk: `{ StartLine int, EndLine int, Score float64 }`
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 SearchOption: `func(*searchConfig)` — functional option pattern
-Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`
+Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk text read from disk; eliminates trigram false positives)
 
 # Scoring Strategies
 
