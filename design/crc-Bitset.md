@@ -1,7 +1,7 @@
 # Bitset
-**Requirements:** R7
+**Requirements:** R6
 
-Fixed-size bitset for 16,777,216 trigrams (2^24). Stored as 2,097,152 bytes (2MB). Exported type for use by Ark and other consumers. Not used internally by microfts2 (A record uses sparse packed list, C record uses sparse LMDB records).
+Fixed-size bitset for 16,777,216 trigrams (2^24). Stored as 2,097,152 bytes (2MB). Exported type for use by Ark and other consumers. Not used internally by microfts2 (C records use sparse LMDB records; trigram selection is dynamic via TrigramFilter).
 
 ## Knows
 - data: [2097152]byte

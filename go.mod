@@ -1,4 +1,4 @@
-module microfts2
+module github.com/zot/microfts2
 
 go 1.21
 

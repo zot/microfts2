@@ -13,8 +13,7 @@ CLI                         DB
  |                           |  open content subdatabase
  |                           |  write I record:
  |                           |    caseInsensitive, aliases,
- |                           |    chunkingStrategies: {},
- |                           |    activeTrigramCutoff: default
+ |                           |    chunkingStrategies: {}
  |                           |
  | <-- ok ------------------ |
 ```

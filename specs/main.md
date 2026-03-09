@@ -8,10 +8,20 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
 - add/remove chunking strategies dynamically (external commands or Go functions)
   - external: `AddStrategy(name, cmd)` — command is persisted in I record
   - function: `AddStrategyFunc(name, fn)` — in-memory only, must re-register on Open
-  - `ChunkFunc` type: `func(path string, content []byte) ([]int64, error)` — returns byte offsets
+  - `ChunkFunc` type: generator using Go iterator pattern
+    - `func(path string, content []byte, yield func(Chunk) bool) error`
+    - yields `Chunk{Range []byte, Content []byte}` structs
+    - both Range and Content are reusable buffers — the caller must copy before the next yield
+    - Range has string semantics: opaque to microfts2, meaningful to the chunker and the user
+    - Content is the text to be trigram-indexed for this chunk
   - when AddFile/Reindex uses a func strategy, calls the function directly (no exec)
   - I record stores name with empty cmd for func strategies (marks as registered)
   - built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap) register as func strategies
+- chunkers serve two purposes:
+  - indexing: produce chunks with content to trigram-index and a range label
+  - extraction: given the same file, re-chunk to retrieve a specific chunk's content by its range
+  - the range is an opaque string label: for text chunkers it's "startline-endline", for other formats it's whatever the chunker needs (e.g. "sheet1:A1-B20", "slides/3:para/7")
+  - chunkers must be deterministic: same file produces same chunks with same ranges
 - files track their indexed chunking strategy
   - can reindex with a different strategy -- allows migration to better strategies
 - raw byte trigrams -- every byte is its own value, no character set mapping
@@ -19,7 +29,7 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
   - all non-whitespace bytes are indexed
   - case insensitivity: bytes.ToLower() on input before trigram extraction
   - byte aliases: map byte→byte before extraction (e.g. newline → `^` for line-start matching). Both source and target bytes must be ASCII (< 0x80) — aliasing UTF-8 continuation or leading bytes would corrupt multibyte characters and break character-internal trigram skipping.
-  - UTF-8 required — AddFile rejects non-UTF-8 content with an error (utf8.Valid check)
+  - UTF-8 required — AddFile checks each chunk's Content for valid UTF-8 (utf8.Valid). The raw file itself may be binary (e.g. ODF zip); the chunker is responsible for producing UTF-8 text content.
   - character-internal byte trigrams are skipped during extraction
     - a 3-byte window that falls entirely within a single multibyte character is not emitted
     - 3-byte characters (CJK): 1 internal trigram skipped per character
@@ -29,7 +39,6 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
     - cross-boundary trigrams preserved — effectively encode character bigrams for CJK search
   - 8 bits / byte, 24 bits per trigram
   - 16M possible trigrams (2^24 = 16,777,216)
-  - active trigrams (A record): sparse packed sorted trigram list (3 bytes each, only active trigrams stored)
   - trigram counts (C records): sparse individual LMDB records, one per non-zero trigram
 
 # Representation
@@ -53,7 +62,7 @@ LMDB only supports 511 bytes per key. Long filenames (F records below) use multi
 ## Two Trees: content and index
 
 LMDB supports multiple named subdatabases.
-The content DB stores file metadata, trigram frequency counts, and the active set. The index DB stores the trigram-to-chunk mappings with occurrence counts, maintained incrementally.
+The content DB stores file metadata and trigram frequency counts. The index DB stores the trigram-to-chunk mappings with occurrence counts, maintained incrementally.
 
 Subdatabase names are parameters: defaults 'ftscontent' and 'ftsindex', settable via CLI and library API.
 These are not stored in the I record -- they're needed to open the databases in the first place.
@@ -62,22 +71,19 @@ These are not stored in the I record -- they're needed to open the databases in 
   - C [trigram: 3] -> count: 8 (big-endian) — per-trigram occurrence count, sparse (only non-zero trigrams stored)
   - 'I' -> JSON -- database settings
     - chunkingStrategies: object
-      - {name: cmd}: [cmd] [filename] -> list of file offsets; empty cmd means func strategy (in-memory only)
+      - {name: cmd}: [cmd] [filename] -> stream of `range\tcontent` lines; empty cmd means func strategy (in-memory only)
     - aliases: object -- maps input bytes to replacement bytes before trigram extraction (e.g. {"\n": "^"})
     - caseInsensitive: boolean
-    - searchCutoff: number -- frequency percentile for literal search (default 50, bottom N% used in literal queries)
   - 'N' [fileid: 8] -> JSON -- information about file
     - filename: string -- full file path
-    - chunkOffsets: array[number] -- start offsets of each chunk
-    - chunkStartLines: array[number] -- start line number per chunk
-    - chunkEndLines: array[number] -- end line number per chunk
+    - chunkRanges: array[string] -- opaque range label per chunk (from chunker)
     - chunkTokenCounts: array[number] -- token count per chunk (for density scoring normalization)
     - chunkingStrategy: string -- which chunking strategy was used
     - modTime: number -- file modification time (Unix nanoseconds) at index time
     - contentHash: string -- SHA-256 hex of file contents at index time
+    - fileLength: number -- file size in bytes at index time
   - 'F' [name part: 1] filename-prefix -> filename prefix, name part 255 indicates end of prefix (see previous)
   - 'F' 255 filename-suffix -> [fileid: 8]: file info for reindexing changed files / deleting
-  - 'A' -> active trigrams packed sorted list (3 bytes per trigram) -- bottom searchCutoff% by frequency, used to filter literal queries
 
 - index db:
   - forward entries: [trigram: 3] [count: 2 desc] [fileid: 8] [chunknum: 8] -- trigram occurrences per chunk, high counts sort first
@@ -90,11 +96,9 @@ These are not stored in the I record -- they're needed to open the databases in 
 
 # Full Trigram Index
 
-The index DB contains entries for ALL trigrams present in the content — not just a frequency-selected subset. This makes the index complete and usable for both literal and regex search.
+The index DB contains entries for ALL trigrams present in the content. This makes the index complete and usable for both literal and regex search.
 
-The A record stores the "active set": trigrams in the bottom `searchCutoff`% by frequency. This set controls literal search selectivity — literal queries filter their trigrams to the active set, which are the most discriminating. Regex search bypasses the active set and queries the full index.
-
-Because the index is always complete, there is no drift, no margin erosion, and no rebuild watermarks. The only reason to rebuild is to recompute the active set after significant corpus changes (a performance tuning decision, not a correctness concern).
+Trigram selection for queries is handled dynamically via `TrigramFilter` functions supplied at search time. This allows callers to adapt filtering strategy per query rather than relying on a static global cutoff.
 
 The index is the authoritative record of which trigrams appear in which chunks and how many times. There are no per-chunk bitsets (T records) — the index is maintained incrementally on add/remove. If the index DB is lost, files must be re-added from disk.
 
@@ -103,9 +107,11 @@ The index is the authoritative record of which trigrams appear in which chunks a
 We add a file to the database with a chosen chunking strategy:
 - read file content, check utf8.Valid
 - create the F record for the file to get its fileid
-- chunk: if strategy has a ChunkFunc, call it directly with (path, content); otherwise exec external command
-- compute trigrams per chunk with counts
-- create the N record (including chunkTokenCounts)
+- chunk: call ChunkFunc generator, which yields {Range, Content} per chunk
+  - caller copies Range (as string) and Content before next yield
+  - for external command strategies, a wrapper ChunkFunc parses the command output
+- for each chunk: compute trigrams on Content (not raw file bytes), count tokens on Content
+- create the N record (chunkRanges, chunkTokenCounts)
 - update C records (increment count for each trigram; insert if first occurrence)
 - write forward index entries: [trigram][desc-count][fileid][chunknum]
 - write reverse index entry: R[fileid] -> packed chunk/trigram/count data
@@ -117,37 +123,38 @@ When removing a file:
 - remove F/N records, update C records (decrement counts; delete record if count reaches zero)
 
 When searching for a literal string:
-- if the index does not exist, compute the index
-- compute the trigrams for the string, skip character-internal trigrams
-- filter to active trigrams (bottom `searchCutoff`% by frequency)
-- for each active query trigram, scan the index by trigram prefix
+- trim leading and trailing whitespace from the query before trigram extraction
+- parse the query into terms using `parseQueryTerms`: unquoted words split on spaces, double-quoted phrases treated as single terms with quotes stripped
+- extract trigrams per term (not from the whole query as one byte sequence) — this avoids cross-boundary trigrams between unrelated words (e.g. "daneel olivaw" must not produce trigrams "l o", " ol")
+- the candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms
+- select query trigrams via TrigramFilter (default: FilterAll — use all trigrams); filter is applied to the combined trigram set
+  - look up each query trigram's C record count
+  - get total chunk count from N records
+  - call filter function to select subset
+- for each selected query trigram, scan the index by trigram prefix
   (ignoring count field) to collect candidate (fileid, chunknum) pairs
-- intersect candidate sets across all active query trigrams
+- intersect candidate sets across all selected query trigrams
 - for each surviving candidate, collect per-trigram counts from the
   index keys
 - score each candidate using the selected scoring function
   (coverage or density)
 - sort by score descending, return top-k
-- CLI output format: one result per line, `filepath:startline-endline`
+- CLI output format: one result per line, `filepath:range` (range is the chunk's opaque label)
 - library returns struct slices with the same information, plus IndexStatus
 
 When searching for a regex pattern
-- if the index does not exist, compute the index
 - extract a trigram query (boolean AND/OR expression) from the regex AST, using rsc's approach (github.com/google/codesearch/regexp)
-- evaluate the trigram query against the full index (not filtered to active set)
+- evaluate the trigram query against the full index (no trigram filtering)
 - AND nodes intersect candidate sets, OR nodes union them
-- verify: read each candidate chunk from disk, run the compiled regex against the chunk text, discard non-matches (always, not opt-in — trigram query is a superset filter)
+- verify: re-chunk each candidate file using the stored chunking strategy, run the compiled regex against the chunk content, discard non-matches (always, not opt-in — trigram query is a superset filter)
 - output format same as literal search
 - library returns struct slices with the same information, plus IndexStatus
 
-To compute the active set (build-index):
-- cursor scan all C records → collect (trigram, count) pairs
-- sort by count, take bottom `searchCutoff`% → write A record as packed sorted trigram list
-- index entries are always present (maintained incrementally); build-index only recomputes the A record
-
 # Built-in Chunking Strategies
 
-The binary includes built-in chunkers invoked as `microfts chunk-* <file>`, outputting byte offsets to stdout — same interface as external chunkers. This lets `microfts` be its own strategy command.
+The binary includes built-in chunkers registered as func strategies. They can also be invoked as CLI subcommands (`microfts chunk-* <file>`) outputting `range\tcontent` lines to stdout.
+
+For all built-in text chunkers, the range is `startline-endline` (1-based, inclusive) and the content is the raw text of those lines. This means CLI search output like `filepath:3-17` is the same format as before.
 
 ## chunk-lines
 
@@ -155,7 +162,7 @@ Break file at line boundaries.
 
 `microfts chunk-lines <file>`
 
-Every line is a chunk. Equivalent to outputting the byte offset after each newline.
+Every line is a chunk. Range: `N-N` (single line number). Content: the line text.
 
 ## chunk-lines-overlap
 
@@ -166,7 +173,7 @@ Fixed-size line windows with overlap.
 - `-lines`: lines per chunk (default 50)
 - `-overlap`: lines of overlap between consecutive chunks (default 10)
 
-Chunk boundaries are at byte offsets corresponding to line starts. Each chunk starts `lines - overlap` lines after the previous chunk's start.
+Each chunk starts `lines - overlap` lines after the previous chunk's start. Range: `startline-endline`. Content: the text of those lines.
 
 ## chunk-words-overlap
 
@@ -178,7 +185,25 @@ Fixed-size word windows with overlap. Good for vector databases and hybrid searc
 - `-overlap`: words of overlap between consecutive chunks (default 50)
 - `-pattern`: regexp defining a "word" (default `\S+`)
 
-Chunk boundaries are at byte offsets of the first word in each window. Each chunk starts `words - overlap` words after the previous chunk's start.
+Each chunk starts `words - overlap` words after the previous chunk's start. Range: `startline-endline` (lines spanning the word window). Content: the text of those lines.
+
+## chunk-markdown
+
+Paragraph-based splitting for markdown files.
+
+`microfts chunk-markdown <file>`
+
+Splits on blank lines and heading transitions:
+- A heading line (`#`...) always starts a new chunk
+- A heading and its following paragraph (up to the next blank line or heading) form one chunk
+- Consecutive blank lines collapse to a single boundary
+- Non-heading text between boundaries is one chunk
+- Blank lines are boundaries only — they are not included in any chunk's content
+- Gaps between chunks are expected; each chunk's range notes its precise position in the file
+
+Range: `startline-endline` (1-based, inclusive). Content: the raw text of those lines (excluding boundary blank lines).
+
+Exported as `microfts2.MarkdownChunkFunc` for direct use as a `ChunkFunc`.
 
 # CLI
 
@@ -189,17 +214,15 @@ All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index
 - `microfts add -db <path> -strategy <name> <file>...`
   Add files using the named chunking strategy.
 - `microfts search -db <path> [-regex] [-score coverage|density] [-verify] <query>...`
-  Search for text. Builds index on demand if needed. Output: `filepath:startline-endline`
+  Search for text. Builds index on demand if needed. Output: `filepath:range`
   With `-regex`, query is a Go regexp pattern; trigram query extracted from the regex AST.
   With `-score`, select scoring strategy (default: coverage).
-  With `-verify`, post-filter results: for each candidate chunk, read the chunk text from disk, tokenize the query into terms, and verify that every term appears as a case-insensitive substring in the chunk text. Chunks that fail are discarded. This eliminates false positives where trigrams match independently but the actual words are absent.
+  With `-verify`, post-filter results: for each candidate chunk, re-chunk the file using the stored chunking strategy to recover the chunk content (same text the trigrams were built from), tokenize the query into terms, and verify that every term appears as a case-insensitive substring in the chunk content. Chunks that fail are discarded. This eliminates false positives where trigrams match independently but the actual words are absent.
   Query tokenization for verify: split on spaces, but quoted strings (double quotes) are treated as a single term with quotes stripped. E.g. `"hello world" foo` produces terms `hello world` and `foo`.
 - `microfts delete -db <path> <file>...`
   Remove files from the database.
 - `microfts reindex -db <path> -strategy <name> <file>...`
   Re-chunk and reindex files with a different strategy.
-- `microfts build-index -db <path> [-cutoff <percentile>]`
-  Explicitly build/rebuild the index. Default cutoff: 50.
 - `microfts strategy add -db <path> -name <name> -cmd <command>`
   Register a chunking strategy.
 - `microfts strategy remove -db <path> -name <name>`
@@ -207,15 +230,17 @@ All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index
 - `microfts strategy list -db <path>`
   List registered strategies.
 - `microfts chunk-lines <file>`
-  Output byte offsets for line-based chunking.
+  Output chunks for line-based chunking (`range\tcontent` per line).
 - `microfts chunk-lines-overlap [-lines N] [-overlap M] <file>`
-  Output byte offsets for overlapping line windows.
+  Output chunks for overlapping line windows (`range\tcontent` per chunk).
 - `microfts chunk-words-overlap [-words N] [-overlap M] [-pattern P] <file>`
-  Output byte offsets for overlapping word windows.
+  Output chunks for overlapping word windows (`range\tcontent` per chunk).
+- `microfts chunk-markdown <file>`
+  Output chunks for markdown paragraph-based chunking (`range\tcontent` per chunk).
 - `microfts stale -db <path>`
   List all stale and missing files. Output: one line per file, `status\tpath` (tab-separated).
 - `microfts score -db <path> [-score coverage|density] <query> <file>...`
-  Score named files against a query. Output: one line per chunk, `filepath:startline-endline\tscore`.
+  Score named files against a query. Output: one line per chunk, `filepath:range\tscore`.
 
 - `-r` flag (global, before subcommand):
   Refresh all stale files before executing the subcommand. Uses each file's existing chunking strategy.
@@ -241,14 +266,12 @@ func (db *DB) RemoveFile(fpath string) error
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error)
+func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error
 
 // Search
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error)
-func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc) ([]ScoredChunk, error)
-
-// Index
-func (db *DB) BuildIndex(cutoff int) error
+func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption) ([]ScoredChunk, error)
 
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error
@@ -256,22 +279,30 @@ func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error
 func (db *DB) RemoveStrategy(name string) error
 ```
 
-ChunkFunc: `func(path string, content []byte) ([]int64, error)`
+Chunk: `{ Range []byte, Content []byte }` — both reusable buffers, caller must copy before next yield
+ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern
 
 Options:
 - CaseInsensitive, Aliases — creation-time only
 - ContentDBName, IndexDBName — defaults "ftscontent"/"ftsindex"
 - MaxDBs — LMDB max named databases, default 2
 
-SearchResult: `{ Path string, StartLine int, EndLine int, Score float64 }`
+SearchResult: `{ Path string, Range string, Score float64 }`
 SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
-FileInfo: `{ Filename string, ChunkOffsets []int64, ChunkStartLines []int, ChunkEndLines []int, ChunkTokenCounts []int, ChunkingStrategy string, ModTime int64, ContentHash string }`
-ScoredChunk: `{ StartLine int, EndLine int, Score float64 }`
+FileInfo: `{ Filename string, ChunkRanges []string, ChunkTokenCounts []int, ChunkingStrategy string, ModTime int64, ContentHash string, FileLength int64 }`
+ScoredChunk: `{ Range string, Score float64 }`
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 SearchOption: `func(*searchConfig)` — functional option pattern
-Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk text read from disk; eliminates trigram false positives)
+Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection)
+
+TrigramCount: `{ Trigram uint32, Count int }` — trigram code with its corpus document frequency
+TrigramFilter: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — selects which query trigrams to search with
+Stock filters: `FilterAll` (use all), `FilterByRatio(maxRatio float64)` (skip high-frequency), `FilterBestN(n int)` (keep N lowest-frequency)
+
+AppendOption: `func(*appendConfig)` — functional option pattern
+Built-in append options: `WithContentHash(hash string)` (full-file SHA-256 — caller pre-computed), `WithModTime(t int64)` (Unix nanos), `WithFileLength(n int64)` (full file size after append), `WithBaseLine(n int)` (1-based line number offset for line-based chunker ranges; 0 means no adjustment)
 
 # Scoring Strategies
 
@@ -283,7 +314,7 @@ The search function accepts a scoring strategy that determines how candidate chu
 
 For intentional, short queries. User typed specific terms and wants chunks that match them.
 
-Score = matching active trigrams / total active query trigrams
+Score = matching selected trigrams / total selected query trigrams
 
 Binary match — counts are available but not consulted. A trigram either matches or it doesn't.
 
@@ -294,7 +325,7 @@ Binary match — counts are available but not consulted. A trigram either matche
 For long queries (conversation turns, full documents) where most query tokens won't match any given chunk. Separates "chunk is about this topic" from "chunk shares a few common trigrams."
 
 1. Tokenize query on spaces
-2. For each token, extract trigrams, filter to active set. Tokens with no surviving trigrams are discarded.
+2. For each token, extract trigrams, apply trigram filter. Tokens with no surviving trigrams are discarded.
 3. For each candidate chunk, for each surviving query token:
    - Look up that token's trigram counts in the chunk
    - Token match strength = min count across the token's trigrams. This approximates word frequency — "turnip" produces trigrams `tur`, `urn`, `rni`, `nip`; if counts are [3, 3, 1, 3] then the word appears ~1 time (bottleneck trigram governs).
@@ -336,6 +367,38 @@ func (db *DB) RefreshStale(strategy string) ([]FileStatus, error)
 - `StaleFiles`: return status of all indexed files (fresh, stale, or missing)
 - `RefreshStale`: reindex all stale files using the given strategy (empty string = use each file's existing strategy). Returns the list of files that were refreshed and an error. Missing files are skipped (not deleted).
 
+# Append Detection Support
+
+For append-only files (e.g. JSONL conversation logs), ark wants to detect that a file change was an append and skip full reindex. microfts2 provides the primitives; ark implements the detection logic.
+
+## FileLength in N record
+
+The N record stores `fileLength` (int64): the file size in bytes at index time. `AddFile` and `Reindex` set this from the file content they already read. Ark reads this to hash only the prefix up to the stored length, detecting whether a change was purely an append.
+
+## AppendChunks API
+
+Add chunks to an existing file without full reindex.
+
+```go
+func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string) error
+```
+
+Chunks `content` using the named strategy, adds the resulting chunks and trigrams to the existing file's records. The `content` parameter is only the new bytes (the appended portion), not the full file.
+
+Updates the N record: new ContentHash (of the full file — caller provides or computed externally), ModTime, FileLength, appended ChunkRanges, appended ChunkTokenCounts. Does NOT touch existing chunks or trigrams — they remain valid.
+
+Chunk numbering continues from the file's existing chunk count. Forward and reverse index entries are added for the new chunks only. C records are incremented for the new chunks' trigrams.
+
+The reverse index entry (R record) is replaced with a new packed record containing both old and new chunk data.
+
+## Chunker offset support
+
+When `AppendChunks` passes content to a `ChunkFunc`, the content starts at an arbitrary byte offset in the original file, not byte 0. For line-based chunkers, this means line numbering must account for lines already processed.
+
+`AppendChunks` passes a base line number to line-based chunkers so that Range labels (e.g. "51-60") are absolute, not relative to the appended slice. The mechanism: `ChunkFunc` signature is unchanged; `AppendChunks` counts newlines in a prefix window or accepts a base line count from the caller, then adjusts the Range values after chunking.
+
+Suggestion: `AppendChunks` accepts an optional base line number. When zero, ranges are used as-is (for non-line-based chunkers). When non-zero, line-based ranges are offset by that amount.
+
 # Ark Integration
 
 microfts2 and microvec share the same LMDB environment when used together in ark. LMDB does not allow two env handles on the same database path within one process, so the first library opened provides the env to the second.
@@ -354,10 +417,59 @@ LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 2 named
 
 ## FileInfo lookup
 
-`FileInfoByID(fileid)` resolves a fileid to its FileInfo (filename, chunk offsets, line numbers, strategy, modTime, contentHash). microvec search returns `(fileid, chunknum, score)` — the CLI needs to resolve these to human-readable output using this method. Wraps the existing `readFileInfo` in a read transaction.
+`FileInfoByID(fileid)` resolves a fileid to its FileInfo (filename, chunk ranges, strategy, modTime, contentHash). microvec search returns `(fileid, chunknum, score)` — the CLI needs to resolve these to human-readable output using this method. Wraps the existing `readFileInfo` in a read transaction.
 
 ## Scoring
 
 `ScoreFile(query, fpath, fn ScoreFunc)` returns per-chunk scores for a single file using the given scoring function. The machinery is in the search path — this scopes it to one file's index entries.
 
 `SearchResult` gains a `Score float64` field so the general search path also reports per-chunk scores.
+
+# Dynamic Trigram Filtering
+
+## Problem
+
+A static global cutoff can't adapt to what you're searching for. Different content types have different frequency distributions — trigrams that are noise in one corpus are signal in another.
+
+## Design: Caller-Supplied Filter Function
+
+Move the trigram selection policy out of microfts2 and into the caller. microfts2 provides the mechanism (trigram counts, search pipeline); the caller provides the strategy.
+
+### TrigramFilter type
+
+```go
+// TrigramCount pairs a trigram code with its document frequency.
+type TrigramCount struct {
+    Trigram uint32
+    Count   int
+}
+
+// TrigramFilter decides which trigrams to use for a given query.
+// Receives the query's trigrams with their corpus-wide document
+// frequencies, and the total number of indexed chunks.
+// Returns the subset to search with.
+type TrigramFilter func(trigrams []TrigramCount, totalChunks int) []TrigramCount
+```
+
+### Search integration
+
+`WithTrigramFilter(fn TrigramFilter)` search option supplies a filter function.
+
+- The search path looks up each query trigram's C record count, calls the filter, and uses the returned subset.
+- When no filter is supplied, `FilterAll` is used (all query trigrams searched).
+- `WithTrigramFilter` applies to both `Search` and `ScoreFile`.
+
+### Stock filters
+
+microfts2 ships stock filter functions:
+
+- `FilterAll`: uses every query trigram, no filtering.
+- `FilterByRatio(maxRatio float64)`: skips trigrams appearing in more than `maxRatio` of total chunks. E.g., `FilterByRatio(0.50)` skips trigrams in >50% of chunks.
+- `FilterBestN(n int)`: keeps the N trigrams with the lowest document frequency. Good for long queries where only the most discriminating trigrams matter.
+
+### Trigram count lookup
+
+Per-query C record point reads: look up each query trigram's sparse C record at search time. Typically 3-10 LMDB reads per query.
+
+The total chunk count is derived from the database (sum of file chunk counts from N records, or maintained as a counter).
+

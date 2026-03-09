@@ -1,6 +1,7 @@
 package microfts2
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +19,29 @@ func testDB(t *testing.T) (*DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Add a line-based chunking strategy (each line is a chunk)
-	db.AddStrategy("line", "awk 'BEGIN{pos=0} {pos+=length($0)+1; print pos}' ")
+	// Add a line-based chunking strategy using built-in func
+	db.AddStrategyFunc("line", LineChunkFunc)
 	t.Cleanup(func() { db.Close() })
 	return db, dir
+}
+
+// fixedChunkFunc returns a ChunkFunc that splits content into fixed-size byte chunks.
+func fixedChunkFunc(size int) ChunkFunc {
+	return func(_ string, content []byte, yield func(Chunk) bool) error {
+		chunkNum := 1
+		for start := 0; start < len(content); start += size {
+			end := start + size
+			if end > len(content) {
+				end = len(content)
+			}
+			r := fmt.Sprintf("b%d", chunkNum)
+			if !yield(Chunk{Range: []byte(r), Content: content[start:end]}) {
+				return nil
+			}
+			chunkNum++
+		}
+		return nil
+	}
 }
 
 func writeTestFile(t *testing.T, dir, name, content string) string {
@@ -81,11 +101,6 @@ func TestDBSearchFindsContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build index so active set is available
-	if err := db.BuildIndex(100); err != nil {
-		t.Fatal(err)
-	}
-
 	sr, err := db.Search("searchable")
 	if err != nil {
 		t.Fatal(err)
@@ -115,36 +130,12 @@ func TestDBRemoveFile(t *testing.T) {
 	}
 }
 
-func TestDBRebuildWithDifferentCutoff(t *testing.T) {
-	db, dir := testDB(t)
-	// Add files with diverse content to create trigram distribution
-	for i := 0; i < 5; i++ {
-		content := strings.Repeat("unique"+string(rune('a'+i))+" ", 20) + "\n"
-		fp := writeTestFile(t, dir, "test"+string(rune('0'+i))+".txt", content)
-		if _, err := db.AddFile(fp, "line"); err != nil {
-			t.Fatal(err)
-		}
-	}
 
-	if err := db.BuildIndex(50); err != nil {
-		t.Fatal(err)
-	}
-	active50 := len(db.activeTrigrams)
-
-	if err := db.BuildIndex(30); err != nil {
-		t.Fatal(err)
-	}
-	active30 := len(db.activeTrigrams)
-
-	if active30 >= active50 {
-		t.Errorf("30%% cutoff (%d active) should have fewer trigrams than 50%% (%d)", active30, active50)
-	}
-}
 
 func TestDBReindex(t *testing.T) {
 	db, dir := testDB(t)
 	// Add a second strategy that chunks every 10 bytes
-	db.AddStrategy("fixed10", "awk 'BEGIN{for(i=10;i<=600;i+=10)print i}'")
+	db.AddStrategyFunc("fixed10", fixedChunkFunc(10))
 
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
 
@@ -192,11 +183,6 @@ func TestDBLongFilename(t *testing.T) {
 	}
 
 	if _, err := db.AddFile(fp, "line"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Use 100% cutoff so all trigrams are active (small corpus)
-	if err := db.BuildIndex(100); err != nil {
 		t.Fatal(err)
 	}
 
@@ -364,8 +350,9 @@ func TestDBCustomDBNames(t *testing.T) {
 	dbPath := filepath.Join(dir, "testdb")
 
 	db, err := Create(dbPath, Options{
-		ContentDBName: "myc",
-		IndexDBName:   "myi",
+		CaseInsensitive: true,
+		ContentDBName:   "myc",
+		IndexDBName:     "myi",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,7 +367,7 @@ func TestDBCustomDBNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	if db2.settings.SearchCutoff != 50 {
+	if !db2.settings.CaseInsensitive {
 		t.Error("settings not preserved with custom DB names")
 	}
 }
@@ -406,11 +393,6 @@ func TestDBIncrementalIndex(t *testing.T) {
 	db, dir := testDB(t)
 	fp1 := writeTestFile(t, dir, "a.txt", "alpha bravo charlie\n")
 	if _, err := db.AddFile(fp1, "line"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Build index with 100% so all trigrams are active
-	if err := db.BuildIndex(100); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,37 +440,6 @@ func TestDBSearchReturnsIndexStatus(t *testing.T) {
 	}
 }
 
-func TestDBBuildIndexCutoff(t *testing.T) {
-	db, dir := testDB(t)
-	// Add diverse files to create trigram distribution
-	for i := 0; i < 5; i++ {
-		content := strings.Repeat("word"+string(rune('a'+i))+" ", 20) + "\n"
-		fp := writeTestFile(t, dir, "f"+string(rune('0'+i))+".txt", content)
-		if _, err := db.AddFile(fp, "line"); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Build with higher cutoff — active set should be larger
-	if err := db.BuildIndex(60); err != nil {
-		t.Fatal(err)
-	}
-	active60 := len(db.activeTrigrams)
-
-	if err := db.BuildIndex(30); err != nil {
-		t.Fatal(err)
-	}
-	active30 := len(db.activeTrigrams)
-
-	if active30 >= active60 {
-		t.Errorf("cutoff 30%% (%d active) should be less than cutoff 60%% (%d)", active30, active60)
-	}
-
-	// Settings should reflect the configured values
-	if db.settings.SearchCutoff != 30 {
-		t.Errorf("SearchCutoff = %d, want 30", db.settings.SearchCutoff)
-	}
-}
 
 func TestDBEnv(t *testing.T) {
 	db, _ := testDB(t)
@@ -521,7 +472,7 @@ func TestDBAddFileReturnsFileid(t *testing.T) {
 
 func TestDBReindexReturnsFileid(t *testing.T) {
 	db, dir := testDB(t)
-	db.AddStrategy("fixed10", "awk 'BEGIN{for(i=10;i<=600;i+=10)print i}'")
+	db.AddStrategyFunc("fixed10", fixedChunkFunc(10))
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\n")
 
 	origID, err := db.AddFile(fp, "line")
@@ -560,8 +511,8 @@ func TestDBFileInfoByID(t *testing.T) {
 	if info.ChunkingStrategy != "line" {
 		t.Errorf("ChunkingStrategy = %q, want line", info.ChunkingStrategy)
 	}
-	if len(info.ChunkStartLines) == 0 {
-		t.Error("ChunkStartLines should not be empty")
+	if len(info.ChunkRanges) == 0 {
+		t.Error("ChunkRanges should not be empty")
 	}
 }
 
@@ -570,11 +521,6 @@ func TestDBScoreFile(t *testing.T) {
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
 
 	if _, err := db.AddFile(fp, "line"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Build index so active set is established
-	if err := db.BuildIndex(100); err != nil {
 		t.Fatal(err)
 	}
 
@@ -705,9 +651,6 @@ func TestDBAddFileCJKContent(t *testing.T) {
 	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.BuildIndex(50); err != nil {
-		t.Fatal(err)
-	}
 	// Search for cross-boundary bytes of 你好
 	sr, err := db.Search("你好")
 	if err != nil {
@@ -727,16 +670,8 @@ func TestDBAddStrategyFunc(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Register a func strategy that puts each line in its own chunk
-	lineFunc := func(path string, content []byte) ([]int64, error) {
-		var offsets []int64
-		for i, b := range content {
-			if b == '\n' {
-				offsets = append(offsets, int64(i+1))
-			}
-		}
-		return offsets, nil
-	}
+	// Register the built-in line chunker under a different name
+	lineFunc := LineChunkFunc
 	if err := db.AddStrategyFunc("linefunc", lineFunc); err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +762,7 @@ func TestParseQueryTerms(t *testing.T) {
 func TestSearchWithVerify(t *testing.T) {
 	db, dir := testDB(t)
 
-	// Build a corpus with enough variety so trigrams survive the active set cutoff.
+	// Build a corpus with enough variety so trigrams are distinctive.
 	// "daneel" has trigrams dan, ane, nee, eel.
 	// A chunk with "danger" + "caneen" + "heels" shares those trigrams
 	// but doesn't contain the word "daneel" — a false positive without verify.
@@ -845,7 +780,7 @@ func TestSearchWithVerify(t *testing.T) {
 	db.AddFile(fp2, "line")
 	db.AddFile(fp3, "line")
 	db.AddFile(fp4, "line")
-	db.BuildIndex(100)
+
 
 	// Without verify: should find candidates
 	sr, err := db.Search("daneel")
@@ -885,7 +820,7 @@ func TestSearchWithVerifyQuotedTerms(t *testing.T) {
 
 	db.AddFile(fp1, "line")
 	db.AddFile(fp2, "line")
-	db.BuildIndex(50)
+
 
 	// "quick brown" as a quoted phrase — must appear as substring
 	sr, err := db.Search(`"quick brown"`, WithVerify())
@@ -907,7 +842,7 @@ func TestSearchRegexVerifies(t *testing.T) {
 
 	db.AddFile(fp1, "line")
 	db.AddFile(fp2, "line")
-	db.BuildIndex(50)
+
 
 	// regex `\bcat\b` should only match whole word "cat"
 	sr, err := db.SearchRegex(`\bcat\b`)
@@ -927,5 +862,326 @@ func TestSearchRegexVerifies(t *testing.T) {
 	}
 	if !found {
 		t.Error("regex verify should have kept the real match")
+	}
+}
+
+func TestDBSearchWithTrigramFilter(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")
+	fp2 := writeTestFile(t, dir, "b.txt", "hello there\n")
+	fp3 := writeTestFile(t, dir, "c.txt", "goodbye moon\n")
+
+	for _, fp := range []string{fp1, fp2, fp3} {
+		if _, err := db.AddFile(fp, "line"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// FilterAll should return all matches for "hello"
+	sr, err := db.Search("hello", WithTrigramFilter(FilterAll))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) < 2 {
+		t.Errorf("FilterAll: got %d results, want >= 2", len(sr.Results))
+	}
+
+	// FilterBestN(1) should still find results (using only the rarest trigram)
+	sr, err = db.Search("hello", WithTrigramFilter(FilterBestN(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Error("FilterBestN(1): expected results")
+	}
+
+	// FilterByRatio(0.0) should filter everything (no trigram appears in 0% of chunks)
+	sr, err = db.Search("hello", WithTrigramFilter(FilterByRatio(0.0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 0 {
+		t.Errorf("FilterByRatio(0.0): got %d results, want 0", len(sr.Results))
+	}
+}
+
+func TestDBScoreFileWithTrigramFilter(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\n")
+
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// ScoreFile with FilterAll
+	chunks, err := db.ScoreFile("hello", fp, ScoreCoverage, WithTrigramFilter(FilterAll))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("ScoreFile with FilterAll returned no chunks")
+	}
+	foundPositive := false
+	for _, c := range chunks {
+		if c.Score > 0 {
+			foundPositive = true
+		}
+	}
+	if !foundPositive {
+		t.Error("expected at least one chunk with positive score")
+	}
+}
+
+// --- Append Detection Tests ---
+
+func TestFileLengthStoredOnAdd(t *testing.T) {
+	db, dir := testDB(t)
+	content := "hello world\nfoo bar\nbaz qux\n"
+	fpath := writeTestFile(t, dir, "test.txt", content)
+
+	fileid, err := db.AddFile(fpath, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if info.FileLength != int64(len(content)) {
+		t.Errorf("FileLength = %d, want %d", info.FileLength, len(content))
+	}
+}
+
+func TestAppendChunks(t *testing.T) {
+	db, dir := testDB(t)
+	fpath := writeTestFile(t, dir, "test.txt", "alpha\nbeta\ngamma\n")
+
+	fileid, err := db.AddFile(fpath, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify initial state: 3 chunks
+	info, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.ChunkRanges) != 3 {
+		t.Fatalf("initial chunks = %d, want 3", len(info.ChunkRanges))
+	}
+
+	// Append 2 more lines
+	appendContent := []byte("delta\nepsilon\n")
+	err = db.AppendChunks(fileid, appendContent, "line",
+		WithBaseLine(3),
+		WithContentHash("fakehash"),
+		WithModTime(12345),
+		WithFileLength(99),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify: 5 chunks total
+	info, err = db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.ChunkRanges) != 5 {
+		t.Errorf("total chunks = %d, want 5", len(info.ChunkRanges))
+	}
+
+	// Old chunks intact
+	if info.ChunkRanges[0] != "1-1" || info.ChunkRanges[1] != "2-2" || info.ChunkRanges[2] != "3-3" {
+		t.Errorf("old ranges changed: %v", info.ChunkRanges[:3])
+	}
+
+	// New chunks searchable (no WithVerify — disk file doesn't have appended content)
+	sr, err := db.Search("delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Error("search for 'delta' returned no results after append")
+	}
+
+	sr, err = db.Search("epsilon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Error("search for 'epsilon' returned no results after append")
+	}
+
+	// Old content still searchable
+	sr, err = db.Search("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Error("search for 'alpha' returned no results after append")
+	}
+}
+
+func TestAppendChunksWithBaseLine(t *testing.T) {
+	db, dir := testDB(t)
+	fpath := writeTestFile(t, dir, "test.txt", "line1\nline2\nline3\n")
+
+	fileid, err := db.AddFile(fpath, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append with base line offset of 3
+	err = db.AppendChunks(fileid, []byte("line4\nline5\n"), "line", WithBaseLine(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// New ranges should be "4-4" and "5-5", not "1-1" and "2-2"
+	if len(info.ChunkRanges) != 5 {
+		t.Fatalf("total chunks = %d, want 5", len(info.ChunkRanges))
+	}
+	if info.ChunkRanges[3] != "4-4" {
+		t.Errorf("chunk 3 range = %q, want %q", info.ChunkRanges[3], "4-4")
+	}
+	if info.ChunkRanges[4] != "5-5" {
+		t.Errorf("chunk 4 range = %q, want %q", info.ChunkRanges[4], "5-5")
+	}
+}
+
+func TestAppendChunksUpdatesMetadata(t *testing.T) {
+	db, dir := testDB(t)
+	fpath := writeTestFile(t, dir, "test.txt", "hello\n")
+
+	fileid, err := db.AddFile(fpath, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.AppendChunks(fileid, []byte("world\n"), "line",
+		WithContentHash("abc123"),
+		WithModTime(999999),
+		WithFileLength(12),
+		WithBaseLine(1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if info.ContentHash != "abc123" {
+		t.Errorf("ContentHash = %q, want %q", info.ContentHash, "abc123")
+	}
+	if info.ModTime != 999999 {
+		t.Errorf("ModTime = %d, want %d", info.ModTime, 999999)
+	}
+	if info.FileLength != 12 {
+		t.Errorf("FileLength = %d, want %d", info.FileLength, 12)
+	}
+	if len(info.ChunkRanges) != 2 {
+		t.Errorf("ChunkRanges len = %d, want 2", len(info.ChunkRanges))
+	}
+	if len(info.ChunkTokenCounts) != 2 {
+		t.Errorf("ChunkTokenCounts len = %d, want 2", len(info.ChunkTokenCounts))
+	}
+}
+
+func TestAppendChunksInvalidFileid(t *testing.T) {
+	db, _ := testDB(t)
+
+	err := db.AppendChunks(99999, []byte("data\n"), "line")
+	if err == nil {
+		t.Error("expected error for nonexistent fileid")
+	}
+}
+
+// test-DB.md: per-token trigram search order independence | R180, R181, R182
+func TestSearchOrderIndependence(t *testing.T) {
+	db, dir := testDB(t)
+
+	f := filepath.Join(dir, "test.txt")
+	os.WriteFile(f, []byte("daneel olivaw is here\n"), 0644)
+	db.AddFile(f, "line")
+
+	r1, err := db.Search("daneel olivaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := db.Search("olivaw daneel")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(r1.Results) != len(r2.Results) {
+		t.Fatalf("order-dependent results: %q returned %d, %q returned %d",
+			"daneel olivaw", len(r1.Results), "olivaw daneel", len(r2.Results))
+	}
+	if len(r1.Results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+}
+
+// test-DB.md: quoted phrase trigrams preserve adjacency | R179, R180
+func TestSearchQuotedPhrase(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := filepath.Join(dir, "adjacent.txt")
+	os.WriteFile(f1, []byte("hello world greeting\n"), 0644)
+	db.AddFile(f1, "line")
+
+	f2 := filepath.Join(dir, "separated.txt")
+	os.WriteFile(f2, []byte("hello other world greeting\n"), 0644)
+	db.AddFile(f2, "line")
+
+	// Quoted phrase should produce cross-boundary trigrams for adjacency
+	r, err := db.Search(`"hello world"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should match the adjacent file
+	found := false
+	for _, res := range r.Results {
+		if res.Path == f1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected adjacent file in results")
+	}
+}
+
+// test-DB.md: trailing whitespace trimmed | R178
+func TestSearchTrailingWhitespace(t *testing.T) {
+	db, dir := testDB(t)
+
+	f := filepath.Join(dir, "test.txt")
+	os.WriteFile(f, []byte("daneel is a robot\n"), 0644)
+	db.AddFile(f, "line")
+
+	r1, err := db.Search("daneel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := db.Search("daneel ")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(r1.Results) != len(r2.Results) {
+		t.Fatalf("trailing space changed results: %q returned %d, %q returned %d",
+			"daneel", len(r1.Results), "daneel ", len(r2.Results))
 	}
 }

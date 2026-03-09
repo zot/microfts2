@@ -1,5 +1,5 @@
 # Sequence: Search
-**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127
+**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127, R132, R134, R135, R136, R137, R140, R141, R142, R143, R144, R178, R179, R180, R181, R182
 
 Participants: DB, Trigrams
 
@@ -11,37 +11,44 @@ DB                                        Trigrams
  |  resolve scoring function from opts      |
  |  (default: coverage)                     |
  |                                          |
- |-- Trigrams(query) ---------------------> |
- | <-- queryTrigrams[] (char-internal skip) |
+ |  trim query whitespace                   |
+ |  parse query into terms:                 |
+ |    parseQueryTerms(query)                |
+ |    (space-split, "quoted" = single term) |
  |                                          |
- |  read A record (packed sorted trigrams)  |
- |  build map for O(1) active lookup       |
- |  filter query trigrams to active set    |
+ |  for each term:                          |
+ |-- Trigrams(term) ----------------------> |
+ | <-- termTrigrams[] (char-internal skip)  |
+ |                                          |
+ |  union all term trigrams into            |
+ |    queryTrigrams[] (deduplicated)        |
+ |                                          |
+ |  select query trigrams via filter:       |
+ |    for each query trigram:               |
+ |      point-read C[tri:3] for count       |
+ |    get total chunk count from DB         |
+ |    call filter([]TrigramCount, total)    |
+ |    (default: FilterAll — use all)        |
  |  if none: return empty results           |
  |                                          |
- |  for each active query trigram:          |
- |    scan index DB range:                  |
- |      [trigram,0,0,0]..[trigram+1,0,0,0]  |
- |    collect (fileid, chunknum, count)     |
- |                                          |
- |  intersect candidate sets by            |
- |    (fileid, chunknum)                    |
+ |  for each term's selected trigrams:      |
+ |    scan index DB range per trigram       |
+ |    intersect within term                 |
+ |  intersect candidate sets across terms   |
  |  accumulate chunkCounts map per chunk    |
  |                                          |
  |  for each (fileid, chunknum) in result:  |
  |    look up FileInfo from N record        |
- |    (filename, chunk start/end lines,     |
+ |    (filename, chunkRanges,               |
  |     chunkTokenCount)                     |
  |    score = scoreFunc(queryTrigrams,      |
  |      chunkCounts, chunkTokenCount)       |
  |                                          |
  |  if WithVerify:                          |
- |    tokenize query into terms             |
- |    (space-split, "quoted" = single term) |
  |    for each result:                      |
- |      read chunk text from disk           |
- |        (FileInfo.ChunkOffsets + file)    |
- |      lowercase chunk text                |
+ |      re-chunk file using stored strategy |
+ |      find chunk by range match           |
+ |      lowercase chunk content             |
  |      for each term:                      |
  |        if term not found as substring:   |
  |          discard result                  |
@@ -58,6 +65,7 @@ DB
  |  resolve scoring function from opts
  |  (default: coverage)
  |
+ |  compile pattern with regexp.Compile
  |  parse pattern with regexp/syntax
  |  extract trigram query from AST:
  |    boolean AND/OR expression of trigrams
@@ -75,19 +83,19 @@ DB
  |    score = scoreFunc(queryTrigrams,
  |      chunkCounts, chunkTokenCount)
  |
- |  verify (always):                       |
- |    compile pattern with regexp.Compile   |
- |    for each result:                      |
- |      read chunk text from disk           |
- |      if !regex.Match(chunk): discard     |
+ |  verify (always):
+ |    for each result:
+ |      re-chunk file using stored strategy
+ |      find chunk by range match
+ |      if !regex.Match(content): discard
  |
  |  sort by score descending
  |  return *SearchResults{Results, Status}
 ```
 
-SearchResult struct: Path string, StartLine int, EndLine int, Score float64
+SearchResult struct: Path string, Range string, Score float64
 SearchResults struct: Results []SearchResult, Status IndexStatus
 ScoreFunc type: func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64
-CLI prints: `filepath:startline-endline`
+CLI prints: `filepath:range`
 CLI `-regex` flag selects SearchRegex path
 CLI `-score coverage|density` selects scoring strategy

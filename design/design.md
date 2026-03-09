@@ -28,13 +28,14 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-add.md → `db.go`, `chunker.go`, `charset.go`, `keychain.go`
 - [x] seq-search.md → `db.go`, `charset.go`
 - [x] seq-score.md → `db.go`, `charset.go`
-- [x] seq-build-index.md → `db.go`
 - [x] seq-stale.md → `db.go`, `cmd/microfts/main.go`
+- [x] seq-append.md → `db.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
 - [x] test-Bitset.md → `bitset_test.go`
 - [x] test-DB.md → `db_test.go`
+- [x] test-Chunker.md → `chunker_test.go`
 
 ## Gaps
 
@@ -47,4 +48,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [ ] O5: No test for R record encode/decode roundtrip
 - [x] O6: No test for CharSet.TrigramCounts
 - [ ] O7: No test for sparse C record encode/decode (incrementCCount, decrementCCount)
-- [ ] O8: No test for packed trigram encode/decode roundtrip (encodePackedTrigrams, decodePackedTrigrams)
+- [x] O8: Packed trigram functions removed (A record eliminated)
+- [ ] A3: Removed requirements uncovered: R7, R28, R36, R48, R54, R75, R76, R138, R145 — A record, BuildIndex, searchCutoff replaced by dynamic TrigramFilter

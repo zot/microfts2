@@ -2,7 +2,7 @@
 
 A dynamic trigram index backed by LMDB, written in Go. Usable as a CLI tool or as a library.
 
-microfts2 indexes files into trigram bitsets organized by chunks, then builds an inverted index for fast substring search. The index can be dropped and rebuilt from stored content without re-reading source files.
+microfts2 indexes files into raw byte trigrams (24-bit, 16M possible) organized by chunks, then maintains an inverted index for fast substring search. The index is maintained incrementally — every add/remove updates it immediately.
 
 ## Install
 
@@ -21,10 +21,10 @@ go build ./cmd/microfts
 ## Quick Start
 
 ```sh
-# Create a database with default character set
+# Create a database
 microfts init -db myindex
 
-# Register a chunking strategy (any command that outputs byte offsets)
+# Register a chunking strategy (any command that outputs range\tcontent lines)
 microfts strategy add -db myindex -name lines -cmd "microfts chunk-lines"
 
 # Add files
@@ -43,13 +43,13 @@ microfts search -r -db myindex "func Open"
 
 ## How It Works
 
-Each character maps to 6 bits (configurable character set, up to 63 characters plus space). Three consecutive characters form an 18-bit trigram. Each file chunk gets a 32KB bitset recording which trigrams appear in it.
+Every byte is its own value — no character set mapping. Three consecutive bytes form a 24-bit trigram. UTF-8 multibyte characters produce cross-boundary byte trigrams; character-internal trigrams are skipped.
 
-Search computes the query's trigrams, intersects posting lists from the inverted index, and returns matching file/chunk locations.
+Search computes the query's trigrams, optionally filters them via a caller-supplied `TrigramFilter`, intersects posting lists from the inverted index, and returns matching file/chunk locations.
 
-**Two-tree design:** Content and index live in separate LMDB subdatabases. The content DB stores trigram bitsets, file metadata, and settings. The index DB stores the inverted trigram-to-chunk mapping and can be dropped and rebuilt at any time from the content DB alone.
+**Two-tree design:** Content and index live in separate LMDB subdatabases. The content DB stores trigram frequency counts (sparse C records), file metadata, and settings. The index DB stores the inverted trigram-to-chunk mapping, maintained incrementally on every add/remove.
 
-**Active trigram cutoff:** Not all trigrams are useful for search — very common ones (like `the`) match too many chunks to be selective. The cutoff percentile (default 50) controls which trigrams are "active" in the index: only trigrams in the bottom N% by frequency get indexed. A lower cutoff means fewer, more selective trigrams and a smaller index; a higher cutoff means more trigrams indexed and broader coverage. Use `build-index -cutoff <percentile>` to change it — no need to re-add files, since the content DB retains the full trigram bitsets. Subsequent searches use the last-built cutoff.
+**Dynamic trigram filtering:** Query trigram selection is handled at search time via `TrigramFilter` functions. Stock filters include `FilterAll` (use all trigrams), `FilterByRatio` (skip high-frequency trigrams), and `FilterBestN` (keep N most selective). Callers can supply custom filters.
 
 **Staleness detection:** Each indexed file records its modification time and SHA-256 hash. Checking mod time first avoids hashing unchanged files. The `-r` flag refreshes stale files before any command.
 
@@ -59,12 +59,12 @@ All commands require `-db <path>`. Optional: `-content-db`, `-index-db` for cust
 
 | Command | Description |
 |---------|-------------|
-| `init` | Create a new database. `-charset`, `-case-insensitive`, `-aliases` |
+| `init` | Create a new database. `-case-insensitive`, `-aliases` |
 | `add` | Add files. `-strategy <name>` |
-| `search` | Search for text. Builds index on demand. Output: `path:start-end` |
+| `search` | Search for text. `-regex`, `-score coverage\|density`, `-verify` |
 | `delete` | Remove files from the database |
 | `reindex` | Re-chunk files with a different strategy. `-strategy <name>` |
-| `build-index` | Rebuild the index. `-cutoff <percentile>` (default 50) |
+| `score` | Score named files against a query. `-score coverage\|density` |
 | `stale` | List stale and missing files |
 | `strategy add\|remove\|list` | Manage chunking strategies |
 | `chunk-lines` | Built-in chunker: one chunk per line |
@@ -79,20 +79,21 @@ All commands require `-db <path>`. Optional: `-content-db`, `-index-db` for cust
 import "microfts2"
 
 // Lifecycle
-db, err := microfts.Create(path, microfts.Options{CharSet: "abc..."})
+db, err := microfts.Create(path, microfts.Options{})
 db, err := microfts.Open(path, microfts.Options{})
 db.Close()
 
 // Content
-db.AddFile(filepath, strategyName)
+fileid, err := db.AddFile(filepath, strategyName)
 db.RemoveFile(filepath)
-db.Reindex(filepath, strategyName)
+fileid, err := db.Reindex(filepath, strategyName)
 
 // Search
-results, err := db.Search("query")  // []SearchResult{Path, StartLine, EndLine}
+results, err := db.Search("query", microfts.WithTrigramFilter(microfts.FilterAll))
+results, err := db.SearchRegex("pattern")
 
-// Index
-db.BuildIndex(cutoffPercentile)
+// Scoring
+chunks, err := db.ScoreFile("query", filepath, microfts.CoverageScore)
 
 // Staleness
 status, err := db.CheckFile(filepath)    // FileStatus{Path, Status, FileID, Strategy}
@@ -101,12 +102,13 @@ refreshed, err := db.RefreshStale("")    // reindex stale files
 
 // Strategies
 db.AddStrategy(name, command)
+db.AddStrategyFunc(name, fn)
 db.RemoveStrategy(name)
 ```
 
 ## Chunking Strategies
 
-A chunking strategy is any command that takes a filename argument and prints byte offsets to stdout, one per line. Three built-in chunkers are included as subcommands.
+A chunking strategy is either an external command or a Go function that takes a file and produces chunks. Each chunk has an opaque range label and text content to index.
 
 External chunker example using `awk`:
 

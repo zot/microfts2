@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -50,8 +49,6 @@ func main() {
 		cmdDelete()
 	case "reindex":
 		cmdReindex()
-	case "build-index":
-		cmdBuildIndex()
 	case "strategy":
 		cmdStrategy()
 	case "stale":
@@ -64,6 +61,8 @@ func main() {
 		cmdChunkLinesOverlap()
 	case "chunk-words-overlap":
 		cmdChunkWordsOverlap()
+	case "chunk-markdown":
+		cmdChunkMarkdown()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		usage()
@@ -85,8 +84,8 @@ func extractRefreshFlag(args []string) (bool, []string) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, build-index, strategy, stale, score,")
-	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap")
+	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score,")
+	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
 	os.Exit(1)
@@ -216,7 +215,7 @@ func cmdSearch() {
 		fatal("search", err)
 	}
 	for _, r := range sr.Results {
-		fmt.Printf("%s:%d-%d\n", r.Path, r.StartLine, r.EndLine)
+		fmt.Printf("%s:%s\n", r.Path, r.Range)
 	}
 }
 
@@ -267,30 +266,6 @@ func cmdReindex() {
 			fatal("reindex "+fp, err)
 		}
 	}
-}
-
-func cmdBuildIndex() {
-	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
-	cutoff := fs.Int("cutoff", 50, "search cutoff percentile")
-	fs.Parse(os.Args[1:])
-
-	if *dbPath == "" {
-		fmt.Fprintln(os.Stderr, "build-index: -db required")
-		os.Exit(1)
-	}
-
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
-	if err != nil {
-		fatal("open", err)
-	}
-	defer db.Close()
-	doRefresh(db)
-
-	if err := db.BuildIndex(*cutoff); err != nil {
-		fatal("build-index", err)
-	}
-	fmt.Println("index built")
 }
 
 func cmdRefreshOnly() {
@@ -397,7 +372,7 @@ func cmdScore() {
 			fatal("score "+fp, err)
 		}
 		for _, c := range chunks {
-			fmt.Printf("%s:%d-%d\t%.4f\n", fp, c.StartLine, c.EndLine, c.Score)
+			fmt.Printf("%s:%s\t%.4f\n", fp, c.Range, c.Score)
 		}
 	}
 }
@@ -513,21 +488,15 @@ func cmdChunkLines() {
 		os.Exit(1)
 	}
 
-	f, err := os.Open(fs.Arg(0))
+	data, err := os.ReadFile(fs.Arg(0))
 	if err != nil {
 		fatal("chunk-lines", err)
 	}
-	defer f.Close()
 
-	offset := int64(0)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		offset += int64(len(scanner.Bytes())) + 1 // +1 for newline
-		fmt.Println(offset)
-	}
-	if err := scanner.Err(); err != nil {
-		fatal("chunk-lines", err)
-	}
+	microfts2.LineChunkFunc(fs.Arg(0), data, func(c microfts2.Chunk) bool {
+		fmt.Printf("%s\t%s", c.Range, c.Content)
+		return true
+	})
 }
 
 func cmdChunkLinesOverlap() {
@@ -545,17 +514,30 @@ func cmdChunkLinesOverlap() {
 		fatal("chunk-lines-overlap", err)
 	}
 
-	// Find all line-start offsets
-	starts := []int64{0}
+	// Find all line-start byte offsets and count lines
+	lineStarts := []int{0}
 	for i, b := range data {
 		if b == '\n' && i+1 < len(data) {
-			starts = append(starts, int64(i+1))
+			lineStarts = append(lineStarts, i+1)
 		}
 	}
+	totalLines := len(lineStarts)
 
 	step := max(*lines-*overlap, 1)
-	for i := step; i < len(starts); i += step {
-		fmt.Println(starts[i])
+	for startLine := 0; startLine < totalLines; startLine += step {
+		endLine := startLine + *lines
+		if endLine > totalLines {
+			endLine = totalLines
+		}
+		startByte := lineStarts[startLine]
+		var endByte int
+		if endLine < totalLines {
+			endByte = lineStarts[endLine]
+		} else {
+			endByte = len(data)
+		}
+		content := data[startByte:endByte]
+		fmt.Printf("%d-%d\t%s\n", startLine+1, endLine, strings.ReplaceAll(string(content), "\n", "\\n"))
 	}
 }
 
@@ -587,7 +569,36 @@ func cmdChunkWordsOverlap() {
 	}
 
 	step := max(*words-*overlap, 1)
-	for i := step; i < len(locs); i += step {
-		fmt.Println(locs[i][0])
+	chunkNum := 1
+	for i := 0; i < len(locs); i += step {
+		endIdx := i + *words
+		if endIdx > len(locs) {
+			endIdx = len(locs)
+		}
+		startByte := locs[i][0]
+		endByte := locs[endIdx-1][1]
+		content := data[startByte:endByte]
+		fmt.Printf("w%d\t%s\n", chunkNum, strings.ReplaceAll(string(content), "\n", "\\n"))
+		chunkNum++
 	}
+}
+
+// CRC: crc-CLI.md | R175
+func cmdChunkMarkdown() {
+	fs := flag.CommandLine
+	fs.Parse(os.Args[1:])
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "chunk-markdown: file required")
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fatal("chunk-markdown", err)
+	}
+
+	microfts2.MarkdownChunkFunc(fs.Arg(0), data, func(c microfts2.Chunk) bool {
+		fmt.Printf("%s\t%s", c.Range, c.Content)
+		return true
+	})
 }

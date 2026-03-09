@@ -1,5 +1,5 @@
 # Sequence: Score File
-**Requirements:** R96, R97, R98, R103
+**Requirements:** R96, R97, R98, R103, R133, R135, R136, R137, R139, R143, R144
 
 Participants: DB, Trigrams
 
@@ -12,9 +12,12 @@ DB                                        Trigrams
  |-- Trigrams(query) ---------------------> |
  | <-- queryTrigrams[] -------------------- |
  |                                          |
- |  read A record (packed sorted trigrams)  |
- |  build map for O(1) active lookup       |
- |  filter query trigrams to active set    |
+ |  select query trigrams via filter:       |
+ |    for each query trigram:               |
+ |      point-read C[tri:3] for count       |
+ |    get total chunk count from DB         |
+ |    call filter([]TrigramCount, total)    |
+ |    (default: FilterAll — use all)        |
  |  if none: return empty []ScoredChunk     |
  |                                          |
  |  for each chunk of fileid:               |
@@ -22,11 +25,11 @@ DB                                        Trigrams
  |      to build chunkCounts map            |
  |    score = fn(queryTrigrams,             |
  |      chunkCounts, chunkTokenCount)       |
- |    read start/end lines from FileInfo    |
- |    append ScoredChunk{start, end, score} |
+ |    read range from FileInfo.ChunkRanges  |
+ |    append ScoredChunk{range, score}      |
  |                                          |
  |  return []ScoredChunk                    |
 ```
 
-ScoredChunk struct: StartLine int, EndLine int, Score float64
-CLI prints: `filepath:startline-endline\tscore`
+ScoredChunk struct: Range string, Score float64
+CLI prints: `filepath:range\tscore`
