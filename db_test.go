@@ -1185,3 +1185,198 @@ func TestSearchTrailingWhitespace(t *testing.T) {
 			"daneel", len(r1.Results), "daneel ", len(r2.Results))
 	}
 }
+
+// test-DB.md: regex filter AND | R183, R185, R188, R189
+func TestRegexFilterAND(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "ab.txt", "alpha beta\n")
+	f2 := writeTestFile(t, dir, "ag.txt", "alpha gamma\n")
+	f3 := writeTestFile(t, dir, "abg.txt", "alpha beta gamma\n")
+	db.AddFile(f1, "line")
+	db.AddFile(f2, "line")
+	db.AddFile(f3, "line")
+
+	r, err := db.Search("alpha", WithRegexFilter("beta", "gamma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(r.Results))
+	}
+	if r.Results[0].Path != f3 {
+		t.Errorf("expected %s, got %s", f3, r.Results[0].Path)
+	}
+}
+
+// test-DB.md: except-regex subtract | R184, R188, R189
+func TestExceptRegexSubtract(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "open.txt", "@status: open task\n")
+	f2 := writeTestFile(t, dir, "done.txt", "@status: done task\n")
+	db.AddFile(f1, "line")
+	db.AddFile(f2, "line")
+
+	r, err := db.Search("task", WithExceptRegex(`@status:.*done`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(r.Results))
+	}
+	if r.Results[0].Path != f1 {
+		t.Errorf("expected %s, got %s", f1, r.Results[0].Path)
+	}
+}
+
+// test-DB.md: regex filter with SearchRegex | R189, R190
+func TestRegexFilterWithSearchRegex(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "ab.txt", "alpha beta\n")
+	f2 := writeTestFile(t, dir, "ag.txt", "alpha gamma\n")
+	db.AddFile(f1, "line")
+	db.AddFile(f2, "line")
+
+	r, err := db.SearchRegex("alpha", WithExceptRegex("gamma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(r.Results))
+	}
+	if r.Results[0].Path != f1 {
+		t.Errorf("expected %s, got %s", f1, r.Results[0].Path)
+	}
+}
+
+// test-DB.md: regex filter bad pattern returns error | R186
+func TestRegexFilterBadPattern(t *testing.T) {
+	db, dir := testDB(t)
+
+	f := writeTestFile(t, dir, "test.txt", "hello world\n")
+	db.AddFile(f, "line")
+
+	_, err := db.Search("hello", WithRegexFilter("[invalid"))
+	if err == nil {
+		t.Fatal("expected error for invalid regex pattern")
+	}
+}
+
+// test-DB.md: regex filter combined with verify | R188
+func TestRegexFilterCombinedWithVerify(t *testing.T) {
+	db, dir := testDB(t)
+
+	f := writeTestFile(t, dir, "test.txt", "alpha beta gamma\n")
+	db.AddFile(f, "line")
+
+	r, err := db.Search("alpha", WithVerify(), WithExceptRegex("gamma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 0 {
+		t.Fatalf("expected 0 results (except-regex should reject), got %d", len(r.Results))
+	}
+}
+
+// --- GetChunks tests ---
+
+func TestGetChunksTargetOnly(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "test.txt", "line one\nline two\nline three\nline four\nline five\n")
+	db.AddFile(f, "line")
+
+	chunks, err := db.GetChunks(f, "3-3", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	if chunks[0].Range != "3-3" {
+		t.Errorf("expected range 3-3, got %s", chunks[0].Range)
+	}
+	if chunks[0].Index != 2 {
+		t.Errorf("expected index 2, got %d", chunks[0].Index)
+	}
+	if chunks[0].Content != "line three\n" {
+		t.Errorf("expected 'line three\\n', got %q", chunks[0].Content)
+	}
+}
+
+func TestGetChunksWithNeighbors(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "test.txt", "one\ntwo\nthree\nfour\nfive\n")
+	db.AddFile(f, "line")
+
+	chunks, err := db.GetChunks(f, "3-3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	// Verify positional order and indices.
+	for i, want := range []struct {
+		rng string
+		idx int
+	}{{"2-2", 1}, {"3-3", 2}, {"4-4", 3}} {
+		if chunks[i].Range != want.rng {
+			t.Errorf("chunk %d: expected range %s, got %s", i, want.rng, chunks[i].Range)
+		}
+		if chunks[i].Index != want.idx {
+			t.Errorf("chunk %d: expected index %d, got %d", i, want.idx, chunks[i].Index)
+		}
+	}
+}
+
+func TestGetChunksClampedAtBoundaries(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "test.txt", "one\ntwo\nthree\nfour\nfive\n")
+	db.AddFile(f, "line")
+
+	// Request 3 before first chunk — should clamp to just chunk 0.
+	chunks, err := db.GetChunks(f, "1-1", 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (clamped), got %d", len(chunks))
+	}
+	if chunks[0].Index != 0 {
+		t.Errorf("expected index 0, got %d", chunks[0].Index)
+	}
+
+	// Request 3 after last chunk — should clamp to just chunk 4.
+	chunks, err = db.GetChunks(f, "5-5", 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (clamped), got %d", len(chunks))
+	}
+	if chunks[0].Index != 4 {
+		t.Errorf("expected index 4, got %d", chunks[0].Index)
+	}
+}
+
+func TestGetChunksRangeNotFound(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "test.txt", "one\ntwo\nthree\n")
+	db.AddFile(f, "line")
+
+	_, err := db.GetChunks(f, "999-999", 0, 0)
+	if err == nil {
+		t.Fatal("expected error for missing range")
+	}
+}
+
+func TestGetChunksFileNotInDB(t *testing.T) {
+	db, _ := testDB(t)
+
+	_, err := db.GetChunks("/nonexistent/file.txt", "1-1", 0, 0)
+	if err == nil {
+		t.Fatal("expected error for file not in database")
+	}
+}

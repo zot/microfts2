@@ -1,5 +1,5 @@
 # CLI
-**Requirements:** R1, R34, R39, R41, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74, R89, R100, R108, R126, R132, R133, R175
+**Requirements:** R1, R34, R39, R41, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74, R89, R100, R108, R126, R132, R133, R175, R192, R193, R194, R195, R204, R205
 
 Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB, formats output.
 
@@ -9,7 +9,7 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 ## Does
 - init: create database (--case-insensitive, --content-db, --index-db)
 - add: add files with a chunking strategy (--strategy)
-- search: query and print `filepath:range` per result; --regex for regex pattern mode; --score coverage|density; --verify for post-filter verification
+- search: query and print `filepath:range` per result; --regex for regex pattern mode; --score coverage|density; --verify for post-filter verification; --filter-regex (repeatable, AND post-filter); --except-regex (repeatable, subtract post-filter). Repeatable flags via stringSlice flag.Value type
 - delete: remove a file
 - reindex: reindex a file with a new strategy (--strategy)
 - strategy add/remove/list: manage chunking strategies
@@ -20,6 +20,7 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 - chunk-lines-overlap: output `range\tcontent` for overlapping line windows (--lines, --overlap)
 - chunk-words-overlap: output `range\tcontent` for overlapping word windows (--words, --overlap, --pattern)
 - chunk-markdown: output `range\tcontent` for markdown paragraph-based chunking
+- chunks: retrieve target chunk + neighbors, output JSONL with path/range/content/index per chunk; --before N, --after N (default 0)
 
 ## Collaborators
 - DB: all operations delegate to DB (chunk-* commands are standalone, no DB needed)
@@ -30,3 +31,4 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 - seq-search.md
 - seq-score.md
 - seq-stale.md
+- seq-chunks.md

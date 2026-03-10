@@ -27,7 +27,7 @@ import (
 // ErrNoChunks is returned when a chunker produces zero chunks for a file.
 var ErrNoChunks = errors.New("chunker produced no chunks")
 
-// CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-score.md, seq-stale.md, seq-append.md
+// CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-score.md, seq-stale.md, seq-append.md, seq-chunks.md
 
 // chunkID identifies a specific chunk within a file.
 type chunkID struct{ fileid, chunknum uint64 }
@@ -94,6 +94,15 @@ type ScoredChunk struct {
 	Score float64
 }
 
+// ChunkResult holds a single chunk with its content and position.
+// R201
+type ChunkResult struct {
+	Path    string `json:"path"`
+	Range   string `json:"range"`
+	Content string `json:"content"`
+	Index   int    `json:"index"` // 0-based position in the file's chunk list
+}
+
 // SearchResults wraps search matches with index health status.
 type SearchResults struct {
 	Results []SearchResult
@@ -138,11 +147,13 @@ type TrigramFilter func(trigrams []TrigramCount, totalChunks int) []TrigramCount
 type SearchOption func(*searchConfig)
 
 type searchConfig struct {
-	scoreFunc     ScoreFunc
-	onlyIDs       map[uint64]struct{} // if non-nil, only include these file IDs
-	exceptIDs     map[uint64]struct{} // if non-nil, exclude these file IDs
-	verify        bool                // post-filter: verify query terms in chunk text
-	trigramFilter TrigramFilter       // if non-nil, caller-supplied trigram selection
+	scoreFunc          ScoreFunc
+	onlyIDs            map[uint64]struct{} // if non-nil, only include these file IDs
+	exceptIDs          map[uint64]struct{} // if non-nil, exclude these file IDs
+	verify             bool                // post-filter: verify query terms in chunk text
+	trigramFilter      TrigramFilter       // if non-nil, caller-supplied trigram selection
+	regexFilters       []string            // AND: every pattern must match chunk content R183
+	exceptRegexFilters []string            // subtract: any match rejects chunk R184
 }
 
 // WithCoverage uses coverage scoring (default): matching / total active query trigrams.
@@ -181,6 +192,18 @@ func WithVerify() SearchOption {
 // WithTrigramFilter supplies a caller-defined trigram selection function.
 func WithTrigramFilter(fn TrigramFilter) SearchOption {
 	return func(c *searchConfig) { c.trigramFilter = fn }
+}
+
+// WithRegexFilter adds AND post-filters: every pattern must match chunk content.
+// Multiple calls accumulate patterns. R183, R185
+func WithRegexFilter(patterns ...string) SearchOption {
+	return func(c *searchConfig) { c.regexFilters = append(c.regexFilters, patterns...) }
+}
+
+// WithExceptRegex adds subtract post-filters: any match rejects the chunk.
+// Multiple calls accumulate patterns. R184, R185
+func WithExceptRegex(patterns ...string) SearchOption {
+	return func(c *searchConfig) { c.exceptRegexFilters = append(c.exceptRegexFilters, patterns...) }
 }
 
 // FilterAll uses every query trigram. No filtering.
@@ -1199,6 +1222,12 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		results = verifyResults(db, results, query)
 	}
 
+	// R188, R189: apply regex post-filters after verify, before sort
+	results, err = applyRegexPostFilters(db, results, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	sortResults(results)
 	return &SearchResults{
 		Results: results,
@@ -1378,6 +1407,44 @@ func verifyResultsRegex(db *DB, results []SearchResult, re *regexp.Regexp) []Sea
 	})
 }
 
+// applyRegexPostFilters compiles regex filter and except-regex patterns from
+// the search config, then applies them as post-filters to the results.
+// R183, R184, R186, R187, R188, R191
+func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]SearchResult, error) {
+	if len(cfg.regexFilters) == 0 && len(cfg.exceptRegexFilters) == 0 {
+		return results, nil
+	}
+	andRegexes := make([]*regexp.Regexp, len(cfg.regexFilters))
+	for i, p := range cfg.regexFilters {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("compile filter-regex %q: %w", p, err)
+		}
+		andRegexes[i] = re
+	}
+	exceptRegexes := make([]*regexp.Regexp, len(cfg.exceptRegexFilters))
+	for i, p := range cfg.exceptRegexFilters {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("compile except-regex %q: %w", p, err)
+		}
+		exceptRegexes[i] = re
+	}
+	return filterResults(db, results, func(chunkContent []byte) bool {
+		for _, re := range andRegexes {
+			if !re.Match(chunkContent) {
+				return false
+			}
+		}
+		for _, re := range exceptRegexes {
+			if re.Match(chunkContent) {
+				return false
+			}
+		}
+		return true
+	}), nil
+}
+
 // resolveResults maps candidates to SearchResults, scoring each chunk.
 func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, cfg searchConfig) []SearchResult {
 	infoCache := make(map[uint64]*FileInfo)
@@ -1460,6 +1527,13 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	}
 
 	results = verifyResultsRegex(db, results, compiled)
+
+	// R188, R189, R190: apply regex post-filters after verify, before sort
+	results, err = applyRegexPostFilters(db, results, cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	sortResults(results)
 	return &SearchResults{
 		Results: results,
@@ -1610,6 +1684,72 @@ func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
 		return err
 	})
 	return info, err
+}
+
+// --- GetChunks ---
+
+// Seq: seq-chunks.md | R197, R198, R199, R200, R201, R202, R203
+// GetChunks retrieves the target chunk (identified by range label) and
+// up to before/after positional neighbors. Returns chunks in positional order.
+func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error) {
+	var info FileInfo
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		finalKey := FinalKey(fpath)
+		val, err := txn.Get(db.contentDBI, finalKey)
+		if err != nil {
+			return fmt.Errorf("file not found: %s", fpath)
+		}
+		fileid := binary.BigEndian.Uint64(val)
+		info, err = readFileInfo(txn, db.contentDBI, fileid)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Find target chunk index by exact range label match.
+	targetIdx := -1
+	for i, r := range info.ChunkRanges {
+		if r == targetRange {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return nil, fmt.Errorf("range %q not found in %s", targetRange, fpath)
+	}
+
+	// Compute window clamped to bounds.
+	lo := max(0, targetIdx-before)
+	hi := min(len(info.ChunkRanges)-1, targetIdx+after)
+
+	// Re-chunk the file to recover content.
+	chunkFn := db.resolveChunkFunc(info.ChunkingStrategy)
+	if chunkFn == nil {
+		return nil, fmt.Errorf("chunking strategy %q not registered", info.ChunkingStrategy)
+	}
+
+	data, err := os.ReadFile(fpath)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []ChunkResult
+	idx := 0
+	chunkFn(fpath, data, func(c Chunk) bool {
+		if idx >= lo && idx <= hi {
+			results = append(results, ChunkResult{
+				Path:    fpath,
+				Range:   string(c.Range),
+				Content: string(c.Content),
+				Index:   idx,
+			})
+		}
+		idx++
+		return idx <= hi // stop early once past window
+	})
+
+	return results, nil
 }
 
 // --- ScoreFile ---

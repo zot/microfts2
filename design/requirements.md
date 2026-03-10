@@ -52,7 +52,7 @@
 
 - **R16:** `C` records: sparse `C[trigram:3] → count:8`, only non-zero trigrams stored
 - **R17:** `I` record: JSON database settings (chunking strategies, case-insensitive flag, aliases, search cutoff)
-- **R19:** `N` records: `[fileid:8]` → JSON with chunk ranges (opaque strings), token counts, and chunking strategy name
+- **R19:** `N` records: `[fileid:8]` → JSON with chunk ranges (opaque strings), token counts, and chunking strategy name; `chunkRanges` array index = chunk number (0-based), preserving chunker emission order; `chunkTokenCounts` is parallel
 - **R20:** `F` records: filename → fileid mapping using key chains for names exceeding 511 bytes
 
 ## Feature: Index DB Records
@@ -309,3 +309,35 @@
 - **R180:** Trigrams are extracted per term, not from the whole query as one byte sequence — prevents cross-boundary trigrams between unrelated words
 - **R181:** Candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms
 - **R182:** (inferred) Query term order does not affect search results — "daneel olivaw" and "olivaw daneel" return the same set
+
+## Feature: Multi-Regex Post-Filtering
+**Source:** specs/main.md
+
+- **R183:** `WithRegexFilter(patterns ...string) SearchOption` adds AND post-filters — every pattern must match chunk content for the chunk to be kept
+- **R184:** `WithExceptRegex(patterns ...string) SearchOption` adds subtract post-filters — any match rejects the chunk
+- **R185:** Multiple calls to `WithRegexFilter` or `WithExceptRegex` accumulate patterns
+- **R186:** Patterns stored as strings in searchConfig; compiled to `*regexp.Regexp` at start of Search/SearchRegex; compilation failure returned as error
+- **R187:** Filtering operates on chunk content recovered by re-chunking the file (same mechanism as WithVerify)
+- **R188:** Filters apply after trigram candidate selection and scoring, before final sort
+- **R189:** Filters apply to both `Search` and `SearchRegex`
+- **R190:** When combined with `SearchRegex`, the primary regex drives trigram extraction; regex filters and except-regex filters are independent post-filters
+- **R191:** Filtering uses the existing `filterResults` helper with a combined match function
+- **R192:** CLI `-filter-regex` flag is repeatable — each adds an AND regex filter
+- **R193:** CLI `-except-regex` flag is repeatable — each adds a subtract regex filter
+- **R194:** CLI repeatable flags implemented via custom `flag.Value` type for string slice accumulation
+- **R195:** (inferred) Both CLI flags work with literal and regex search modes
+- **R196:** (inferred) When no regex filters or except-regex filters are supplied, behavior is unchanged from current
+
+## Feature: Chunk Context Retrieval
+**Source:** specs/main.md
+
+- **R197:** `GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)` retrieves the target chunk and up to N positional neighbors before and after
+- **R198:** Target chunk identified by exact string match of range label against the file's `chunkRanges` array
+- **R199:** Neighbor window: `max(0, targetIndex - before)` to `min(len-1, targetIndex + after)`, inclusive
+- **R200:** Chunk content recovered by re-chunking the file from disk using its stored chunking strategy
+- **R201:** `ChunkResult` struct: `Path string, Range string, Content string, Index int` — index is 0-based position in the file's chunk list
+- **R202:** Returns chunks in positional order (ascending index)
+- **R203:** Error if file not in database, target range not found, file missing from disk, or chunking strategy not registered
+- **R204:** CLI `chunks` subcommand: `microfts chunks -db <path> [-before N] [-after N] <file> <range>` — JSONL output with `path`, `range`, `content`, `index` fields
+- **R205:** `-before` and `-after` default to 0 (target chunk only)
+- **R206:** (inferred) Expansion unit is chunks (strategy-agnostic), not lines or bytes — range labels are opaque

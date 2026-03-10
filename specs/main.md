@@ -76,8 +76,8 @@ These are not stored in the I record -- they're needed to open the databases in 
     - caseInsensitive: boolean
   - 'N' [fileid: 8] -> JSON -- information about file
     - filename: string -- full file path
-    - chunkRanges: array[string] -- opaque range label per chunk (from chunker)
-    - chunkTokenCounts: array[number] -- token count per chunk (for density scoring normalization)
+    - chunkRanges: array[string] -- opaque range label per chunk (from chunker); array index = chunk number (0-based), preserving chunker emission order
+    - chunkTokenCounts: array[number] -- token count per chunk (for density scoring normalization); parallel to chunkRanges
     - chunkingStrategy: string -- which chunking strategy was used
     - modTime: number -- file modification time (Unix nanoseconds) at index time
     - contentHash: string -- SHA-256 hex of file contents at index time
@@ -241,6 +241,8 @@ All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index
   List all stale and missing files. Output: one line per file, `status\tpath` (tab-separated).
 - `microfts score -db <path> [-score coverage|density] <query> <file>...`
   Score named files against a query. Output: one line per chunk, `filepath:range\tscore`.
+- `microfts chunks -db <path> [-before N] [-after N] <file> <range>`
+  Retrieve a target chunk and its neighbors. Looks up the file's chunk list from the N record, finds the target by range label match, returns the target plus up to N chunks before and after. Output: JSONL, one object per chunk with `path`, `range`, `content` fields. The target chunk is always included; neighbors are positional (chunk index ± N). Requires re-chunking the file to recover content. `-before` and `-after` default to 0.
 
 - `-r` flag (global, before subcommand):
   Refresh all stale files before executing the subcommand. Uses each file's existing chunking strategy.
@@ -273,6 +275,9 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption) ([]ScoredChunk, error)
 
+// Chunk Retrieval
+func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
+
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error
 func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error
@@ -292,6 +297,7 @@ SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
 FileInfo: `{ Filename string, ChunkRanges []string, ChunkTokenCounts []int, ChunkingStrategy string, ModTime int64, ContentHash string, FileLength int64 }`
 ScoredChunk: `{ Range string, Score float64 }`
+ChunkResult: `{ Path string, Range string, Content string, Index int }` — a chunk with its content and position in the file's chunk list
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 SearchOption: `func(*searchConfig)` — functional option pattern
@@ -472,4 +478,93 @@ microfts2 ships stock filter functions:
 Per-query C record point reads: look up each query trigram's sparse C record at search time. Typically 3-10 LMDB reads per query.
 
 The total chunk count is derived from the database (sum of file chunk counts from N records, or maintained as a counter).
+
+# Multi-Regex Post-Filtering
+
+Search results can be post-filtered at the chunk level using multiple regex patterns. Two kinds of filter:
+
+- **Regex filters (AND):** every pattern must match the chunk content. A chunk is kept only if all regex filters match.
+- **Except-regex filters (subtract):** any pattern matching rejects the chunk. A chunk is discarded if any except-regex matches.
+
+Both filter types operate on chunk content recovered by re-chunking the file (same mechanism as `WithVerify`). They apply after trigram candidate selection and scoring, before final sort — to both `Search` and `SearchRegex`.
+
+When combined with `SearchRegex`, the primary regex still drives trigram extraction and candidate selection. Regex filters and except-regex filters are independent post-filters applied to those candidates.
+
+## Library API
+
+```go
+// WithRegexFilter adds AND post-filters: every pattern must match chunk content.
+// Multiple calls accumulate patterns.
+func WithRegexFilter(patterns ...string) SearchOption
+
+// WithExceptRegex adds subtract post-filters: any match rejects the chunk.
+// Multiple calls accumulate patterns.
+func WithExceptRegex(patterns ...string) SearchOption
+```
+
+Patterns are stored as strings in the search config. They are compiled to `*regexp.Regexp` at the start of `Search`/`SearchRegex`, which already return errors — compilation failure is a normal error return. Filtering uses the existing `filterResults` helper with a combined match function that checks all compiled regexes.
+
+## CLI
+
+```
+microfts search -db <path> [-regex] [-filter-regex <pattern>]... [-except-regex <pattern>]... <query>
+```
+
+- `-filter-regex` is repeatable: each invocation adds an AND regex filter
+- `-except-regex` is repeatable: each invocation adds a subtract regex filter
+- Both work with literal and regex search modes
+- Implemented via a custom `flag.Value` type for string slice accumulation
+
+## Use case
+
+```
+ark search --regex '@to-project:.*\bark\b' --except-regex '@status:.*\bdone\b'
+```
+
+Ark translates its own `--regex`/`--except-regex` flags to `WithRegexFilter`/`WithExceptRegex` options on the microfts2 library call. Finds open requests filed against ark — positive match on the project tag, subtract anything marked done.
+
+# Chunk Context Retrieval
+
+Retrieve a target chunk and its positional neighbors from an indexed file. This enables "flip pages" research loops: search → hit → expand context → decide.
+
+## How it works
+
+1. Look up the file's N record to get its ordered `chunkRanges` array
+2. Find the target chunk by range label match (exact string comparison)
+3. Compute the window: `max(0, targetIndex - before)` to `min(len-1, targetIndex + after)`
+4. Re-chunk the file using its stored chunking strategy to recover chunk content
+5. Return the chunks in the window with their range labels, content, and chunk indices
+
+The expansion unit is chunks, not lines or bytes. Range labels are opaque and strategy-dependent — the only universal coordinate is the chunk index within the file's ordered chunk list.
+
+## Error cases
+
+- File not in database: error
+- Target range not found in chunk list: error
+- File missing from disk (can't re-chunk): error
+- Chunking strategy not registered: error
+
+## Library API
+
+```go
+// ChunkResult holds a single chunk with its content and position.
+type ChunkResult struct {
+    Path    string
+    Range   string
+    Content string
+    Index   int  // 0-based position in the file's chunk list
+}
+
+// GetChunks retrieves the target chunk (identified by range label) and
+// up to before/after positional neighbors. Returns chunks in order.
+func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
+```
+
+## CLI
+
+```
+microfts chunks -db <path> [-before N] [-after N] <file> <range>
+```
+
+Output: JSONL, one JSON object per line with `path`, `range`, `content`, `index` fields. Chunks are in positional order. `-before` and `-after` default to 0 (target only).
 

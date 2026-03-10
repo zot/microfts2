@@ -90,3 +90,63 @@
 **Input:** add file with "daneel", search "daneel" and "daneel " (trailing space)
 **Expected:** both return the same results
 **Refs:** crc-DB.md, seq-search.md, R178
+
+## Test: regex filter AND
+**Purpose:** WithRegexFilter keeps only chunks matching all patterns
+**Input:** add files with chunks "alpha beta", "alpha gamma", "alpha beta gamma". Search "alpha" with WithRegexFilter("beta", "gamma")
+**Expected:** only "alpha beta gamma" chunk survives — must match both "beta" AND "gamma"
+**Refs:** crc-DB.md, seq-search.md, R183, R185, R188, R189
+
+## Test: except-regex subtract
+**Purpose:** WithExceptRegex rejects chunks matching any pattern
+**Input:** add files with chunks "@status: open task", "@status: done task". Search "task" with WithExceptRegex("@status:.*done")
+**Expected:** only "@status: open task" survives — "done" chunk is subtracted
+**Refs:** crc-DB.md, seq-search.md, R184, R188, R189
+
+## Test: regex filter with SearchRegex
+**Purpose:** post-filters work on regex search too
+**Input:** add files with chunks "alpha beta", "alpha gamma". SearchRegex("alpha") with WithExceptRegex("gamma")
+**Expected:** only "alpha beta" survives
+**Refs:** crc-DB.md, seq-search.md, R189, R190
+
+## Test: regex filter bad pattern returns error
+**Purpose:** compilation failure is a normal error
+**Input:** Search "test" with WithRegexFilter("[invalid")
+**Expected:** returns non-nil error
+**Refs:** crc-DB.md, R186
+
+## Test: regex filter combined with verify
+**Purpose:** verify and regex post-filters both apply
+**Input:** add file with "alpha beta gamma". Search "alpha" with WithVerify() and WithExceptRegex("gamma")
+**Expected:** no results — verify passes but except-regex rejects
+**Refs:** crc-DB.md, seq-search.md, R188
+
+## Test: get chunks target only
+**Purpose:** retrieve a single chunk by range label
+**Input:** add a multi-line file with LineChunkFunc, GetChunks(fpath, "3-3", 0, 0)
+**Expected:** returns 1 ChunkResult with correct path, range "3-3", content matching line 3, index 2
+**Refs:** crc-DB.md, seq-chunks.md, R197, R198, R201
+
+## Test: get chunks with neighbors
+**Purpose:** retrieve target plus positional neighbors
+**Input:** add a 5-line file, GetChunks(fpath, "3-3", 1, 1)
+**Expected:** returns 3 ChunkResults with indices 1,2,3 (ranges "2-2","3-3","4-4"), in order
+**Refs:** crc-DB.md, seq-chunks.md, R197, R199, R202
+
+## Test: get chunks window clamped at boundaries
+**Purpose:** before/after clamped to file bounds
+**Input:** add a 5-line file, GetChunks(fpath, "1-1", 3, 0)
+**Expected:** returns 1 ChunkResult (index 0) — can't go before first chunk
+**Refs:** crc-DB.md, seq-chunks.md, R199
+
+## Test: get chunks range not found
+**Purpose:** error on missing range label
+**Input:** add a file, GetChunks(fpath, "999-999", 0, 0)
+**Expected:** returns error
+**Refs:** crc-DB.md, seq-chunks.md, R203
+
+## Test: get chunks file not in database
+**Purpose:** error on unknown file
+**Input:** GetChunks("nonexistent.txt", "1-1", 0, 0)
+**Expected:** returns error
+**Refs:** crc-DB.md, seq-chunks.md, R203

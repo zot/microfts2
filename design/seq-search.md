@@ -1,5 +1,5 @@
 # Sequence: Search
-**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127, R132, R134, R135, R136, R137, R140, R141, R142, R143, R144, R178, R179, R180, R181, R182
+**Requirements:** R30, R31, R32, R33, R34, R35, R82, R83, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127, R132, R134, R135, R136, R137, R140, R141, R142, R143, R144, R178, R179, R180, R181, R182, R183, R184, R185, R186, R187, R188, R189, R190, R191, R196
 
 Participants: DB, Trigrams
 
@@ -53,6 +53,16 @@ DB                                        Trigrams
  |        if term not found as substring:   |
  |          discard result                  |
  |                                          |
+ |  if regex filters or except-regex:       |
+ |    compile all patterns (error on fail)  |
+ |    for each result:                      |
+ |      re-chunk file (cached per path)     |
+ |      find chunk by range match           |
+ |      for each regex filter (AND):        |
+ |        if !regex.Match(content): discard |
+ |      for each except-regex (subtract):   |
+ |        if regex.Match(content): discard  |
+ |                                          |
  |  sort by score descending                |
  |  return *SearchResults{Results, Status}  |
 ```
@@ -88,6 +98,15 @@ DB
  |      re-chunk file using stored strategy
  |      find chunk by range match
  |      if !regex.Match(content): discard
+ |
+ |  if regex filters or except-regex:
+ |    compile all patterns (error on fail)
+ |    for each result:
+ |      re-chunk file (cached per path)
+ |      for each regex filter (AND):
+ |        if !regex.Match(content): discard
+ |      for each except-regex (subtract):
+ |        if regex.Match(content): discard
  |
  |  sort by score descending
  |  return *SearchResults{Results, Status}

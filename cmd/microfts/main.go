@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,15 @@ import (
 )
 
 // CRC: crc-CLI.md
+
+// stringSlice implements flag.Value for repeatable string flags. R194
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 var globalRefresh bool
 
@@ -63,6 +73,8 @@ func main() {
 		cmdChunkWordsOverlap()
 	case "chunk-markdown":
 		cmdChunkMarkdown()
+	case "chunks":
+		cmdChunks()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		usage()
@@ -84,7 +96,7 @@ func extractRefreshFlag(args []string) (bool, []string) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score,")
+	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score, chunks,")
 	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
@@ -172,6 +184,9 @@ func cmdSearch() {
 	useRegex := fs.Bool("regex", false, "treat query as a Go regexp pattern")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	verify := fs.Bool("verify", false, "post-filter: verify query terms in chunk text")
+	var filterRegex, exceptRegex stringSlice
+	fs.Var(&filterRegex, "filter-regex", "AND post-filter regex (repeatable)")
+	fs.Var(&exceptRegex, "except-regex", "subtract post-filter regex (repeatable)")
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" || fs.NArg() == 0 {
@@ -203,6 +218,12 @@ func cmdSearch() {
 	opts = append(opts, opt)
 	if *verify {
 		opts = append(opts, microfts2.WithVerify())
+	}
+	if len(filterRegex) > 0 {
+		opts = append(opts, microfts2.WithRegexFilter(filterRegex...))
+	}
+	if len(exceptRegex) > 0 {
+		opts = append(opts, microfts2.WithExceptRegex(exceptRegex...))
 	}
 
 	var sr *microfts2.SearchResults
@@ -475,6 +496,40 @@ func unescapeByte(s string) int {
 			return int(s[0])
 		}
 		return -1
+	}
+}
+
+// Seq: seq-chunks.md | R204, R205
+func cmdChunks() {
+	fs := flag.CommandLine
+	dbPath, contentDB, indexDB := dbFlags(fs)
+	before := fs.Int("before", 0, "number of chunks before target")
+	after := fs.Int("after", 0, "number of chunks after target")
+	fs.Parse(os.Args[1:])
+
+	if *dbPath == "" || fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "chunks: -db, <file>, and <range> required")
+		os.Exit(1)
+	}
+
+	fpath := fs.Arg(0)
+	targetRange := fs.Arg(1)
+
+	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	if err != nil {
+		fatal("open", err)
+	}
+	defer db.Close()
+	doRefresh(db)
+
+	chunks, err := db.GetChunks(fpath, targetRange, *before, *after)
+	if err != nil {
+		fatal("chunks", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	for _, c := range chunks {
+		enc.Encode(c)
 	}
 }
 
