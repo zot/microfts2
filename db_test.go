@@ -1,6 +1,7 @@
 package microfts2
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -500,18 +501,18 @@ func TestDBFileInfoByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := db.FileInfoByID(fileid)
+	frec, err := db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Filename != fp {
-		t.Errorf("Filename = %q, want %q", info.Filename, fp)
+	if len(frec.Names) == 0 || frec.Names[0] != fp {
+		t.Errorf("Names = %v, want [%q]", frec.Names, fp)
 	}
-	if info.ChunkingStrategy != "line" {
-		t.Errorf("ChunkingStrategy = %q, want line", info.ChunkingStrategy)
+	if frec.Strategy != "line" {
+		t.Errorf("Strategy = %q, want line", frec.Strategy)
 	}
-	if len(info.ChunkRanges) == 0 {
-		t.Error("ChunkRanges should not be empty")
+	if len(frec.Chunks) == 0 {
+		t.Error("Chunks should not be empty")
 	}
 }
 
@@ -943,13 +944,13 @@ func TestFileLengthStoredOnAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := db.FileInfoByID(fileid)
+	frec, err := db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if info.FileLength != int64(len(content)) {
-		t.Errorf("FileLength = %d, want %d", info.FileLength, len(content))
+	if frec.FileLength != int64(len(content)) {
+		t.Errorf("FileLength = %d, want %d", frec.FileLength, len(content))
 	}
 }
 
@@ -963,12 +964,12 @@ func TestAppendChunks(t *testing.T) {
 	}
 
 	// Verify initial state: 3 chunks
-	info, err := db.FileInfoByID(fileid)
+	frec, err := db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(info.ChunkRanges) != 3 {
-		t.Fatalf("initial chunks = %d, want 3", len(info.ChunkRanges))
+	if len(frec.Chunks) != 3 {
+		t.Fatalf("initial chunks = %d, want 3", len(frec.Chunks))
 	}
 
 	// Append 2 more lines
@@ -984,17 +985,17 @@ func TestAppendChunks(t *testing.T) {
 	}
 
 	// Verify: 5 chunks total
-	info, err = db.FileInfoByID(fileid)
+	frec, err = db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(info.ChunkRanges) != 5 {
-		t.Errorf("total chunks = %d, want 5", len(info.ChunkRanges))
+	if len(frec.Chunks) != 5 {
+		t.Errorf("total chunks = %d, want 5", len(frec.Chunks))
 	}
 
 	// Old chunks intact
-	if info.ChunkRanges[0] != "1-1" || info.ChunkRanges[1] != "2-2" || info.ChunkRanges[2] != "3-3" {
-		t.Errorf("old ranges changed: %v", info.ChunkRanges[:3])
+	if frec.Chunks[0].Location != "1-1" || frec.Chunks[1].Location != "2-2" || frec.Chunks[2].Location != "3-3" {
+		t.Errorf("old ranges changed: %v %v %v", frec.Chunks[0].Location, frec.Chunks[1].Location, frec.Chunks[2].Location)
 	}
 
 	// New chunks searchable (no WithVerify — disk file doesn't have appended content)
@@ -1039,20 +1040,20 @@ func TestAppendChunksWithBaseLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := db.FileInfoByID(fileid)
+	frec, err := db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// New ranges should be "4-4" and "5-5", not "1-1" and "2-2"
-	if len(info.ChunkRanges) != 5 {
-		t.Fatalf("total chunks = %d, want 5", len(info.ChunkRanges))
+	if len(frec.Chunks) != 5 {
+		t.Fatalf("total chunks = %d, want 5", len(frec.Chunks))
 	}
-	if info.ChunkRanges[3] != "4-4" {
-		t.Errorf("chunk 3 range = %q, want %q", info.ChunkRanges[3], "4-4")
+	if frec.Chunks[3].Location != "4-4" {
+		t.Errorf("chunk 3 range = %q, want %q", frec.Chunks[3].Location, "4-4")
 	}
-	if info.ChunkRanges[4] != "5-5" {
-		t.Errorf("chunk 4 range = %q, want %q", info.ChunkRanges[4], "5-5")
+	if frec.Chunks[4].Location != "5-5" {
+		t.Errorf("chunk 4 range = %q, want %q", frec.Chunks[4].Location, "5-5")
 	}
 }
 
@@ -1075,25 +1076,27 @@ func TestAppendChunksUpdatesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := db.FileInfoByID(fileid)
+	frec, err := db.FileInfoByID(fileid)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if info.ContentHash != "abc123" {
-		t.Errorf("ContentHash = %q, want %q", info.ContentHash, "abc123")
+	wantHash := "abc123"
+	gotHash := hex.EncodeToString(frec.ContentHash[:])
+	if !strings.HasPrefix(gotHash, wantHash) {
+		t.Errorf("ContentHash = %q, want prefix %q", gotHash, wantHash)
 	}
-	if info.ModTime != 999999 {
-		t.Errorf("ModTime = %d, want %d", info.ModTime, 999999)
+	if frec.ModTime != 999999 {
+		t.Errorf("ModTime = %d, want %d", frec.ModTime, 999999)
 	}
-	if info.FileLength != 12 {
-		t.Errorf("FileLength = %d, want %d", info.FileLength, 12)
+	if frec.FileLength != 12 {
+		t.Errorf("FileLength = %d, want %d", frec.FileLength, 12)
 	}
-	if len(info.ChunkRanges) != 2 {
-		t.Errorf("ChunkRanges len = %d, want 2", len(info.ChunkRanges))
+	if len(frec.Chunks) != 2 {
+		t.Errorf("Chunks len = %d, want 2", len(frec.Chunks))
 	}
-	if len(info.ChunkTokenCounts) != 2 {
-		t.Errorf("ChunkTokenCounts len = %d, want 2", len(info.ChunkTokenCounts))
+	if len(frec.Tokens) == 0 {
+		t.Error("Tokens should not be empty after append")
 	}
 }
 

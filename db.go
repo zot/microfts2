@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -33,9 +32,6 @@ var ErrAlreadyIndexed = errors.New("file already indexed")
 
 // CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-score.md, seq-stale.md, seq-append.md, seq-chunks.md
 
-// chunkID identifies a specific chunk within a file.
-type chunkID struct{ fileid, chunknum uint64 }
-
 // collectedChunk holds processed chunk data between generator collection and DB write.
 type collectedChunk struct {
 	rangeStr  string
@@ -43,9 +39,6 @@ type collectedChunk struct {
 	triCounts map[uint32]int
 	tokens    []TokenEntry
 }
-
-// prefixR is the reverse index prefix in the index DB (legacy, pending rewrite).
-const prefixR = 'R'
 
 // Chunk is a single chunk yielded by a ChunkFunc generator.
 // Range is an opaque label (e.g. "1-10" for lines); Content is the chunk text.
@@ -107,18 +100,6 @@ type SearchResults struct {
 // IndexStatus reports the state of the index.
 type IndexStatus struct {
 	Built bool
-}
-
-// FileInfo is stored as JSON in N records.
-// R148
-type FileInfo struct {
-	Filename         string   `json:"filename"`
-	ChunkRanges      []string `json:"chunkRanges"`
-	ChunkTokenCounts []int    `json:"chunkTokenCounts"`
-	ChunkingStrategy string   `json:"chunkingStrategy"`
-	ModTime          int64    `json:"modTime"`
-	ContentHash      string   `json:"contentHash"`
-	FileLength       int64    `json:"fileLength,omitempty"`
 }
 
 // ScoreFunc computes a relevance score for a chunk.
@@ -333,121 +314,7 @@ func (o *Options) mapSize() int64 {
 
 // --- Key construction ---
 
-func makeNKey(fileid uint64) []byte {
-	key := make([]byte, 9)
-	key[0] = prefixN
-	binary.BigEndian.PutUint64(key[1:], fileid)
-	return key
-}
 
-// makeOldCKey builds a C record key: C[trigram:3] = 4 bytes.
-func makeOldCKey(trigram uint32) []byte {
-	key := make([]byte, 4)
-	key[0] = prefixC
-	key[1] = byte(trigram >> 16)
-	key[2] = byte(trigram >> 8)
-	key[3] = byte(trigram)
-	return key
-}
-
-// makeIndexKey builds a forward index key: [trigram:3][descCount:2][fileid:8][chunknum:8] = 21 bytes.
-func makeIndexKey(trigram uint32, count uint16, fileid, chunknum uint64) []byte {
-	key := make([]byte, 21)
-	key[0] = byte(trigram >> 16)
-	key[1] = byte(trigram >> 8)
-	key[2] = byte(trigram)
-	binary.BigEndian.PutUint16(key[3:], 0xFFFF-count) // descending
-	binary.BigEndian.PutUint64(key[5:], fileid)
-	binary.BigEndian.PutUint64(key[13:], chunknum)
-	return key
-}
-
-func indexKeyTrigram(key []byte) uint32 {
-	return uint32(key[0])<<16 | uint32(key[1])<<8 | uint32(key[2])
-}
-
-func indexKeyCount(key []byte) uint16 {
-	return 0xFFFF - binary.BigEndian.Uint16(key[3:])
-}
-
-func indexKeyFileID(key []byte) uint64 {
-	return binary.BigEndian.Uint64(key[5:])
-}
-
-func indexKeyChunkNum(key []byte) uint64 {
-	return binary.BigEndian.Uint64(key[13:])
-}
-
-// makeRKey builds a reverse index key: R[fileid:8] = 9 bytes.
-func makeRKey(fileid uint64) []byte {
-	key := make([]byte, 9)
-	key[0] = prefixR
-	binary.BigEndian.PutUint64(key[1:], fileid)
-	return key
-}
-
-// chunkTrigramEntry is one (trigram, count) pair in an R record.
-type chunkTrigramEntry struct {
-	trigram uint32
-	count   uint16
-}
-
-// encodeRValue packs chunk-grouped trigram data for an R record.
-// Input: map of chunknum -> slice of (trigram, count) pairs.
-func encodeRValue(chunks map[uint64][]chunkTrigramEntry) []byte {
-	// Calculate total size
-	size := 0
-	for _, entries := range chunks {
-		size += 8 + 2 + len(entries)*5 // chunknum(8) + numTrigrams(2) + entries * (trigram(3) + count(2))
-	}
-	buf := make([]byte, size)
-	off := 0
-	for chunknum, entries := range chunks {
-		binary.BigEndian.PutUint64(buf[off:], chunknum)
-		off += 8
-		binary.BigEndian.PutUint16(buf[off:], uint16(len(entries)))
-		off += 2
-		for _, e := range entries {
-			buf[off] = byte(e.trigram >> 16)
-			buf[off+1] = byte(e.trigram >> 8)
-			buf[off+2] = byte(e.trigram)
-			binary.BigEndian.PutUint16(buf[off+3:], e.count)
-			off += 5
-		}
-	}
-	return buf
-}
-
-// decodeRValue unpacks an R record value into (chunknum, trigram, count) triples.
-func decodeRValue(data []byte) []struct {
-	chunknum uint64
-	trigram  uint32
-	count    uint16
-} {
-	var result []struct {
-		chunknum uint64
-		trigram  uint32
-		count    uint16
-	}
-	off := 0
-	for off+10 <= len(data) { // need at least chunknum(8) + numTrigrams(2)
-		chunknum := binary.BigEndian.Uint64(data[off:])
-		off += 8
-		n := int(binary.BigEndian.Uint16(data[off:]))
-		off += 2
-		for i := 0; i < n && off+5 <= len(data); i++ {
-			tri := uint32(data[off])<<16 | uint32(data[off+1])<<8 | uint32(data[off+2])
-			count := binary.BigEndian.Uint16(data[off+3:])
-			result = append(result, struct {
-				chunknum uint64
-				trigram  uint32
-				count    uint16
-			}{chunknum, tri, count})
-			off += 5
-		}
-	}
-	return result
-}
 
 // lookupTrigramCounts reads T records for query trigrams and returns document frequencies.
 // DF is derived from the number of varint-encoded chunkids in the T record value.
@@ -1413,38 +1280,26 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		return fmt.Errorf("func strategy %q not registered", strategy)
 	}
 
-	// Read existing file info and R record
-	var info FileInfo
-	var existingRData []byte
+	// Read existing F record
+	var frec FRecord
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
-		if err != nil {
-			if lmdb.IsNotFound(err) {
-				return fmt.Errorf("fileid %d not found", fileid)
-			}
-			return err
-		}
-		rVal, err := txn.Get(db.dbi, makeRKey(fileid))
-		if err != nil && !lmdb.IsNotFound(err) {
-			return err
-		}
-		if rVal != nil {
-			existingRData = make([]byte, len(rVal))
-			copy(existingRData, rVal)
-		}
-		return nil
+		frec, err = db.readFRecord(txnWrap{txn}, fileid)
+		return err
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("fileid %d not found: %w", fileid, err)
 	}
 
-	existingChunkCount := len(info.ChunkRanges)
+	filename := ""
+	if len(frec.Names) > 0 {
+		filename = frec.Names[0]
+	}
 
 	// Chunk the appended content
 	var newChunks []collectedChunk
 	var utf8Err error
-	if err := chunkFn(info.Filename, content, func(c Chunk) bool {
+	if err := chunkFn(filename, content, func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
 			return false
@@ -1480,62 +1335,131 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 
 	// Single atomic write transaction (R164)
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		newRChunks := make(map[uint64][]chunkTrigramEntry)
-
-		for i, ch := range newChunks {
-			chunknum := uint64(existingChunkCount + i)
-
-			var entries []chunkTrigramEntry
-			for tri, cnt := range ch.triCounts {
-				// Increment C record (R156)
-				if err := incrementCCount(txnWrap{txn}, db.dbi, tri); err != nil {
-					return err
-				}
-
-				idxCount := uint16(cnt)
-				if cnt > 65535 {
-					idxCount = 65535
-				}
-
-				// Write forward index entry (R154)
-				if err := txn.Put(db.dbi, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
-					return err
-				}
-
-				entries = append(entries, chunkTrigramEntry{tri, idxCount})
-			}
-			newRChunks[chunknum] = entries
-		}
-
-		// Replace R record: existing data + new chunk groups (R155)
-		// Byte append is safe: R records are self-describing chunk groups
-		// ([chunknum:8][numTri:2][[tri:3][count:2]]...) with no header/footer.
-		newRData := encodeRValue(newRChunks)
-		combinedR := append(existingRData, newRData...)
-		if err := txn.Put(db.dbi, makeRKey(fileid), combinedR, 0); err != nil {
-			return err
-		}
-
-		// Update N record (R157)
-		for _, ch := range newChunks {
-			info.ChunkRanges = append(info.ChunkRanges, ch.rangeStr)
-			info.ChunkTokenCounts = append(info.ChunkTokenCounts, countTokens(nil)) // legacy compat, will be rewritten
-		}
-		if cfg.contentHash != "" {
-			info.ContentHash = cfg.contentHash
-		}
-		if cfg.modTime != 0 {
-			info.ModTime = cfg.modTime
-		}
-		if cfg.hasFileLength {
-			info.FileLength = cfg.fileLength
-		}
-
-		infoJSON, err := json.Marshal(info)
+		th := txnWrap{txn}
+		// Re-read F record inside write txn for consistency
+		frec, err := db.readFRecord(th, fileid)
 		if err != nil {
 			return err
 		}
-		return txn.Put(db.dbi, makeNKey(fileid), infoJSON, 0)
+
+		// Accumulate new file-level token bag from existing
+		fileBag := make(map[string]int)
+		mergeTokenBag(fileBag, frec.Tokens)
+
+		type newChunkTW struct {
+			chunkid  uint64
+			trigrams []uint32
+			tokens   []TokenEntry
+		}
+		var newChunksTW []newChunkTW
+
+		for _, ch := range newChunks {
+			// Chunk dedup via H records (same as addFileInTxn)
+			hKey := makeHKey(ch.hash)
+			var chunkid uint64
+
+			hVal, err := txn.Get(db.dbi, hKey)
+			if err == nil {
+				// Dedup hit — chunk already exists, add our fileid to its C record
+				chunkid, _ = readUvarint(hVal)
+				cKey := makeCKey(chunkid)
+				cVal, err := txn.Get(db.dbi, cKey)
+				if err != nil {
+					return fmt.Errorf("read C record %d: %w", chunkid, err)
+				}
+				cData := make([]byte, len(cVal))
+				copy(cData, cVal)
+				crec, err := UnmarshalCValue(cData)
+				if err != nil {
+					return err
+				}
+				// Only add fileid if not already present
+				found := false
+				for _, fid := range crec.FileIDs {
+					if fid == fileid {
+						found = true
+						break
+					}
+				}
+				if !found {
+					crec.FileIDs = append(crec.FileIDs, fileid)
+					if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
+						return err
+					}
+				}
+			} else if lmdb.IsNotFound(err) {
+				// New chunk
+				chunkid, err = db.allocChunkID(th)
+				if err != nil {
+					return err
+				}
+
+				// Write H record
+				var hValBuf [binary.MaxVarintLen64]byte
+				hn := binary.PutUvarint(hValBuf[:], chunkid)
+				if err := txn.Put(db.dbi, hKey, hValBuf[:hn], 0); err != nil {
+					return err
+				}
+
+				// Build trigram entries
+				triEntries := make([]TrigramEntry, 0, len(ch.triCounts))
+				triList := make([]uint32, 0, len(ch.triCounts))
+				for tri, cnt := range ch.triCounts {
+					triEntries = append(triEntries, TrigramEntry{Trigram: tri, Count: cnt})
+					triList = append(triList, tri)
+				}
+
+				// Create C record
+				crec := CRecord{
+					ChunkID:  chunkid,
+					Hash:     ch.hash,
+					Trigrams: triEntries,
+					Tokens:   ch.tokens,
+					FileIDs:  []uint64{fileid},
+				}
+				if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
+					return err
+				}
+
+				newChunksTW = append(newChunksTW, newChunkTW{
+					chunkid:  chunkid,
+					trigrams: triList,
+					tokens:   ch.tokens,
+				})
+			} else {
+				return err
+			}
+
+			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr})
+			mergeTokenBag(fileBag, ch.tokens)
+		}
+
+		// Batch T/W record updates
+		for _, nc := range newChunksTW {
+			if err := batchAppendT(th, db.dbi, nc.trigrams, nc.chunkid); err != nil {
+				return err
+			}
+		}
+		for _, nc := range newChunksTW {
+			if err := batchAppendW(th, db.dbi, nc.tokens, nc.chunkid); err != nil {
+				return err
+			}
+		}
+
+		// Update F record metadata
+		if cfg.contentHash != "" {
+			hb, _ := hex.DecodeString(cfg.contentHash)
+			copy(frec.ContentHash[:], hb)
+		}
+		if cfg.modTime != 0 {
+			frec.ModTime = cfg.modTime
+		}
+		if cfg.hasFileLength {
+			frec.FileLength = cfg.fileLength
+		}
+		frec.Tokens = tokenBagToEntries(fileBag)
+
+		return txn.Put(db.dbi, makeFKey(fileid), frec.MarshalValue(), 0)
 	})
 }
 
@@ -1555,11 +1479,6 @@ func adjustRange(rangeStr string, baseLine int) (string, error) {
 }
 
 // --- Search ---
-
-// chunkCandidate tracks accumulated trigram counts for a candidate chunk.
-type chunkCandidate struct {
-	counts map[uint32]int
-}
 
 // Seq: seq-search.md | R178, R179, R180, R181, R182
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error) {
@@ -1745,10 +1664,15 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates map[uint64]bool, active [
 		// Token count from C record
 		tokenCount := len(crec.Tokens)
 
-		// Score
-		score := cfg.scoreFunc(active, chunkCounts, tokenCount)
-		if score <= 0 {
-			continue
+		// Score — when active is nil (e.g., regex search), assign 1.0
+		var score float64
+		if active == nil {
+			score = 1.0
+		} else {
+			score = cfg.scoreFunc(active, chunkCounts, tokenCount)
+			if score <= 0 {
+				continue
+			}
 		}
 
 		// Resolve: for each fileid, find this chunk's location in the F record
@@ -1803,36 +1727,6 @@ func applyChunkFilters(crec CRecord, cfg searchConfig) bool {
 		}
 	}
 	return true
-}
-
-// collectCandidates scans the index for each trigram, intersecting to find
-// chunks that contain all given trigrams. Returns candidates with their counts.
-func collectCandidates(cursor *lmdb.Cursor, trigrams []uint32) map[chunkID]*chunkCandidate {
-	if len(trigrams) == 0 {
-		return nil
-	}
-	candidates := make(map[chunkID]*chunkCandidate)
-	scanTrigram(cursor, trigrams[0], func(fid, cnum uint64, count uint16) {
-		id := chunkID{fid, cnum}
-		cc := &chunkCandidate{counts: make(map[uint32]int)}
-		cc.counts[trigrams[0]] = int(count)
-		candidates[id] = cc
-	})
-	for _, tri := range trigrams[1:] {
-		if len(candidates) == 0 {
-			break
-		}
-		next := make(map[chunkID]*chunkCandidate)
-		scanTrigram(cursor, tri, func(fid, cnum uint64, count uint16) {
-			id := chunkID{fid, cnum}
-			if cc, ok := candidates[id]; ok {
-				cc.counts[tri] = int(count)
-				next[id] = cc
-			}
-		})
-		candidates = next
-	}
-	return candidates
 }
 
 // parseQueryTerms splits a query into terms: space-delimited words,
@@ -1911,22 +1805,27 @@ func filterResults(db *DB, results []SearchResult, matchFn func(chunkContent []b
 // rechunkForVerify looks up a file's strategy, re-chunks it, and returns
 // a map from range string to chunk content.
 func rechunkForVerify(db *DB, fpath string) map[string][]byte {
-	var info FileInfo
+	var strategy string
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
 		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return err
 		}
-		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
-		return err
+		_, n := readString(val)
+		fileid, _ := readUvarint(val[n:])
+		frec, err := db.readFRecord(txnWrap{txn}, fileid)
+		if err != nil {
+			return err
+		}
+		strategy = frec.Strategy
+		return nil
 	})
 	if err != nil {
 		return nil
 	}
 
-	chunkFn := db.resolveChunkFunc(info.ChunkingStrategy)
+	chunkFn := db.resolveChunkFunc(strategy)
 	if chunkFn == nil {
 		return nil
 	}
@@ -2015,46 +1914,6 @@ func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]
 	}), nil
 }
 
-// resolveResults maps candidates to SearchResults, scoring each chunk.
-func resolveResults(th TxnHolder, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, cfg searchConfig) []SearchResult {
-	infoCache := make(map[uint64]*FileInfo)
-	var results []SearchResult
-	for id, cc := range candidates {
-		if cfg.onlyIDs != nil {
-			if _, ok := cfg.onlyIDs[id.fileid]; !ok {
-				continue
-			}
-		}
-		if cfg.exceptIDs != nil {
-			if _, ok := cfg.exceptIDs[id.fileid]; ok {
-				continue
-			}
-		}
-		info, ok := infoCache[id.fileid]
-		if !ok {
-			fi, err := readFileInfo(th, dbi, id.fileid)
-			if err != nil {
-				continue
-			}
-			info = &fi
-			infoCache[id.fileid] = info
-		}
-		idx := int(id.chunknum)
-		if idx < len(info.ChunkRanges) {
-			tokenCount := 0
-			if idx < len(info.ChunkTokenCounts) {
-				tokenCount = info.ChunkTokenCounts[idx]
-			}
-			score := cfg.scoreFunc(active, cc.counts, tokenCount)
-			results = append(results, SearchResult{
-				Path:  info.Filename,
-				Range: info.ChunkRanges[idx],
-				Score: score,
-			})
-		}
-	}
-	return results
-}
 
 // --- SearchRegex ---
 
@@ -2078,19 +1937,13 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 
 	err = db.env.View(func(txn *lmdb.Txn) error {
 		th := txnWrap{txn}
-		cursor, err := txn.OpenCursor(db.dbi)
-		if err != nil {
-			return err
-		}
-		defer cursor.Close()
-
-		candidates := evalTrigramQuery(q, cursor, db.trigrams)
+		candidates := evalTrigramQueryNew(q, th, db.dbi, db.trigrams)
 		if candidates == nil {
-			// QAll: match everything — scan all N records for chunk IDs
-			candidates = allChunks(th, db.dbi)
+			// QAll: match everything — collect all chunkids from all T records
+			candidates = allChunkIDs(th, db.dbi)
 		}
 
-		results = resolveResults(th, db.dbi, candidates, nil, cfg)
+		results = db.scoreAndResolve(th, candidates, nil, cfg)
 		return nil
 	})
 	if err != nil {
@@ -2112,150 +1965,109 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	}, nil
 }
 
-// evalTrigramQuery recursively evaluates a codesearch trigram query against the index.
-func evalTrigramQuery(q *csindex.Query, cursor *lmdb.Cursor, tg *Trigrams) map[chunkID]*chunkCandidate {
+// evalTrigramQueryNew recursively evaluates a codesearch trigram query using T records.
+// Returns a set of candidate chunkids, or nil for QAll.
+func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, dbi lmdb.DBI, tg *Trigrams) map[uint64]bool {
 	switch q.Op {
 	case csindex.QAll:
 		return nil
 	case csindex.QNone:
-		return make(map[chunkID]*chunkCandidate)
+		return make(map[uint64]bool)
 	case csindex.QAnd:
-		var result map[chunkID]*chunkCandidate
+		var result map[uint64]bool
 		for _, tri := range q.Trigram {
 			encoded, ok := tg.EncodeTrigram(tri)
 			if !ok {
 				continue
 			}
-			set := make(map[chunkID]*chunkCandidate)
-			scanTrigram(cursor, encoded, func(fid, cnum uint64, count uint16) {
-				id := chunkID{fid, cnum}
-				cc := &chunkCandidate{counts: make(map[uint32]int)}
-				cc.counts[encoded] = int(count)
-				set[id] = cc
-			})
+			set := readTRecordChunkIDs(th, dbi, encoded)
 			if result == nil {
 				result = set
 			} else {
-				result = intersectCandidates(result, set)
+				result = intersectChunkSets(result, set)
 			}
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQuery(sub, cursor, tg)
+			subSet := evalTrigramQueryNew(sub, th, dbi, tg)
 			if subSet == nil {
 				continue
 			}
 			if result == nil {
 				result = subSet
 			} else {
-				result = intersectCandidates(result, subSet)
+				result = intersectChunkSets(result, subSet)
 			}
 		}
 		return result
 	case csindex.QOr:
-		result := make(map[chunkID]*chunkCandidate)
+		result := make(map[uint64]bool)
 		for _, tri := range q.Trigram {
 			encoded, ok := tg.EncodeTrigram(tri)
 			if !ok {
 				continue
 			}
-			scanTrigram(cursor, encoded, func(fid, cnum uint64, count uint16) {
-				id := chunkID{fid, cnum}
-				cc, ok := result[id]
-				if !ok {
-					cc = &chunkCandidate{counts: make(map[uint32]int)}
-					result[id] = cc
-				}
-				cc.counts[encoded] = int(count)
-			})
+			for id := range readTRecordChunkIDs(th, dbi, encoded) {
+				result[id] = true
+			}
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQuery(sub, cursor, tg)
+			subSet := evalTrigramQueryNew(sub, th, dbi, tg)
 			if subSet == nil {
-				return nil
+				return nil // QAll in OR → everything
 			}
-			for id, cc := range subSet {
-				if existing, ok := result[id]; ok {
-					for tri, cnt := range cc.counts {
-						existing.counts[tri] = cnt
-					}
-				} else {
-					result[id] = cc
-				}
+			for id := range subSet {
+				result[id] = true
 			}
 		}
 		return result
 	}
-	return make(map[chunkID]*chunkCandidate)
+	return make(map[uint64]bool)
 }
 
-// intersectCandidates returns elements present in both sets, merging counts.
-func intersectCandidates(a, b map[chunkID]*chunkCandidate) map[chunkID]*chunkCandidate {
-	if len(a) > len(b) {
-		a, b = b, a
+// readTRecordChunkIDs reads a T record and returns chunkid set.
+func readTRecordChunkIDs(th TxnHolder, dbi lmdb.DBI, trigram uint32) map[uint64]bool {
+	val, err := th.Txn().Get(dbi, makeTKey(trigram))
+	if err != nil {
+		return make(map[uint64]bool)
 	}
-	result := make(map[chunkID]*chunkCandidate)
-	for id, ccA := range a {
-		if ccB, ok := b[id]; ok {
-			for tri, cnt := range ccB.counts {
-				ccA.counts[tri] = cnt
-			}
-			result[id] = ccA
-		}
+	ids, _ := UnmarshalTValue(val)
+	result := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		result[id] = true
 	}
 	return result
 }
 
-// allChunks scans all N records and returns every chunkID in the content DB.
-func allChunks(th TxnHolder, dbi lmdb.DBI) map[chunkID]*chunkCandidate {
+// allChunkIDs scans all C records and returns every chunkid.
+func allChunkIDs(th TxnHolder, dbi lmdb.DBI) map[uint64]bool {
 	txn := th.Txn()
-	result := make(map[chunkID]*chunkCandidate)
+	result := make(map[uint64]bool)
 	cursor, err := txn.OpenCursor(dbi)
 	if err != nil {
 		return result
 	}
 	defer cursor.Close()
-	key, val, err := cursor.Get([]byte{prefixN}, nil, lmdb.SetRange)
-	for err == nil && len(key) > 0 && key[0] == prefixN {
-		if len(key) == 9 {
-			fid := binary.BigEndian.Uint64(key[1:9])
-			data := make([]byte, len(val))
-			copy(data, val)
-			var info FileInfo
-			if json.Unmarshal(data, &info) == nil {
-				for i := range info.ChunkRanges {
-					result[chunkID{fid, uint64(i)}] = &chunkCandidate{counts: make(map[uint32]int)}
-				}
-			}
-		}
-		key, val, err = cursor.Get(nil, nil, lmdb.Next)
+	key, _, err := cursor.Get([]byte{prefixC}, nil, lmdb.SetRange)
+	for err == nil && len(key) > 0 && key[0] == prefixC {
+		chunkid, _ := readUvarint(key[1:])
+		result[chunkid] = true
+		key, _, err = cursor.Get(nil, nil, lmdb.Next)
 	}
 	return result
 }
 
-func scanTrigram(cursor *lmdb.Cursor, trigram uint32, fn func(fileid, chunknum uint64, count uint16)) {
-	startKey := makeIndexKey(trigram, 65535, 0, 0) // max count = min descending value
-	endTri := trigram + 1
-	key, _, err := cursor.Get(startKey, nil, lmdb.SetRange)
-	for err == nil && len(key) >= 21 {
-		if indexKeyTrigram(key) >= endTri {
-			break
-		}
-		fn(indexKeyFileID(key), indexKeyChunkNum(key), indexKeyCount(key))
-		key, _, err = cursor.Get(nil, nil, lmdb.Next)
-	}
-}
 
 // --- FileInfoByID ---
 
-// FileInfoByID resolves a fileid to its FileInfo (N record).
-func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
-	var info FileInfo
+// FileInfoByID resolves a fileid to its FRecord.
+func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
+	var frec FRecord
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
+		frec, err = db.readFRecord(txnWrap{txn}, fileid)
 		return err
 	})
-	return info, err
+	return frec, err
 }
 
 // --- GetChunks ---
@@ -2264,15 +2076,16 @@ func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
 // GetChunks retrieves the target chunk (identified by range label) and
 // up to before/after positional neighbors. Returns chunks in positional order.
 func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error) {
-	var info FileInfo
+	var frec FRecord
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
 		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return fmt.Errorf("file not found: %s", fpath)
 		}
-		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
+		_, n := readString(val)
+		fileid, _ := readUvarint(val[n:])
+		frec, err = db.readFRecord(txnWrap{txn}, fileid)
 		return err
 	})
 	if err != nil {
@@ -2281,8 +2094,8 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 
 	// Find target chunk index by exact range label match.
 	targetIdx := -1
-	for i, r := range info.ChunkRanges {
-		if r == targetRange {
+	for i, fce := range frec.Chunks {
+		if fce.Location == targetRange {
 			targetIdx = i
 			break
 		}
@@ -2293,12 +2106,12 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 
 	// Compute window clamped to bounds.
 	lo := max(0, targetIdx-before)
-	hi := min(len(info.ChunkRanges)-1, targetIdx+after)
+	hi := min(len(frec.Chunks)-1, targetIdx+after)
 
 	// Re-chunk the file to recover content.
-	chunkFn := db.resolveChunkFunc(info.ChunkingStrategy)
+	chunkFn := db.resolveChunkFunc(frec.Strategy)
 	if chunkFn == nil {
-		return nil, fmt.Errorf("chunking strategy %q not registered", info.ChunkingStrategy)
+		return nil, fmt.Errorf("chunking strategy %q not registered", frec.Strategy)
 	}
 
 	data, err := os.ReadFile(fpath)
@@ -2338,54 +2151,49 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 
 	var results []ScoredChunk
 	err := db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
 		finalKey := FinalKey(fpath)
 		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return fmt.Errorf("file not found: %s", fpath)
 		}
-		fileid := binary.BigEndian.Uint64(val)
+		_, n := readString(val)
+		fileid, _ := readUvarint(val[n:])
 
-		info, err := readFileInfo(txnWrap{txn}, db.dbi, fileid)
+		frec, err := db.readFRecord(th, fileid)
 		if err != nil {
 			return err
 		}
 
-		active := selectQueryTrigrams(txnWrap{txn}, db.dbi, queryTrigrams, cfg)
+		active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
 		if len(active) == 0 {
 			return nil
 		}
 
-		// Read R record to get per-chunk trigram counts
-		rKey := makeRKey(fileid)
-		rVal, err := txn.Get(db.dbi, rKey)
-		if err != nil {
-			return nil // no R record = no scores
-		}
-		entries := decodeRValue(slices.Clone(rVal))
+		// Read C records for each chunk and score
+		for _, fce := range frec.Chunks {
+			cVal, err := txn.Get(db.dbi, makeCKey(fce.ChunkID))
+			if err != nil {
+				// No C record — score as zero
+				results = append(results, ScoredChunk{Range: fce.Location, Score: 0})
+				continue
+			}
+			cData := make([]byte, len(cVal))
+			copy(cData, cVal)
+			crec, err := UnmarshalCValue(cData)
+			if err != nil {
+				results = append(results, ScoredChunk{Range: fce.Location, Score: 0})
+				continue
+			}
 
-		// Group by chunk
-		chunkCounts := make(map[uint64]map[uint32]int)
-		for _, e := range entries {
-			m, ok := chunkCounts[e.chunknum]
-			if !ok {
-				m = make(map[uint32]int)
-				chunkCounts[e.chunknum] = m
+			chunkCounts := make(map[uint32]int, len(crec.Trigrams))
+			for _, te := range crec.Trigrams {
+				chunkCounts[te.Trigram] = te.Count
 			}
-			m[e.trigram] = int(e.count)
-		}
-
-		for i := range info.ChunkRanges {
-			counts := chunkCounts[uint64(i)]
-			if counts == nil {
-				counts = make(map[uint32]int)
-			}
-			tokenCount := 0
-			if i < len(info.ChunkTokenCounts) {
-				tokenCount = info.ChunkTokenCounts[i]
-			}
+			tokenCount := len(crec.Tokens)
 			results = append(results, ScoredChunk{
-				Range: info.ChunkRanges[i],
-				Score: fn(active, counts, tokenCount),
+				Range: fce.Location,
+				Score: fn(active, chunkCounts, tokenCount),
 			})
 		}
 		return nil
@@ -2460,15 +2268,16 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 		} else if err != nil {
 			return err
 		}
-		fileid := binary.BigEndian.Uint64(val)
+		_, n := readString(val)
+		fileid, _ := readUvarint(val[n:])
 		status.FileID = fileid
 
-		info, err := readFileInfo(txnWrap{txn}, db.dbi, fileid)
+		frec, err := db.readFRecord(txnWrap{txn}, fileid)
 		if err != nil {
 			return err
 		}
-		status.Strategy = info.ChunkingStrategy
-		status.Status = classifyFile(info)
+		status.Strategy = frec.Strategy
+		status.Status = classifyFile(frec)
 		return nil
 	})
 	return status, err
@@ -2476,11 +2285,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 
 // StaleFiles returns the status of every indexed file.
 func (db *DB) StaleFiles() ([]FileStatus, error) {
-	type fileEntry struct {
-		fileid uint64
-		info   FileInfo
-	}
-	var entries []fileEntry
+	var frecords []FRecord
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		cursor, err := txn.OpenCursor(db.dbi)
@@ -2489,16 +2294,16 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 		}
 		defer cursor.Close()
 
-		key, val, err := cursor.Get([]byte{prefixN}, nil, lmdb.SetRange)
-		for err == nil && len(key) > 0 && key[0] == prefixN {
-			if len(key) == 9 {
-				fileid := binary.BigEndian.Uint64(key[1:])
-				data := make([]byte, len(val))
-				copy(data, val)
-				var info FileInfo
-				if jsonErr := json.Unmarshal(data, &info); jsonErr == nil {
-					entries = append(entries, fileEntry{fileid, info})
-				}
+		key, val, err := cursor.Get([]byte{prefixF}, nil, lmdb.SetRange)
+		for err == nil && len(key) > 0 && key[0] == prefixF {
+			data := make([]byte, len(val))
+			copy(data, val)
+			frec, fErr := UnmarshalFValue(data)
+			if fErr == nil {
+				// Parse fileid from key
+				fileid, _ := readUvarint(key[1:])
+				frec.FileID = fileid
+				frecords = append(frecords, frec)
 			}
 			key, val, err = cursor.Get(nil, nil, lmdb.Next)
 		}
@@ -2509,12 +2314,16 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 	}
 
 	var statuses []FileStatus
-	for _, e := range entries {
+	for _, frec := range frecords {
+		path := ""
+		if len(frec.Names) > 0 {
+			path = frec.Names[0]
+		}
 		statuses = append(statuses, FileStatus{
-			Path:     e.info.Filename,
-			FileID:   e.fileid,
-			Strategy: e.info.ChunkingStrategy,
-			Status:   classifyFile(e.info),
+			Path:     path,
+			FileID:   frec.FileID,
+			Strategy: frec.Strategy,
+			Status:   classifyFile(frec),
 		})
 	}
 	return statuses, nil
@@ -2551,23 +2360,27 @@ func (db *DB) RefreshStale(strategy string) ([]FileStatus, error) {
 // classifyFile determines whether a file is fresh, stale, or missing by
 // comparing disk state to stored metadata. File I/O happens here, outside
 // any LMDB transaction.
-func classifyFile(info FileInfo) string {
-	fi, err := os.Stat(info.Filename)
+func classifyFile(frec FRecord) string {
+	filename := ""
+	if len(frec.Names) > 0 {
+		filename = frec.Names[0]
+	}
+	fi, err := os.Stat(filename)
 	if os.IsNotExist(err) {
 		return "missing"
 	}
 	if err != nil {
 		return "missing"
 	}
-	if fi.ModTime().UnixNano() == info.ModTime {
+	if fi.ModTime().UnixNano() == frec.ModTime {
 		return "fresh"
 	}
-	data, err := os.ReadFile(info.Filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return "missing"
 	}
 	h := sha256.Sum256(data)
-	if hex.EncodeToString(h[:]) == info.ContentHash {
+	if h == frec.ContentHash {
 		return "fresh"
 	}
 	return "stale"
@@ -2575,39 +2388,6 @@ func classifyFile(info FileInfo) string {
 
 // --- Helpers ---
 
-// incrementCCount increments the sparse C record for a trigram, creating it if needed.
-func incrementCCount(th TxnHolder, dbi lmdb.DBI, trigram uint32) error {
-	txn := th.Txn()
-	key := makeOldCKey(trigram)
-	var c uint64
-	val, err := txn.Get(dbi, key)
-	if err == nil && len(val) == 8 {
-		c = binary.BigEndian.Uint64(val)
-	}
-	c++
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, c)
-	return txn.Put(dbi, key, buf, 0)
-}
-
-// decrementCCount decrements the sparse C record for a trigram, deleting it if it reaches zero.
-func decrementCCount(th TxnHolder, dbi lmdb.DBI, trigram uint32) {
-	txn := th.Txn()
-	key := makeOldCKey(trigram)
-	val, err := txn.Get(dbi, key)
-	if err != nil || len(val) != 8 {
-		return
-	}
-	c := binary.BigEndian.Uint64(val)
-	if c <= 1 {
-		txn.Del(dbi, key, nil)
-		return
-	}
-	c--
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, c)
-	txn.Put(dbi, key, buf, 0)
-}
 
 // sortResults sorts search results by filename then start line.
 // Seq: seq-search.md | R33
@@ -2641,20 +2421,6 @@ func contentHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func readFileInfo(th TxnHolder, dbi lmdb.DBI, fileid uint64) (FileInfo, error) {
-	txn := th.Txn()
-	val, err := txn.Get(dbi, makeNKey(fileid))
-	if err != nil {
-		return FileInfo{}, err
-	}
-	data := make([]byte, len(val))
-	copy(data, val)
-	var info FileInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return FileInfo{}, err
-	}
-	return info, nil
-}
 
 // allocFileID reads the next file ID counter and increments it atomically.
 func (db *DB) allocFileID(th TxnHolder) (uint64, error) {
