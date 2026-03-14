@@ -59,68 +59,116 @@ Sets: this pattern can represent a set for each key
 
 LMDB only supports 511 bytes per key. Long filenames (F records below) use multiple keys.
 
-## Two Trees: content and index
+## Single Subdatabase with Chunk Deduplication
 
-LMDB supports multiple named subdatabases.
-The content DB stores file metadata and trigram frequency counts. The index DB stores the trigram-to-chunk mappings with occurrence counts, maintained incrementally.
+All records live in one LMDB subdatabase, distinguished by prefix byte. Chunks are deduplicated by content hash — the same chunk content appearing in multiple files is stored once.
 
-Subdatabase names are parameters: defaults 'ftscontent' and 'ftsindex', settable via CLI and library API.
-These are not stored in the I record -- they're needed to open the databases in the first place.
+Subdatabase name is a parameter: default 'fts', settable via CLI and library API.
+Not stored in the I record — needed to open the database in the first place.
 
-- content db:
-  - C [trigram: 3] -> count: 8 (big-endian) — per-trigram occurrence count, sparse (only non-zero trigrams stored)
-  - 'I' -> JSON -- database settings
-    - chunkingStrategies: object
-      - {name: cmd}: [cmd] [filename] -> stream of `range\tcontent` lines; empty cmd means func strategy (in-memory only)
-    - aliases: object -- maps input bytes to replacement bytes before trigram extraction (e.g. {"\n": "^"})
-    - caseInsensitive: boolean
-  - 'N' [fileid: 8] -> JSON -- information about file
-    - filename: string -- full file path
-    - chunkRanges: array[string] -- opaque range label per chunk (from chunker); array index = chunk number (0-based), preserving chunker emission order
-    - chunkTokenCounts: array[number] -- token count per chunk (for density scoring normalization); parallel to chunkRanges
-    - chunkingStrategy: string -- which chunking strategy was used
-    - modTime: number -- file modification time (Unix nanoseconds) at index time
-    - contentHash: string -- SHA-256 hex of file contents at index time
-    - fileLength: number -- file size in bytes at index time
-  - 'F' [name part: 1] filename-prefix -> filename prefix, name part 255 indicates end of prefix (see previous)
-  - 'F' 255 filename-suffix -> [fileid: 8]: file info for reindexing changed files / deleting
+### Why one tree
 
-- index db:
-  - forward entries: [trigram: 3] [count: 2 desc] [fileid: 8] [chunknum: 8] -- trigram occurrences per chunk, high counts sort first
-    - count is 2-byte big-endian stored as 0xFFFF - count for descending lexical sort
-    - capped at 65535
-  - reverse entries: R [fileid: 8] -> chunk-grouped packed format
-    - repeated: [chunknum: 8] [numTrigrams: 2] [[trigram: 3] [count: 2]]...
-    - one record per file, used only for removal
-    - contains all info needed to reconstruct forward keys for deletion
+One B-tree instead of two halves the LMDB page overhead and simplifies transactions (no cross-database coordination).
+
+### Why chunk deduplication
+
+Overlapping chunking strategies produce shared content across adjacent windows. Files with common boilerplate share chunks. Deduplication means shared content is indexed once — fewer C records, fewer T record entries, smaller mmap.
+
+### Encoding conventions
+
+- Integer fields use varint encoding (Go binary.PutUvarint / binary.ReadUvarint)
+- Trigram fields are fixed 3 bytes (24-bit)
+- Hash fields are fixed 32 bytes (SHA-256)
+- Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes (computed from record length)
+
+### Record types
+
+| Prefix | Key                    | Value                                 | Purpose                                                          |
+|--------|------------------------|---------------------------------------|------------------------------------------------------------------|
+| I      | name: str              | empty (value encoded in key)          | Config settings, data-in-key pattern                             |
+| H      | hash: 32               | chunkid: varint                       | Content hash → chunkid lookup                                    |
+| C      | chunkid: varint        | hash + trigrams + tokens + fileids    | Per-chunk: all analysis data                                     |
+| F      | fileid: varint         | metadata + names + chunks + token bag | Per-file: staleness info, ordered chunk list, file-level scoring |
+| N      | chain-byte + name: str | (varies by chain-byte)                | Filename → fileid mapping via key chains                         |
+| T      | trigram: 3             | chunkid: varint...                    | Trigram inverted index                                           |
+| W      | token-hash: 4          | chunkid: varint...                    | Token inverted index for IDF                                     |
+
+### Record details
+
+- `I` [name: str] = [value: str] -> empty
+  Config record using data-in-key pattern. Each setting is independently readable and writable — no JSON parse/serialize cycle.
+
+- `H` [hash: 32] -> [chunkid: varint]
+  Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
+
+- `C` [chunkid: varint] -> [hash: 32] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: str] [value: str]]... [n-fileids: varint] [fileid: varint]...
+  Per-chunk record. Contains everything known about the chunk: content hash, packed trigram+count pairs, packed token+count pairs, optional attributes (key-value pairs from chunkers implementing `HasAttrs`), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads.
+
+- `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [filecount: varint] [name: str]... [chunkcount: varint] [[chunkid: varint] [location: str]]... [tokencount: varint] [[token: str] [count: varint]]
+  Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name). Multiple names handle duplicate/copied files mapping to the same fileid. Ordered chunk list with opaque location labels (range strings from chunker). Aggregated token bag (union of all chunk tokens with summed counts) for file-level scoring without reading every chunk's C record.
+
+- `N` [0-254] [name: str] -> empty — filename prefix chain key
+- `N` [255] [name: str] -> [[full-name: str] [fileid: varint]]... — final chain key; value has full filename + fileid
+
+- `T` [trigram: 3] -> [chunkid: varint]...
+  Trigram inverted index. Value is a packed list of chunkids. Document frequency is free: value length / chunkid size. One entry per distinct trigram rather than one per trigram-chunk pair — the primary source of mmap reduction.
+
+- `W` [token-hash: 4] -> [chunkid: varint]...
+  Token inverted index. Same structure as T records but keyed by token hash. Provides exact token-level IDF for BM25 scoring. Document frequency from value length, same as T records.
+
+### Data at three levels
+
+| Level  | Source                                         | Use                                   |
+|--------|------------------------------------------------|---------------------------------------|
+| Chunk  | C record: per-trigram counts, per-token counts | Per-chunk TF, density scoring, verify |
+| Chunk  | C record: attrs (e.g. timestamp, role)         | Date filtering, metadata-aware search |
+| File   | F record: aggregated token bag                 | File-level ranking, pre-filtering     |
+| Corpus | T record: chunkid list length = trigram DF     | Trigram IDF                           |
+| Corpus | W record: chunkid list length = token DF       | Token IDF for BM25                    |
+
+### Estimated entry counts (ark scale: 74K chunks, 2K files, 500K distinct trigrams)
+
+| Record type | Estimated entries |
+|-------------|-------------------|
+| T (trigram → chunkids) | ~500K |
+| C (per-chunk data) | ≤74K (fewer with dedup) |
+| H (hash → chunkid) | ≤74K |
+| W (token → chunkids) | ~50K (est.) |
+| F (per-file data) | ~2K |
+| N (name lookup) | ~2K |
+| I (config) | ~10 |
+| **Total** | **~630K** |
+
+LMDB mmap pressure scales with B-tree entry count, not data volume. Packing per-trigram data into T record values (one entry per distinct trigram) and per-chunk data into C record values (one entry per unique chunk) keeps the entry count low while the data volume stays comparable.
 
 # Full Trigram Index
 
-The index DB contains entries for ALL trigrams present in the content. This makes the index complete and usable for both literal and regex search.
+The T records contain entries for ALL trigrams present in the content. This makes the index complete and usable for both literal and regex search.
 
 Trigram selection for queries is handled dynamically via `TrigramFilter` functions supplied at search time. This allows callers to adapt filtering strategy per query rather than relying on a static global cutoff.
 
-The index is the authoritative record of which trigrams appear in which chunks and how many times. There are no per-chunk bitsets (T records) — the index is maintained incrementally on add/remove. If the index DB is lost, files must be re-added from disk.
+The index is maintained incrementally on add/remove. If the database is lost, files must be re-added from disk.
 
 # The process
 
 We add a file to the database with a chosen chunking strategy:
 - read file content, check utf8.Valid
-- create the F record for the file to get its fileid
+- check for existing F records via FinalKey — return ErrAlreadyIndexed if present
+- allocate fileid, create N records (filename key chain) and F record
 - chunk: call ChunkFunc generator, which yields {Range, Content} per chunk
   - caller copies Range (as string) and Content before next yield
   - for external command strategies, a wrapper ChunkFunc parses the command output
-- for each chunk: compute trigrams on Content (not raw file bytes), count tokens on Content
-- create the N record (chunkRanges, chunkTokenCounts)
-- update C records (increment count for each trigram; insert if first occurrence)
-- write forward index entries: [trigram][desc-count][fileid][chunknum]
-- write reverse index entry: R[fileid] -> packed chunk/trigram/count data
+- for each chunk: compute SHA-256 hash, extract trigrams on Content, tokenize Content
+  - look up H record by hash — if chunkid exists, add fileid to existing C record (dedup)
+  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + fileid), append chunkid to T records for each trigram, append chunkid to W records for each token
+- update F record: append (chunkid, location) pair, merge tokens into file-level token bag
+- batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record
 
 When removing a file:
-- look up R[fileid] to get all (chunknum, trigram, count) triples
-- construct and delete each forward index entry
-- delete the R record
-- remove F/N records, update C records (decrement counts; delete record if count reaches zero)
+- read F record to get the file's chunk list
+- for each chunkid: read C record, remove this fileid from the fileid list
+  - if C record has no remaining fileids: delete C record, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token hash), delete H record
+- delete F record, delete N records (key chain)
 
 When searching for a literal string:
 - trim leading and trailing whitespace from the query before trigram extraction
@@ -128,24 +176,21 @@ When searching for a literal string:
 - extract trigrams per term (not from the whole query as one byte sequence) — this avoids cross-boundary trigrams between unrelated words (e.g. "daneel olivaw" must not produce trigrams "l o", " ol")
 - the candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms
 - select query trigrams via TrigramFilter (default: FilterAll — use all trigrams); filter is applied to the combined trigram set
-  - look up each query trigram's C record count
-  - get total chunk count from N records
+  - look up each query trigram's document frequency from T record value length
   - call filter function to select subset
-- for each selected query trigram, scan the index by trigram prefix
-  (ignoring count field) to collect candidate (fileid, chunknum) pairs
-- intersect candidate sets across all selected query trigrams
-- for each surviving candidate, collect per-trigram counts from the
-  index keys
-- score each candidate using the selected scoring function
-  (coverage or density)
+- for each selected query trigram, read T record to get candidate chunkid lists
+- intersect candidate chunkid sets across all selected query trigrams
+- for each surviving chunkid, read C record to get per-trigram counts and fileids
+- score each candidate using the selected scoring function (coverage or density)
+- resolve chunkid → (filepath, range) via C record fileids → F record chunk list
 - sort by score descending, return top-k
 - CLI output format: one result per line, `filepath:range` (range is the chunk's opaque label)
 - library returns struct slices with the same information, plus IndexStatus
 
-When searching for a regex pattern
+When searching for a regex pattern:
 - extract a trigram query (boolean AND/OR expression) from the regex AST, using rsc's approach (github.com/google/codesearch/regexp)
-- evaluate the trigram query against the full index (no trigram filtering)
-- AND nodes intersect candidate sets, OR nodes union them
+- evaluate the trigram query against T records (no trigram filtering)
+- AND nodes intersect candidate chunkid sets, OR nodes union them
 - verify: re-chunk each candidate file using the stored chunking strategy, run the compiled regex against the chunk content, discard non-matches (always, not opt-in — trigram query is a superset filter)
 - output format same as literal search
 - library returns struct slices with the same information, plus IndexStatus
@@ -207,7 +252,7 @@ Exported as `microfts2.MarkdownChunkFunc` for direct use as a `ChunkFunc`.
 
 # CLI
 
-All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index-db`.
+All commands require `-db <path>`. Optional shared flag: `-db-name` (subdatabase name, default "fts").
 
 - `microfts init -db <path> [-case-insensitive] [-aliases <from=to,...>]`
   Create a new database.
@@ -242,7 +287,7 @@ All commands require `-db <path>`. Optional shared flags: `-content-db`, `-index
 - `microfts score -db <path> [-score coverage|density] <query> <file>...`
   Score named files against a query. Output: one line per chunk, `filepath:range\tscore`.
 - `microfts chunks -db <path> [-before N] [-after N] <file> <range>`
-  Retrieve a target chunk and its neighbors. Looks up the file's chunk list from the N record, finds the target by range label match, returns the target plus up to N chunks before and after. Output: JSONL, one object per chunk with `path`, `range`, `content` fields. The target chunk is always included; neighbors are positional (chunk index ± N). Requires re-chunking the file to recover content. `-before` and `-after` default to 0.
+  Retrieve a target chunk and its neighbors. Looks up the file's chunk list from the F record, finds the target by range label match, returns the target plus up to N chunks before and after. Output: JSONL, one object per chunk with `path`, `range`, `content` fields. The target chunk is always included; neighbors are positional (chunk index ± N). Requires re-chunking the file to recover content. `-before` and `-after` default to 0.
 
 - `-r` flag (global, before subcommand):
   Refresh all stale files before executing the subcommand. Uses each file's existing chunking strategy.
@@ -267,7 +312,7 @@ func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) RemoveFile(fpath string) error
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
-func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error)
+func (db *DB) FileInfoByID(fileid uint64) (FRecord, error)
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error
 
 // Search
@@ -289,13 +334,66 @@ ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` —
 
 Options:
 - CaseInsensitive, Aliases — creation-time only
-- ContentDBName, IndexDBName — defaults "ftscontent"/"ftsindex"
+- DBName — subdatabase name, default "fts"
 - MaxDBs — LMDB max named databases, default 2
+
+## Record structs
+
+Go structs for each LMDB record type. Encoding/decoding lives in methods on the structs. The rest of the code works with typed data, not raw bytes.
+
+```go
+// CRecord is the per-chunk record. Self-describing: everything needed
+// for search, scoring, filtering, and removal.
+type CRecord struct {
+    ChunkID  uint64
+    Hash     [32]byte
+    Trigrams []TrigramEntry          // {Trigram uint32, Count int}
+    Tokens   []TokenEntry            // {Token string, Count int}
+    Attrs    map[string]string       // from HasAttrs chunkers (timestamp, role, etc.)
+    FileIDs  []uint64
+}
+
+// FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
+type FRecord struct {
+    FileID      uint64
+    ModTime     int64                // Unix nanos
+    ContentHash [32]byte
+    FileLength  int64
+    Strategy    string
+    Names       []string             // multiple names for dup/copied files
+    Chunks      []FileChunkEntry     // {ChunkID uint64, Location string}
+    Tokens      []TokenEntry         // aggregated bag across all chunks
+}
+
+// TRecord is the trigram inverted index entry.
+type TRecord struct {
+    Trigram  uint32
+    ChunkIDs []uint64
+}
+
+// WRecord is the token inverted index entry.
+type WRecord struct {
+    TokenHash uint32
+    ChunkIDs  []uint64
+}
+
+// HRecord maps content hash to chunkid.
+type HRecord struct {
+    Hash    [32]byte
+    ChunkID uint64
+}
+
+// Supporting types
+type TrigramEntry struct { Trigram uint32; Count int }
+type TokenEntry   struct { Token string; Count int }
+type FileChunkEntry struct { ChunkID uint64; Location string }
+```
+
+## Search types
 
 SearchResult: `{ Path string, Range string, Score float64 }`
 SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
-FileInfo: `{ Filename string, ChunkRanges []string, ChunkTokenCounts []int, ChunkingStrategy string, ModTime int64, ContentHash string, FileLength int64 }`
 ScoredChunk: `{ Range string, Score float64 }`
 ChunkResult: `{ Path string, Range string, Content string, Index int }` — a chunk with its content and position in the file's chunk list
 
@@ -303,9 +401,29 @@ ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenC
 SearchOption: `func(*searchConfig)` — functional option pattern
 Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection)
 
+## Chunk filtering
+
+`ChunkFilter` receives the full `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for per-trigram counts), so filtering adds a conditional check on data already in memory. Zero extra I/O.
+
+```go
+type ChunkFilter func(chunk CRecord) bool
+
+WithChunkFilter(fn ChunkFilter) SearchOption
+```
+
+Built-in chunk filters:
+- `WithAfter(t time.Time)` — keep chunks with `timestamp` attr >= t; falls back to file mod time if no attr
+- `WithBefore(t time.Time)` — keep chunks with `timestamp` attr < t; same fallback
+
+Chunk filters compose: multiple `WithChunkFilter` calls accumulate (AND semantics). `WithAfter`/`WithBefore` are sugar that append chunk filters internally.
+
+## Trigram filtering
+
 TrigramCount: `{ Trigram uint32, Count int }` — trigram code with its corpus document frequency
 TrigramFilter: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — selects which query trigrams to search with
 Stock filters: `FilterAll` (use all), `FilterByRatio(maxRatio float64)` (skip high-frequency), `FilterBestN(n int)` (keep N lowest-frequency)
+
+## Append options
 
 AppendOption: `func(*appendConfig)` — functional option pattern
 Built-in append options: `WithContentHash(hash string)` (full-file SHA-256 — caller pre-computed), `WithModTime(t int64)` (Unix nanos), `WithFileLength(n int64)` (full file size after append), `WithBaseLine(n int)` (1-based line number offset for line-based chunker ranges; 0 means no adjustment)
@@ -352,7 +470,7 @@ Normalizing by chunk token count prevents long chunks from winning on surface ar
 
 # Staleness Detection
 
-Each file's N record JSON stores the file's modification time (Unix nanoseconds) and a content hash (SHA-256) at the time it was indexed.
+Each file's F record stores the file's modification time (Unix nanoseconds) and a content hash (SHA-256) at the time it was indexed.
 
 A file is **stale** when it exists on disk and either:
 - its modification time differs from the stored value, AND
@@ -362,7 +480,7 @@ A file is **missing** when it no longer exists on disk.
 
 Checking modification time first avoids hashing when the file hasn't changed. When mod time matches, the file is considered fresh without hashing.
 
-When mod time differs but the content hash matches (file was touched but not changed), update the stored mod time in the N record so subsequent checks short-circuit at the mod time comparison instead of re-hashing.
+When mod time differs but the content hash matches (file was touched but not changed), update the stored mod time in the F record so subsequent checks short-circuit at the mod time comparison instead of re-hashing.
 
 ## Library API
 
@@ -387,9 +505,9 @@ func (db *DB) RefreshStale(strategy string) ([]FileStatus, error)
 
 For append-only files (e.g. JSONL conversation logs), ark wants to detect that a file change was an append and skip full reindex. microfts2 provides the primitives; ark implements the detection logic.
 
-## FileLength in N record
+## FileLength in F record
 
-The N record stores `fileLength` (int64): the file size in bytes at index time. `AddFile` and `Reindex` set this from the file content they already read. Ark reads this to hash only the prefix up to the stored length, detecting whether a change was purely an append.
+The F record stores `fileLength` (int64): the file size in bytes at index time. `AddFile` and `Reindex` set this from the file content they already read. Ark reads this to hash only the prefix up to the stored length, detecting whether a change was purely an append.
 
 ## AppendChunks API
 
@@ -401,11 +519,9 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string) error
 
 Chunks `content` using the named strategy, adds the resulting chunks and trigrams to the existing file's records. The `content` parameter is only the new bytes (the appended portion), not the full file.
 
-Updates the N record: new ContentHash (of the full file — caller provides or computed externally), ModTime, FileLength, appended ChunkRanges, appended ChunkTokenCounts. Does NOT touch existing chunks or trigrams — they remain valid.
+Updates the F record: new ContentHash, ModTime, FileLength, appended chunk entries, merged token bag. Does NOT touch existing chunks or trigrams — they remain valid.
 
-Chunk numbering continues from the file's existing chunk count. Forward and reverse index entries are added for the new chunks only. C records are incremented for the new chunks' trigrams.
-
-The reverse index entry (R record) is replaced with a new packed record containing both old and new chunk data.
+For each new chunk: hash content, check H record for dedup. New chunks get C records, T/W record updates. Existing chunks (dedup hit) just add fileid to C record. F record gets new (chunkid, location) entries appended.
 
 ## Chunker offset support
 
@@ -421,7 +537,7 @@ microfts2 and microvec share the same LMDB environment when used together in ark
 
 ## MaxDBs
 
-LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 2 named subdatabases (content and index). When sharing the environment with other libraries (e.g. microvec), the host process needs a higher limit. `Options.MaxDBs` sets this, defaulting to 2.
+LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 1 named subdatabase. When sharing the environment with other libraries (e.g. microvec), the host process needs a higher limit. `Options.MaxDBs` sets this, defaulting to 2.
 
 ## Env accessor
 
@@ -433,7 +549,7 @@ LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 2 named
 
 ## FileInfo lookup
 
-`FileInfoByID(fileid)` resolves a fileid to its FileInfo (filename, chunk ranges, strategy, modTime, contentHash). microvec search returns `(fileid, chunknum, score)` — the CLI needs to resolve these to human-readable output using this method. Wraps the existing `readFileInfo` in a read transaction.
+`FileInfoByID(fileid)` resolves a fileid to its `FRecord`. microvec search returns `(fileid, chunknum, score)` — the CLI needs to resolve these to human-readable output using this method. Wraps the F record read in a read transaction.
 
 ## Scoring
 
@@ -485,9 +601,9 @@ microfts2 ships stock filter functions:
 
 ### Trigram count lookup
 
-Per-query C record point reads: look up each query trigram's sparse C record at search time. Typically 3-10 LMDB reads per query.
+Per-query T record reads: look up each query trigram's document frequency from T record value length. Typically 3-10 LMDB reads per query.
 
-The total chunk count is derived from the database (sum of file chunk counts from N records, or maintained as a counter).
+The total chunk count is derived from the database (sum of file chunk counts from F records, or maintained as a counter).
 
 # Multi-Regex Post-Filtering
 
@@ -551,7 +667,7 @@ Retrieve a target chunk and its positional neighbors from an indexed file. This 
 
 ## How it works
 
-1. Look up the file's N record to get its ordered `chunkRanges` array
+1. Look up the file's F record to get its ordered chunk list (chunkid + location pairs)
 2. Find the target chunk by range label match (exact string comparison)
 3. Compute the window: `max(0, targetIndex - before)` to `min(len-1, targetIndex + after)`
 4. Re-chunk the file using its stored chunking strategy to recover chunk content
