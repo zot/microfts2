@@ -451,7 +451,8 @@ func decodeRValue(data []byte) []struct {
 
 // lookupTrigramCounts reads T records for query trigrams and returns document frequencies.
 // DF is derived from the number of varint-encoded chunkids in the T record value.
-func lookupTrigramCounts(txn *lmdb.Txn, dbi lmdb.DBI, queryTrigrams []uint32) []TrigramCount {
+func lookupTrigramCounts(th TxnHolder, dbi lmdb.DBI, queryTrigrams []uint32) []TrigramCount {
+	txn := th.Txn()
 	seen := make(map[uint32]bool)
 	var result []TrigramCount
 	for _, t := range queryTrigrams {
@@ -473,7 +474,8 @@ func lookupTrigramCounts(txn *lmdb.Txn, dbi lmdb.DBI, queryTrigrams []uint32) []
 }
 
 // countTotalChunks scans F records and sums up the chunk count across all files.
-func countTotalChunks(txn *lmdb.Txn, dbi lmdb.DBI) int {
+func countTotalChunks(th TxnHolder, dbi lmdb.DBI) int {
+	txn := th.Txn()
 	total := 0
 	cursor, err := txn.OpenCursor(dbi)
 	if err != nil {
@@ -495,9 +497,9 @@ func countTotalChunks(txn *lmdb.Txn, dbi lmdb.DBI) int {
 
 // applyTrigramFilter uses the caller-supplied filter to select query trigrams.
 // Returns the selected trigram codes as a []uint32.
-func applyTrigramFilter(txn *lmdb.Txn, contentDBI lmdb.DBI, queryTrigrams []uint32, filter TrigramFilter) []uint32 {
-	counts := lookupTrigramCounts(txn, contentDBI, queryTrigrams)
-	total := countTotalChunks(txn, contentDBI)
+func applyTrigramFilter(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, filter TrigramFilter) []uint32 {
+	counts := lookupTrigramCounts(th, contentDBI, queryTrigrams)
+	total := countTotalChunks(th, contentDBI)
 	selected := filter(counts, total)
 	result := make([]uint32, len(selected))
 	for i, tc := range selected {
@@ -507,12 +509,12 @@ func applyTrigramFilter(txn *lmdb.Txn, contentDBI lmdb.DBI, queryTrigrams []uint
 }
 
 // selectQueryTrigrams uses the caller-supplied filter (or FilterAll) to select query trigrams.
-func selectQueryTrigrams(txn *lmdb.Txn, contentDBI lmdb.DBI, queryTrigrams []uint32, cfg searchConfig) []uint32 {
+func selectQueryTrigrams(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, cfg searchConfig) []uint32 {
 	filter := cfg.trigramFilter
 	if filter == nil {
 		filter = FilterAll
 	}
-	return applyTrigramFilter(txn, contentDBI, queryTrigrams, filter)
+	return applyTrigramFilter(th, contentDBI, queryTrigrams, filter)
 }
 
 // countTokens counts space-separated tokens in data.
@@ -585,7 +587,8 @@ func tokenBagToEntries(bag map[string]int) []TokenEntry {
 // --- T/W record helpers ---
 
 // appendToTRecord adds a chunkid to a T record (read-modify-write).
-func appendToTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint64) error {
+func appendToTRecord(th TxnHolder, dbi lmdb.DBI, trigram uint32, chunkid uint64) error {
+	txn := th.Txn()
 	key := makeTKey(trigram)
 	var existing []byte
 	val, err := txn.Get(dbi, key)
@@ -603,7 +606,8 @@ func appendToTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint64
 }
 
 // appendToWRecord adds a chunkid to a W record (read-modify-write).
-func appendToWRecord(txn *lmdb.Txn, dbi lmdb.DBI, tokHash uint32, chunkid uint64) error {
+func appendToWRecord(th TxnHolder, dbi lmdb.DBI, tokHash uint32, chunkid uint64) error {
+	txn := th.Txn()
 	key := makeWKey(tokHash)
 	var existing []byte
 	val, err := txn.Get(dbi, key)
@@ -620,9 +624,9 @@ func appendToWRecord(txn *lmdb.Txn, dbi lmdb.DBI, tokHash uint32, chunkid uint64
 }
 
 // batchAppendT appends a chunkid to multiple T records.
-func batchAppendT(txn *lmdb.Txn, dbi lmdb.DBI, trigrams []uint32, chunkid uint64) error {
+func batchAppendT(th TxnHolder, dbi lmdb.DBI, trigrams []uint32, chunkid uint64) error {
 	for _, tri := range trigrams {
-		if err := appendToTRecord(txn, dbi, tri, chunkid); err != nil {
+		if err := appendToTRecord(th, dbi, tri, chunkid); err != nil {
 			return err
 		}
 	}
@@ -630,7 +634,7 @@ func batchAppendT(txn *lmdb.Txn, dbi lmdb.DBI, trigrams []uint32, chunkid uint64
 }
 
 // batchAppendW appends a chunkid to multiple W records.
-func batchAppendW(txn *lmdb.Txn, dbi lmdb.DBI, tokens []TokenEntry, chunkid uint64) error {
+func batchAppendW(th TxnHolder, dbi lmdb.DBI, tokens []TokenEntry, chunkid uint64) error {
 	seen := make(map[uint32]bool)
 	for _, te := range tokens {
 		h := tokenHash(te.Token)
@@ -638,7 +642,7 @@ func batchAppendW(txn *lmdb.Txn, dbi lmdb.DBI, tokens []TokenEntry, chunkid uint
 			continue // same hash already appended in this batch
 		}
 		seen[h] = true
-		if err := appendToWRecord(txn, dbi, h, chunkid); err != nil {
+		if err := appendToWRecord(th, dbi, h, chunkid); err != nil {
 			return err
 		}
 	}
@@ -664,7 +668,8 @@ func (db *DB) readFRecord(th TxnHolder, fileid uint64) (FRecord, error) {
 // --- I record helpers (data-in-key settings) ---
 
 // iGet reads a single I record value. Returns ("", nil) if not found.
-func iGet(txn *lmdb.Txn, dbi lmdb.DBI, name string) (string, error) {
+func iGet(th TxnHolder, dbi lmdb.DBI, name string) (string, error) {
+	txn := th.Txn()
 	val, err := txn.Get(dbi, makeIKey(name))
 	if lmdb.IsNotFound(err) {
 		return "", nil
@@ -676,12 +681,14 @@ func iGet(txn *lmdb.Txn, dbi lmdb.DBI, name string) (string, error) {
 }
 
 // iPut writes a single I record.
-func iPut(txn *lmdb.Txn, dbi lmdb.DBI, name, value string) error {
+func iPut(th TxnHolder, dbi lmdb.DBI, name, value string) error {
+	txn := th.Txn()
 	return txn.Put(dbi, makeIKey(name), []byte(value), 0)
 }
 
 // iDel deletes a single I record.
-func iDel(txn *lmdb.Txn, dbi lmdb.DBI, name string) error {
+func iDel(th TxnHolder, dbi lmdb.DBI, name string) error {
+	txn := th.Txn()
 	err := txn.Del(dbi, makeIKey(name), nil)
 	if lmdb.IsNotFound(err) {
 		return nil
@@ -690,7 +697,8 @@ func iDel(txn *lmdb.Txn, dbi lmdb.DBI, name string) error {
 }
 
 // iCounter reads a counter I record as uint64. Returns 0 if not found.
-func iCounter(txn *lmdb.Txn, dbi lmdb.DBI, name string) (uint64, error) {
+func iCounter(th TxnHolder, dbi lmdb.DBI, name string) (uint64, error) {
+	txn := th.Txn()
 	val, err := txn.Get(dbi, makeIKey(name))
 	if lmdb.IsNotFound(err) {
 		return 0, nil
@@ -705,30 +713,31 @@ func iCounter(txn *lmdb.Txn, dbi lmdb.DBI, name string) (uint64, error) {
 }
 
 // iSetCounter writes a counter I record as 8-byte big-endian.
-func iSetCounter(txn *lmdb.Txn, dbi lmdb.DBI, name string, v uint64) error {
+func iSetCounter(th TxnHolder, dbi lmdb.DBI, name string, v uint64) error {
+	txn := th.Txn()
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], v)
 	return txn.Put(dbi, makeIKey(name), buf[:], 0)
 }
 
 // writeSettings writes all settings as individual I records.
-func writeSettings(txn *lmdb.Txn, dbi lmdb.DBI, s *Settings) error {
+func writeSettings(th TxnHolder, dbi lmdb.DBI, s *Settings) error {
 	ci := "false"
 	if s.CaseInsensitive {
 		ci = "true"
 	}
-	if err := iPut(txn, dbi, "caseInsensitive", ci); err != nil {
+	if err := iPut(th, dbi, "caseInsensitive", ci); err != nil {
 		return err
 	}
 	for from, to := range s.Aliases {
 		key := fmt.Sprintf("alias:%c", from)
-		if err := iPut(txn, dbi, key, string([]byte{to})); err != nil {
+		if err := iPut(th, dbi, key, string([]byte{to})); err != nil {
 			return err
 		}
 	}
 	for name, cmd := range s.ChunkingStrategies {
 		key := "strategy:" + name
-		if err := iPut(txn, dbi, key, cmd); err != nil {
+		if err := iPut(th, dbi, key, cmd); err != nil {
 			return err
 		}
 	}
@@ -736,7 +745,8 @@ func writeSettings(txn *lmdb.Txn, dbi lmdb.DBI, s *Settings) error {
 }
 
 // loadSettings reads all settings from I records. Uses a cursor to scan the I prefix range.
-func loadSettings(txn *lmdb.Txn, dbi lmdb.DBI) (Settings, error) {
+func loadSettings(th TxnHolder, dbi lmdb.DBI) (Settings, error) {
+	txn := th.Txn()
 	s := Settings{
 		ChunkingStrategies: make(map[string]string),
 	}
@@ -835,17 +845,18 @@ func Create(path string, opts Options) (*DB, error) {
 		}
 		db.dbi = dbi
 
-		if err := writeSettings(txn, dbi, &settings); err != nil {
+		th := txnWrap{txn}
+		if err := writeSettings(th, dbi, &settings); err != nil {
 			return err
 		}
 		// Initialize counters
-		if err := iSetCounter(txn, dbi, "nextFileID", 1); err != nil {
+		if err := iSetCounter(th, dbi, "nextFileID", 1); err != nil {
 			return err
 		}
-		if err := iSetCounter(txn, dbi, "nextChunkID", 1); err != nil {
+		if err := iSetCounter(th, dbi, "nextChunkID", 1); err != nil {
 			return err
 		}
-		return iPut(txn, dbi, "version", "2")
+		return iPut(th, dbi, "version", "2")
 	})
 	if err != nil {
 		env.Close()
@@ -886,7 +897,7 @@ func Open(path string, opts Options) (*DB, error) {
 		}
 		db.dbi = dbi
 
-		s, err := loadSettings(txn, dbi)
+		s, err := loadSettings(txnWrap{txn}, dbi)
 		if err != nil {
 			return fmt.Errorf("load settings: %w", err)
 		}
@@ -916,7 +927,7 @@ func (db *DB) QueryTrigramCounts(query string) ([]TrigramCount, error) {
 	}
 	var result []TrigramCount
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		result = lookupTrigramCounts(txn, db.dbi, rawTrigrams)
+		result = lookupTrigramCounts(txnWrap{txn}, db.dbi, rawTrigrams)
 		return nil
 	})
 	return result, err
@@ -1007,7 +1018,7 @@ func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
 	var fileid uint64
 	err = db.env.Update(func(txn *lmdb.Txn) error {
 		var txnErr error
-		fileid, txnErr = db.addFileInTxn(txn, fpath, strategy, chunks, modTime, hash, int64(len(data)))
+		fileid, txnErr = db.addFileInTxn(txnWrap{txn}, fpath, strategy, chunks, modTime, hash, int64(len(data)))
 		return txnErr
 	})
 	return fileid, data, err
@@ -1026,7 +1037,8 @@ func (db *DB) resolveChunkFunc(strategy string) ChunkFunc {
 }
 
 // Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
-func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []collectedChunk, modTime int64, hash string, fileLength int64) (uint64, error) {
+func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collectedChunk, modTime int64, hash string, fileLength int64) (uint64, error) {
+	txn := th.Txn()
 	// Dedup guard: check for existing N records before allocating a fileid
 	finalKey := FinalKey(fpath)
 	_, err := txn.Get(db.dbi, finalKey)
@@ -1036,7 +1048,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 		return 0, fmt.Errorf("check existing %s: %w", fpath, err)
 	}
 
-	fileid, err := db.allocFileID(txn)
+	fileid, err := db.allocFileID(th)
 	if err != nil {
 		return 0, err
 	}
@@ -1101,7 +1113,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 			// No T/W updates needed — chunk already indexed
 		} else if lmdb.IsNotFound(err) {
 			// New chunk — allocate chunkid, create H and C records
-			chunkid, err = db.allocChunkID(txn)
+			chunkid, err = db.allocChunkID(th)
 			if err != nil {
 				return 0, err
 			}
@@ -1149,14 +1161,14 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 
 	// Batch T record updates — one read-modify-write per affected trigram
 	for _, nc := range newChunks {
-		if err := batchAppendT(txn, db.dbi, nc.trigrams, nc.chunkid); err != nil {
+		if err := batchAppendT(th, db.dbi, nc.trigrams, nc.chunkid); err != nil {
 			return 0, err
 		}
 	}
 
 	// Batch W record updates — one read-modify-write per affected token hash
 	for _, nc := range newChunks {
-		if err := batchAppendW(txn, db.dbi, nc.tokens, nc.chunkid); err != nil {
+		if err := batchAppendW(th, db.dbi, nc.tokens, nc.chunkid); err != nil {
 			return 0, err
 		}
 	}
@@ -1183,12 +1195,13 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 
 func (db *DB) RemoveFile(fpath string) error {
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return db.removeFileInTxn(txn, fpath)
+		return db.removeFileInTxn(txnWrap{txn}, fpath)
 	})
 }
 
 // R254: Remove via F record → C records → T/W cleanup for orphaned chunks
-func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
+func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
+	txn := th.Txn()
 	// Look up fileid from N records
 	finalKey := FinalKey(fpath)
 	val, err := txn.Get(db.dbi, finalKey)
@@ -1242,7 +1255,7 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 
 			// Remove chunkid from T records
 			for _, te := range crec.Trigrams {
-				removeFromTRecord(txn, db.dbi, te.Trigram, fce.ChunkID)
+				removeFromTRecord(th, db.dbi, te.Trigram, fce.ChunkID)
 			}
 			// Remove chunkid from W records
 			seen := make(map[uint32]bool)
@@ -1252,7 +1265,7 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 					continue
 				}
 				seen[h] = true
-				removeFromWRecord(txn, db.dbi, h, fce.ChunkID)
+				removeFromWRecord(th, db.dbi, h, fce.ChunkID)
 			}
 		}
 	}
@@ -1268,7 +1281,8 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 }
 
 // removeFromTRecord removes a chunkid from a T record value.
-func removeFromTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint64) {
+func removeFromTRecord(th TxnHolder, dbi lmdb.DBI, trigram uint32, chunkid uint64) {
+	txn := th.Txn()
 	key := makeTKey(trigram)
 	val, err := txn.Get(dbi, key)
 	if err != nil {
@@ -1290,7 +1304,8 @@ func removeFromTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint
 }
 
 // removeFromWRecord removes a chunkid from a W record value.
-func removeFromWRecord(txn *lmdb.Txn, dbi lmdb.DBI, tokHash uint32, chunkid uint64) {
+func removeFromWRecord(th TxnHolder, dbi lmdb.DBI, tokHash uint32, chunkid uint64) {
+	txn := th.Txn()
 	key := makeWKey(tokHash)
 	val, err := txn.Get(dbi, key)
 	if err != nil {
@@ -1332,11 +1347,12 @@ func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
 	// Single transaction: remove old records then add new ones
 	var fileid uint64
 	err = db.env.Update(func(txn *lmdb.Txn) error {
-		if err := db.removeFileInTxn(txn, fpath); err != nil {
+		th := txnWrap{txn}
+		if err := db.removeFileInTxn(th, fpath); err != nil {
 			return err
 		}
 		var txnErr error
-		fileid, txnErr = db.addFileInTxn(txn, fpath, strategy, chunks, modTime, hash, int64(len(data)))
+		fileid, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)))
 		return txnErr
 	})
 	return fileid, data, err
@@ -1402,7 +1418,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	var existingRData []byte
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txn, db.dbi, fileid)
+		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		if err != nil {
 			if lmdb.IsNotFound(err) {
 				return fmt.Errorf("fileid %d not found", fileid)
@@ -1472,7 +1488,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			var entries []chunkTrigramEntry
 			for tri, cnt := range ch.triCounts {
 				// Increment C record (R156)
-				if err := incrementCCount(txn, db.dbi, tri); err != nil {
+				if err := incrementCCount(txnWrap{txn}, db.dbi, tri); err != nil {
 					return err
 				}
 
@@ -1576,7 +1592,8 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	var results []SearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		active := selectQueryTrigrams(txn, db.dbi, queryTrigrams, cfg)
+		th := txnWrap{txn}
+		active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
 		if len(active) == 0 {
 			return nil
 		}
@@ -1597,7 +1614,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			if len(termActive) == 0 {
 				continue
 			}
-			termChunks := collectChunkIDs(txn, db.dbi, termActive)
+			termChunks := collectChunkIDs(th, db.dbi, termActive)
 			if candidateChunks == nil {
 				candidateChunks = termChunks
 			} else {
@@ -1609,7 +1626,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		}
 
 		// Read C records for surviving chunkids, score, resolve to results
-		results = db.scoreAndResolve(txn, candidateChunks, active, cfg)
+		results = db.scoreAndResolve(th, candidateChunks, active, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1634,7 +1651,8 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 }
 
 // collectChunkIDs reads T records for each trigram and returns the intersection of chunkid sets.
-func collectChunkIDs(txn *lmdb.Txn, dbi lmdb.DBI, trigrams []uint32) map[uint64]bool {
+func collectChunkIDs(th TxnHolder, dbi lmdb.DBI, trigrams []uint32) map[uint64]bool {
+	txn := th.Txn()
 	if len(trigrams) == 0 {
 		return nil
 	}
@@ -1686,7 +1704,8 @@ func intersectChunkSets(a, b map[uint64]bool) map[uint64]bool {
 }
 
 // scoreAndResolve reads C records for candidate chunkids, scores them, and resolves to SearchResults.
-func (db *DB) scoreAndResolve(txn *lmdb.Txn, candidates map[uint64]bool, active []uint32, cfg searchConfig) []SearchResult {
+func (db *DB) scoreAndResolve(th TxnHolder, candidates map[uint64]bool, active []uint32, cfg searchConfig) []SearchResult {
+	txn := th.Txn()
 	var results []SearchResult
 	activeSet := make(map[uint32]bool, len(active))
 	for _, t := range active {
@@ -1900,7 +1919,7 @@ func rechunkForVerify(db *DB, fpath string) map[string][]byte {
 			return err
 		}
 		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txn, db.dbi, fileid)
+		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		return err
 	})
 	if err != nil {
@@ -1997,7 +2016,7 @@ func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]
 }
 
 // resolveResults maps candidates to SearchResults, scoring each chunk.
-func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, cfg searchConfig) []SearchResult {
+func resolveResults(th TxnHolder, dbi lmdb.DBI, candidates map[chunkID]*chunkCandidate, active []uint32, cfg searchConfig) []SearchResult {
 	infoCache := make(map[uint64]*FileInfo)
 	var results []SearchResult
 	for id, cc := range candidates {
@@ -2013,7 +2032,7 @@ func resolveResults(txn *lmdb.Txn, dbi lmdb.DBI, candidates map[chunkID]*chunkCa
 		}
 		info, ok := infoCache[id.fileid]
 		if !ok {
-			fi, err := readFileInfo(txn, dbi, id.fileid)
+			fi, err := readFileInfo(th, dbi, id.fileid)
 			if err != nil {
 				continue
 			}
@@ -2058,6 +2077,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	var results []SearchResult
 
 	err = db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
 		cursor, err := txn.OpenCursor(db.dbi)
 		if err != nil {
 			return err
@@ -2067,10 +2087,10 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 		candidates := evalTrigramQuery(q, cursor, db.trigrams)
 		if candidates == nil {
 			// QAll: match everything — scan all N records for chunk IDs
-			candidates = allChunks(txn, db.dbi)
+			candidates = allChunks(th, db.dbi)
 		}
 
-		results = resolveResults(txn, db.dbi, candidates, nil, cfg)
+		results = resolveResults(th, db.dbi, candidates, nil, cfg)
 		return nil
 	})
 	if err != nil {
@@ -2186,7 +2206,8 @@ func intersectCandidates(a, b map[chunkID]*chunkCandidate) map[chunkID]*chunkCan
 }
 
 // allChunks scans all N records and returns every chunkID in the content DB.
-func allChunks(txn *lmdb.Txn, dbi lmdb.DBI) map[chunkID]*chunkCandidate {
+func allChunks(th TxnHolder, dbi lmdb.DBI) map[chunkID]*chunkCandidate {
+	txn := th.Txn()
 	result := make(map[chunkID]*chunkCandidate)
 	cursor, err := txn.OpenCursor(dbi)
 	if err != nil {
@@ -2231,7 +2252,7 @@ func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
 	var info FileInfo
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txn, db.dbi, fileid)
+		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		return err
 	})
 	return info, err
@@ -2251,7 +2272,7 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 			return fmt.Errorf("file not found: %s", fpath)
 		}
 		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txn, db.dbi, fileid)
+		info, err = readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		return err
 	})
 	if err != nil {
@@ -2324,12 +2345,12 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 		}
 		fileid := binary.BigEndian.Uint64(val)
 
-		info, err := readFileInfo(txn, db.dbi, fileid)
+		info, err := readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		if err != nil {
 			return err
 		}
 
-		active := selectQueryTrigrams(txn, db.dbi, queryTrigrams, cfg)
+		active := selectQueryTrigrams(txnWrap{txn}, db.dbi, queryTrigrams, cfg)
 		if len(active) == 0 {
 			return nil
 		}
@@ -2401,7 +2422,7 @@ func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 func (db *DB) AddStrategy(name, cmd string) error {
 	db.settings.ChunkingStrategies[name] = cmd
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return iPut(txn, db.dbi, "strategy:"+name, cmd)
+		return iPut(txnWrap{txn}, db.dbi, "strategy:"+name, cmd)
 	})
 }
 
@@ -2410,7 +2431,7 @@ func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
 	db.funcStrategies[name] = fn
 	db.settings.ChunkingStrategies[name] = "" // empty cmd marks func strategy
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return iPut(txn, db.dbi, "strategy:"+name, "")
+		return iPut(txnWrap{txn}, db.dbi, "strategy:"+name, "")
 	})
 }
 
@@ -2418,7 +2439,7 @@ func (db *DB) RemoveStrategy(name string) error {
 	delete(db.settings.ChunkingStrategies, name)
 	delete(db.funcStrategies, name)
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return iDel(txn, db.dbi, "strategy:"+name)
+		return iDel(txnWrap{txn}, db.dbi, "strategy:"+name)
 	})
 }
 
@@ -2442,7 +2463,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 		fileid := binary.BigEndian.Uint64(val)
 		status.FileID = fileid
 
-		info, err := readFileInfo(txn, db.dbi, fileid)
+		info, err := readFileInfo(txnWrap{txn}, db.dbi, fileid)
 		if err != nil {
 			return err
 		}
@@ -2555,7 +2576,8 @@ func classifyFile(info FileInfo) string {
 // --- Helpers ---
 
 // incrementCCount increments the sparse C record for a trigram, creating it if needed.
-func incrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) error {
+func incrementCCount(th TxnHolder, dbi lmdb.DBI, trigram uint32) error {
+	txn := th.Txn()
 	key := makeOldCKey(trigram)
 	var c uint64
 	val, err := txn.Get(dbi, key)
@@ -2569,7 +2591,8 @@ func incrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) error {
 }
 
 // decrementCCount decrements the sparse C record for a trigram, deleting it if it reaches zero.
-func decrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) {
+func decrementCCount(th TxnHolder, dbi lmdb.DBI, trigram uint32) {
+	txn := th.Txn()
 	key := makeOldCKey(trigram)
 	val, err := txn.Get(dbi, key)
 	if err != nil || len(val) != 8 {
@@ -2618,7 +2641,8 @@ func contentHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func readFileInfo(txn *lmdb.Txn, dbi lmdb.DBI, fileid uint64) (FileInfo, error) {
+func readFileInfo(th TxnHolder, dbi lmdb.DBI, fileid uint64) (FileInfo, error) {
+	txn := th.Txn()
 	val, err := txn.Get(dbi, makeNKey(fileid))
 	if err != nil {
 		return FileInfo{}, err
@@ -2633,30 +2657,30 @@ func readFileInfo(txn *lmdb.Txn, dbi lmdb.DBI, fileid uint64) (FileInfo, error) 
 }
 
 // allocFileID reads the next file ID counter and increments it atomically.
-func (db *DB) allocFileID(txn *lmdb.Txn) (uint64, error) {
-	id, err := iCounter(txn, db.dbi, "nextFileID")
+func (db *DB) allocFileID(th TxnHolder) (uint64, error) {
+	id, err := iCounter(th, db.dbi, "nextFileID")
 	if err != nil {
 		return 0, err
 	}
 	if id == 0 {
 		id = 1 // should not happen after Create, but be safe
 	}
-	if err := iSetCounter(txn, db.dbi, "nextFileID", id+1); err != nil {
+	if err := iSetCounter(th, db.dbi, "nextFileID", id+1); err != nil {
 		return 0, err
 	}
 	return id, nil
 }
 
 // allocChunkID reads the next chunk ID counter and increments it atomically.
-func (db *DB) allocChunkID(txn *lmdb.Txn) (uint64, error) {
-	id, err := iCounter(txn, db.dbi, "nextChunkID")
+func (db *DB) allocChunkID(th TxnHolder) (uint64, error) {
+	id, err := iCounter(th, db.dbi, "nextChunkID")
 	if err != nil {
 		return 0, err
 	}
 	if id == 0 {
 		id = 1
 	}
-	if err := iSetCounter(txn, db.dbi, "nextChunkID", id+1); err != nil {
+	if err := iSetCounter(th, db.dbi, "nextChunkID", id+1); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -2664,7 +2688,7 @@ func (db *DB) allocChunkID(txn *lmdb.Txn) (uint64, error) {
 
 func (db *DB) saveSettings() error {
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return writeSettings(txn, db.dbi, &db.settings)
+		return writeSettings(txnWrap{txn}, db.dbi, &db.settings)
 	})
 }
 
