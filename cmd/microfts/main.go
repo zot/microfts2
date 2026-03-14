@@ -110,17 +110,15 @@ func fatal(msg string, err error) {
 
 // --- Shared flags ---
 
-func dbFlags(fs *flag.FlagSet) (dbPath, contentDB, indexDB *string) {
+func dbFlags(fs *flag.FlagSet) (dbPath, dbName *string) {
 	dbPath = fs.String("db", "", "database path (required)")
-	contentDB = fs.String("content-db", "", "content subdatabase name")
-	indexDB = fs.String("index-db", "", "index subdatabase name")
+	dbName = fs.String("db-name", "", "subdatabase name (default fts)")
 	return
 }
 
-func openOpts(contentDB, indexDB string) microfts2.Options {
+func openOpts(dbName string) microfts2.Options {
 	return microfts2.Options{
-		ContentDBName: contentDB,
-		IndexDBName:   indexDB,
+		DBName: dbName,
 	}
 }
 
@@ -128,7 +126,7 @@ func openOpts(contentDB, indexDB string) microfts2.Options {
 
 func cmdInit() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	caseInsensitive := fs.Bool("case-insensitive", false, "case insensitive indexing")
 	aliasStr := fs.String("aliases", "", "byte aliases as from=to pairs, comma-separated (e.g. '\\n=^')")
 	fs.Parse(os.Args[1:])
@@ -143,8 +141,7 @@ func cmdInit() {
 	db, err := microfts2.Create(*dbPath, microfts2.Options{
 		CaseInsensitive: *caseInsensitive,
 		Aliases:         aliases,
-		ContentDBName:   *contentDB,
-		IndexDBName:     *indexDB,
+		DBName:          *dbName,
 	})
 	if err != nil {
 		fatal("init", err)
@@ -155,7 +152,7 @@ func cmdInit() {
 
 func cmdAdd() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	strategy := fs.String("strategy", "", "chunking strategy name (required)")
 	fs.Parse(os.Args[1:])
 
@@ -164,7 +161,7 @@ func cmdAdd() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -181,7 +178,7 @@ func cmdAdd() {
 // Seq: seq-search.md | R207, R208, R209, R210, R211, R212
 func cmdSearch() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	useRegex := fs.Bool("regex", false, "treat query as a Go regexp pattern")
 	contains := fs.String("contains", "", "FTS text query (composes with --regex)")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
@@ -213,7 +210,7 @@ func cmdSearch() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -257,7 +254,7 @@ func cmdSearch() {
 
 func cmdDelete() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" || fs.NArg() == 0 {
@@ -265,7 +262,7 @@ func cmdDelete() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -281,7 +278,7 @@ func cmdDelete() {
 
 func cmdReindex() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	strategy := fs.String("strategy", "", "new chunking strategy (required)")
 	fs.Parse(os.Args[1:])
 
@@ -290,7 +287,7 @@ func cmdReindex() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -307,7 +304,7 @@ func cmdReindex() {
 func cmdRefreshOnly() {
 	flag.CommandLine = flag.NewFlagSet("refresh", flag.ExitOnError)
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" {
@@ -315,7 +312,7 @@ func cmdRefreshOnly() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -345,7 +342,7 @@ func doRefresh(db *microfts2.DB) {
 
 func cmdStale() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	fs.Parse(os.Args[1:])
 
 	if *dbPath == "" {
@@ -353,7 +350,7 @@ func cmdStale() {
 		os.Exit(1)
 	}
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -372,7 +369,7 @@ func cmdStale() {
 
 func cmdScore() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	fs.Parse(os.Args[1:])
 
@@ -395,7 +392,7 @@ func cmdScore() {
 	query := fs.Arg(0)
 	files := fs.Args()[1:]
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}
@@ -422,7 +419,7 @@ func cmdStrategy() {
 	os.Args = append(os.Args[:1], os.Args[2:]...)
 
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 
 	switch sub {
 	case "add":
@@ -433,7 +430,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy add: -db, -name, -cmd required")
 			os.Exit(1)
 		}
-		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 		if err != nil {
 			fatal("open", err)
 		}
@@ -449,7 +446,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy remove: -db, -name required")
 			os.Exit(1)
 		}
-		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 		if err != nil {
 			fatal("open", err)
 		}
@@ -464,7 +461,7 @@ func cmdStrategy() {
 			fmt.Fprintln(os.Stderr, "strategy list: -db required")
 			os.Exit(1)
 		}
-		db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+		db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 		if err != nil {
 			fatal("open", err)
 		}
@@ -517,7 +514,7 @@ func unescapeByte(s string) int {
 // Seq: seq-chunks.md | R204, R205
 func cmdChunks() {
 	fs := flag.CommandLine
-	dbPath, contentDB, indexDB := dbFlags(fs)
+	dbPath, dbName := dbFlags(fs)
 	before := fs.Int("before", 0, "number of chunks before target")
 	after := fs.Int("after", 0, "number of chunks after target")
 	fs.Parse(os.Args[1:])
@@ -530,7 +527,7 @@ func cmdChunks() {
 	fpath := fs.Arg(0)
 	targetRange := fs.Arg(1)
 
-	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
 	if err != nil {
 		fatal("open", err)
 	}

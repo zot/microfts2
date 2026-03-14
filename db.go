@@ -60,22 +60,19 @@ type Chunk struct {
 type ChunkFunc func(path string, content []byte, yield func(Chunk) bool) error
 
 type DB struct {
-	env        *lmdb.Env
-	contentDBI lmdb.DBI
-	indexDBI   lmdb.DBI
-	settings   Settings
+	env            *lmdb.Env
+	dbi            lmdb.DBI
+	dbName         string
+	settings       Settings
 	trigrams       *Trigrams
-	contentName    string
-	indexName      string
 	funcStrategies map[string]ChunkFunc // in-memory Go function strategies
 }
 
-// Settings is stored as JSON in the I record.
+// Settings holds the in-memory representation of I records.
 type Settings struct {
-	CaseInsensitive    bool              `json:"caseInsensitive"`
-	Aliases            map[string]string `json:"aliases,omitempty"`
-	ChunkingStrategies map[string]string `json:"chunkingStrategies"`
-	NextFileID         uint64            `json:"nextFileID"`
+	CaseInsensitive    bool
+	Aliases            map[byte]byte     // byte→byte alias mapping
+	ChunkingStrategies map[string]string // name→cmd (empty cmd = func strategy)
 }
 
 // SearchResult is a single match from Search.
@@ -295,25 +292,17 @@ type FileStatus struct {
 // Options configures database creation and opening.
 type Options struct {
 	CaseInsensitive bool
-	Aliases         map[byte]byte
-	ContentDBName   string
-	IndexDBName     string
-	MaxDBs          int   // LMDB max named databases, default 2
-	MapSize         int64 // bytes, default 1GB
+	Aliases         map[byte]byte // maps input bytes to replacement bytes before trigram extraction
+	DBName          string        // subdatabase name, default "fts"
+	MaxDBs          int           // LMDB max named databases, default 2
+	MapSize         int64         // bytes, default 1GB
 }
 
-func (o *Options) contentDB() string {
-	if o.ContentDBName != "" {
-		return o.ContentDBName
+func (o *Options) dbNameOrDefault() string {
+	if o.DBName != "" {
+		return o.DBName
 	}
-	return "ftscontent"
-}
-
-func (o *Options) indexDB() string {
-	if o.IndexDBName != "" {
-		return o.IndexDBName
-	}
-	return "ftsindex"
+	return "fts"
 }
 
 func (o *Options) maxDBs() int {
@@ -528,6 +517,129 @@ func countTokens(data []byte) int {
 	return n
 }
 
+// --- I record helpers (data-in-key settings) ---
+
+// iGet reads a single I record value. Returns ("", nil) if not found.
+func iGet(txn *lmdb.Txn, dbi lmdb.DBI, name string) (string, error) {
+	val, err := txn.Get(dbi, makeIKey(name))
+	if lmdb.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(val), nil
+}
+
+// iPut writes a single I record.
+func iPut(txn *lmdb.Txn, dbi lmdb.DBI, name, value string) error {
+	return txn.Put(dbi, makeIKey(name), []byte(value), 0)
+}
+
+// iDel deletes a single I record.
+func iDel(txn *lmdb.Txn, dbi lmdb.DBI, name string) error {
+	err := txn.Del(dbi, makeIKey(name), nil)
+	if lmdb.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// iCounter reads a counter I record as uint64. Returns 0 if not found.
+func iCounter(txn *lmdb.Txn, dbi lmdb.DBI, name string) (uint64, error) {
+	val, err := txn.Get(dbi, makeIKey(name))
+	if lmdb.IsNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if len(val) < 8 {
+		return 0, fmt.Errorf("counter %q: short value (%d bytes)", name, len(val))
+	}
+	return binary.BigEndian.Uint64(val), nil
+}
+
+// iSetCounter writes a counter I record as 8-byte big-endian.
+func iSetCounter(txn *lmdb.Txn, dbi lmdb.DBI, name string, v uint64) error {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], v)
+	return txn.Put(dbi, makeIKey(name), buf[:], 0)
+}
+
+// writeSettings writes all settings as individual I records.
+func writeSettings(txn *lmdb.Txn, dbi lmdb.DBI, s *Settings) error {
+	ci := "false"
+	if s.CaseInsensitive {
+		ci = "true"
+	}
+	if err := iPut(txn, dbi, "caseInsensitive", ci); err != nil {
+		return err
+	}
+	for from, to := range s.Aliases {
+		key := fmt.Sprintf("alias:%c", from)
+		if err := iPut(txn, dbi, key, string([]byte{to})); err != nil {
+			return err
+		}
+	}
+	for name, cmd := range s.ChunkingStrategies {
+		key := "strategy:" + name
+		if err := iPut(txn, dbi, key, cmd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadSettings reads all settings from I records. Uses a cursor to scan the I prefix range.
+func loadSettings(txn *lmdb.Txn, dbi lmdb.DBI) (Settings, error) {
+	s := Settings{
+		ChunkingStrategies: make(map[string]string),
+	}
+
+	cursor, err := txn.OpenCursor(dbi)
+	if err != nil {
+		return s, err
+	}
+	defer cursor.Close()
+
+	// Scan all I-prefixed keys
+	startKey := []byte{prefixI}
+	endKey := []byte{prefixI + 1}
+
+	k, v, err := cursor.Get(startKey, nil, lmdb.SetRange)
+	for err == nil {
+		if len(k) < 1 || k[0] != prefixI || (len(k) > 0 && bytes.Compare(k, endKey) >= 0) {
+			break
+		}
+		name := string(k[1:])
+		value := string(v)
+
+		switch {
+		case name == "caseInsensitive":
+			s.CaseInsensitive = (value == "true")
+		case strings.HasPrefix(name, "alias:") && len(name) > 6:
+			if s.Aliases == nil {
+				s.Aliases = make(map[byte]byte)
+			}
+			from := name[6]
+			if len(value) > 0 {
+				s.Aliases[from] = value[0]
+			}
+		case strings.HasPrefix(name, "strategy:"):
+			stratName := name[9:]
+			s.ChunkingStrategies[stratName] = value
+		}
+
+		k, v, err = cursor.Get(nil, nil, lmdb.Next)
+	}
+	if err != nil && !lmdb.IsNotFound(err) {
+		return s, err
+	}
+
+	return s, nil
+}
+
 // --- Create / Open / Close ---
 
 // Seq: seq-init.md
@@ -559,38 +671,34 @@ func Create(path string, opts Options) (*DB, error) {
 
 	settings := Settings{
 		CaseInsensitive:    opts.CaseInsensitive,
-		Aliases:            byteAliasesToJSON(opts.Aliases),
+		Aliases:            opts.Aliases,
 		ChunkingStrategies: make(map[string]string),
-		NextFileID:         1,
 	}
 
+	dbName := opts.dbNameOrDefault()
 	db := &DB{
 		env:            env,
+		dbName:         dbName,
 		trigrams:       NewTrigrams(opts.CaseInsensitive, opts.Aliases),
-		contentName:    opts.contentDB(),
-		indexName:      opts.indexDB(),
 		settings:       settings,
 		funcStrategies: make(map[string]ChunkFunc),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
-		dbi, err := txn.OpenDBI(db.contentName, lmdb.Create)
+		dbi, err := txn.OpenDBI(dbName, lmdb.Create)
 		if err != nil {
 			return err
 		}
-		db.contentDBI = dbi
+		db.dbi = dbi
 
-		idbi, err := txn.OpenDBI(db.indexName, lmdb.Create)
-		if err != nil {
+		if err := writeSettings(txn, dbi, &settings); err != nil {
 			return err
 		}
-		db.indexDBI = idbi
-
-		settingsJSON, err := json.Marshal(settings)
-		if err != nil {
+		// Initialize counters
+		if err := iSetCounter(txn, dbi, "nextFileID", 1); err != nil {
 			return err
 		}
-		return txn.Put(dbi, []byte{prefixI}, settingsJSON, 0)
+		return iSetCounter(txn, dbi, "nextChunkID", 1)
 	})
 	if err != nil {
 		env.Close()
@@ -617,37 +725,25 @@ func Open(path string, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("lmdb Open %s: %w", path, err)
 	}
 
+	dbName := opts.dbNameOrDefault()
 	db := &DB{
 		env:            env,
-		contentName:    opts.contentDB(),
-		indexName:      opts.indexDB(),
+		dbName:         dbName,
 		funcStrategies: make(map[string]ChunkFunc),
 	}
 
-	// Open content DB and load settings in a write txn (ensures DBI handle is committed)
 	err = env.Update(func(txn *lmdb.Txn) error {
-		dbi, err := txn.OpenDBI(db.contentName, 0)
+		dbi, err := txn.OpenDBI(dbName, 0)
 		if err != nil {
-			return fmt.Errorf("open content db %q: %w", db.contentName, err)
+			return fmt.Errorf("open db %q: %w", dbName, err)
 		}
-		db.contentDBI = dbi
+		db.dbi = dbi
 
-		val, err := txn.Get(dbi, []byte{prefixI})
+		s, err := loadSettings(txn, dbi)
 		if err != nil {
-			return fmt.Errorf("read settings: %w", err)
+			return fmt.Errorf("load settings: %w", err)
 		}
-		data := make([]byte, len(val))
-		copy(data, val)
-		if err := json.Unmarshal(data, &db.settings); err != nil {
-			return fmt.Errorf("parse settings: %w", err)
-		}
-
-		// Open index DB (always exists — maintained incrementally)
-		idbi, err := txn.OpenDBI(db.indexName, lmdb.Create)
-		if err != nil {
-			return fmt.Errorf("open index db %q: %w", db.indexName, err)
-		}
-		db.indexDBI = idbi
+		db.settings = s
 		return nil
 	})
 	if err != nil {
@@ -655,8 +751,7 @@ func Open(path string, opts Options) (*DB, error) {
 		return nil, err
 	}
 
-	db.trigrams = NewTrigrams(db.settings.CaseInsensitive, byteAliasesFromJSON(db.settings.Aliases))
-
+	db.trigrams = NewTrigrams(db.settings.CaseInsensitive, db.settings.Aliases)
 	return db, nil
 }
 
@@ -674,7 +769,7 @@ func (db *DB) QueryTrigramCounts(query string) ([]TrigramCount, error) {
 	}
 	var result []TrigramCount
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		result = lookupTrigramCounts(txn, db.contentDBI, rawTrigrams)
+		result = lookupTrigramCounts(txn, db.dbi, rawTrigrams)
 		return nil
 	})
 	return result, err
@@ -785,7 +880,7 @@ func (db *DB) resolveChunkFunc(strategy string) ChunkFunc {
 func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []collectedChunk, modTime int64, hash string, fileLength int64) (uint64, error) {
 	// Dedup guard: check for existing F records before allocating a fileid
 	finalKey := FinalKey(fpath)
-	_, err := txn.Get(db.contentDBI, finalKey)
+	_, err := txn.Get(db.dbi, finalKey)
 	if err == nil {
 		return 0, ErrAlreadyIndexed
 	} else if !lmdb.IsNotFound(err) {
@@ -806,7 +901,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 		if i == len(pairs)-1 {
 			val = fileidBytes
 		}
-		if err := txn.Put(db.contentDBI, pair.Key, val, 0); err != nil {
+		if err := txn.Put(db.dbi, pair.Key, val, 0); err != nil {
 			return 0, err
 		}
 	}
@@ -824,7 +919,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 		var entries []chunkTrigramEntry
 		for tri, cnt := range ch.triCounts {
 			// Update sparse C record
-			if err := incrementCCount(txn, db.contentDBI, tri); err != nil {
+			if err := incrementCCount(txn, db.dbi, tri); err != nil {
 				return 0, err
 			}
 
@@ -835,7 +930,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 			}
 
 			// Write forward index entry
-			if err := txn.Put(db.indexDBI, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
+			if err := txn.Put(db.dbi, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
 				return 0, err
 			}
 
@@ -845,7 +940,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 	}
 
 	// Write R record (reverse index)
-	if err := txn.Put(db.indexDBI, makeRKey(fileid), encodeRValue(rChunks), 0); err != nil {
+	if err := txn.Put(db.dbi, makeRKey(fileid), encodeRValue(rChunks), 0); err != nil {
 		return 0, err
 	}
 
@@ -864,7 +959,7 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 	if err != nil {
 		return 0, err
 	}
-	return fileid, txn.Put(db.contentDBI, makeNKey(fileid), infoJSON, 0)
+	return fileid, txn.Put(db.dbi, makeNKey(fileid), infoJSON, 0)
 }
 
 // --- RemoveFile ---
@@ -877,7 +972,7 @@ func (db *DB) RemoveFile(fpath string) error {
 
 func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 	finalKey := FinalKey(fpath)
-	val, err := txn.Get(db.contentDBI, finalKey)
+	val, err := txn.Get(db.dbi, finalKey)
 	if lmdb.IsNotFound(err) {
 		return fmt.Errorf("file not found: %s", fpath)
 	} else if err != nil {
@@ -887,7 +982,7 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 
 	// Read R record to find all forward index entries
 	rKey := makeRKey(fileid)
-	rVal, err := txn.Get(db.indexDBI, rKey)
+	rVal, err := txn.Get(db.dbi, rKey)
 	if err != nil && !lmdb.IsNotFound(err) {
 		return fmt.Errorf("read R record for %s: %w", fpath, err)
 	}
@@ -896,22 +991,22 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 		entries := decodeRValue(slices.Clone(rVal))
 		for _, e := range entries {
 			// Delete forward index entry
-			txn.Del(db.indexDBI, makeIndexKey(e.trigram, e.count, fileid, e.chunknum), nil)
+			txn.Del(db.dbi, makeIndexKey(e.trigram, e.count, fileid, e.chunknum), nil)
 
 			// Decrement sparse C record
-			decrementCCount(txn, db.contentDBI, e.trigram)
+			decrementCCount(txn, db.dbi, e.trigram)
 		}
 
 		// Delete R record
-		txn.Del(db.indexDBI, rKey, nil)
+		txn.Del(db.dbi, rKey, nil)
 	}
 
-	if err := txn.Del(db.contentDBI, makeNKey(fileid), nil); err != nil {
+	if err := txn.Del(db.dbi, makeNKey(fileid), nil); err != nil {
 		return err
 	}
 
 	for _, pair := range EncodeFilename(fpath) {
-		txn.Del(db.contentDBI, pair.Key, nil)
+		txn.Del(db.dbi, pair.Key, nil)
 	}
 	return nil
 }
@@ -1007,14 +1102,14 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	var existingRData []byte
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txn, db.contentDBI, fileid)
+		info, err = readFileInfo(txn, db.dbi, fileid)
 		if err != nil {
 			if lmdb.IsNotFound(err) {
 				return fmt.Errorf("fileid %d not found", fileid)
 			}
 			return err
 		}
-		rVal, err := txn.Get(db.indexDBI, makeRKey(fileid))
+		rVal, err := txn.Get(db.dbi, makeRKey(fileid))
 		if err != nil && !lmdb.IsNotFound(err) {
 			return err
 		}
@@ -1075,7 +1170,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			var entries []chunkTrigramEntry
 			for tri, cnt := range ch.triCounts {
 				// Increment C record (R156)
-				if err := incrementCCount(txn, db.contentDBI, tri); err != nil {
+				if err := incrementCCount(txn, db.dbi, tri); err != nil {
 					return err
 				}
 
@@ -1085,7 +1180,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 				}
 
 				// Write forward index entry (R154)
-				if err := txn.Put(db.indexDBI, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
+				if err := txn.Put(db.dbi, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
 					return err
 				}
 
@@ -1099,7 +1194,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		// ([chunknum:8][numTri:2][[tri:3][count:2]]...) with no header/footer.
 		newRData := encodeRValue(newRChunks)
 		combinedR := append(existingRData, newRData...)
-		if err := txn.Put(db.indexDBI, makeRKey(fileid), combinedR, 0); err != nil {
+		if err := txn.Put(db.dbi, makeRKey(fileid), combinedR, 0); err != nil {
 			return err
 		}
 
@@ -1122,7 +1217,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if err != nil {
 			return err
 		}
-		return txn.Put(db.contentDBI, makeNKey(fileid), infoJSON, 0)
+		return txn.Put(db.dbi, makeNKey(fileid), infoJSON, 0)
 	})
 }
 
@@ -1179,7 +1274,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	var results []SearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		active := selectQueryTrigrams(txn, db.contentDBI, queryTrigrams, cfg)
+		active := selectQueryTrigrams(txn, db.dbi, queryTrigrams, cfg)
 		if len(active) == 0 {
 			return nil
 		}
@@ -1188,7 +1283,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			activeSet[t] = true
 		}
 
-		cursor, err := txn.OpenCursor(db.indexDBI)
+		cursor, err := txn.OpenCursor(db.dbi)
 		if err != nil {
 			return err
 		}
@@ -1218,7 +1313,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			}
 		}
 
-		results = resolveResults(txn, db.contentDBI, candidates, active, cfg)
+		results = resolveResults(txn, db.dbi, candidates, active, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1351,12 +1446,12 @@ func rechunkForVerify(db *DB, fpath string) map[string][]byte {
 	var info FileInfo
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
-		val, err := txn.Get(db.contentDBI, finalKey)
+		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return err
 		}
 		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txn, db.contentDBI, fileid)
+		info, err = readFileInfo(txn, db.dbi, fileid)
 		return err
 	})
 	if err != nil {
@@ -1514,7 +1609,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	var results []SearchResult
 
 	err = db.env.View(func(txn *lmdb.Txn) error {
-		cursor, err := txn.OpenCursor(db.indexDBI)
+		cursor, err := txn.OpenCursor(db.dbi)
 		if err != nil {
 			return err
 		}
@@ -1523,10 +1618,10 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 		candidates := evalTrigramQuery(q, cursor, db.trigrams)
 		if candidates == nil {
 			// QAll: match everything — scan all N records for chunk IDs
-			candidates = allChunks(txn, db.contentDBI)
+			candidates = allChunks(txn, db.dbi)
 		}
 
-		results = resolveResults(txn, db.contentDBI, candidates, nil, cfg)
+		results = resolveResults(txn, db.dbi, candidates, nil, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1687,7 +1782,7 @@ func (db *DB) FileInfoByID(fileid uint64) (FileInfo, error) {
 	var info FileInfo
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
-		info, err = readFileInfo(txn, db.contentDBI, fileid)
+		info, err = readFileInfo(txn, db.dbi, fileid)
 		return err
 	})
 	return info, err
@@ -1702,12 +1797,12 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	var info FileInfo
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
-		val, err := txn.Get(db.contentDBI, finalKey)
+		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return fmt.Errorf("file not found: %s", fpath)
 		}
 		fileid := binary.BigEndian.Uint64(val)
-		info, err = readFileInfo(txn, db.contentDBI, fileid)
+		info, err = readFileInfo(txn, db.dbi, fileid)
 		return err
 	})
 	if err != nil {
@@ -1774,25 +1869,25 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 	var results []ScoredChunk
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
-		val, err := txn.Get(db.contentDBI, finalKey)
+		val, err := txn.Get(db.dbi, finalKey)
 		if err != nil {
 			return fmt.Errorf("file not found: %s", fpath)
 		}
 		fileid := binary.BigEndian.Uint64(val)
 
-		info, err := readFileInfo(txn, db.contentDBI, fileid)
+		info, err := readFileInfo(txn, db.dbi, fileid)
 		if err != nil {
 			return err
 		}
 
-		active := selectQueryTrigrams(txn, db.contentDBI, queryTrigrams, cfg)
+		active := selectQueryTrigrams(txn, db.dbi, queryTrigrams, cfg)
 		if len(active) == 0 {
 			return nil
 		}
 
 		// Read R record to get per-chunk trigram counts
 		rKey := makeRKey(fileid)
-		rVal, err := txn.Get(db.indexDBI, rKey)
+		rVal, err := txn.Get(db.dbi, rKey)
 		if err != nil {
 			return nil // no R record = no scores
 		}
@@ -1856,20 +1951,26 @@ func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 
 func (db *DB) AddStrategy(name, cmd string) error {
 	db.settings.ChunkingStrategies[name] = cmd
-	return db.saveSettings()
+	return db.env.Update(func(txn *lmdb.Txn) error {
+		return iPut(txn, db.dbi, "strategy:"+name, cmd)
+	})
 }
 
 // CRC: crc-DB.md | R116, R117
 func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
 	db.funcStrategies[name] = fn
 	db.settings.ChunkingStrategies[name] = "" // empty cmd marks func strategy
-	return db.saveSettings()
+	return db.env.Update(func(txn *lmdb.Txn) error {
+		return iPut(txn, db.dbi, "strategy:"+name, "")
+	})
 }
 
 func (db *DB) RemoveStrategy(name string) error {
 	delete(db.settings.ChunkingStrategies, name)
 	delete(db.funcStrategies, name)
-	return db.saveSettings()
+	return db.env.Update(func(txn *lmdb.Txn) error {
+		return iDel(txn, db.dbi, "strategy:"+name)
+	})
 }
 
 // --- Staleness ---
@@ -1883,7 +1984,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		finalKey := FinalKey(fpath)
-		val, err := txn.Get(db.contentDBI, finalKey)
+		val, err := txn.Get(db.dbi, finalKey)
 		if lmdb.IsNotFound(err) {
 			return fmt.Errorf("file not indexed: %s", fpath)
 		} else if err != nil {
@@ -1892,7 +1993,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 		fileid := binary.BigEndian.Uint64(val)
 		status.FileID = fileid
 
-		info, err := readFileInfo(txn, db.contentDBI, fileid)
+		info, err := readFileInfo(txn, db.dbi, fileid)
 		if err != nil {
 			return err
 		}
@@ -1912,7 +2013,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 	var entries []fileEntry
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		cursor, err := txn.OpenCursor(db.contentDBI)
+		cursor, err := txn.OpenCursor(db.dbi)
 		if err != nil {
 			return err
 		}
@@ -2082,63 +2183,39 @@ func readFileInfo(txn *lmdb.Txn, dbi lmdb.DBI, fileid uint64) (FileInfo, error) 
 	return info, nil
 }
 
-// allocFileID reads the next file ID from the database and increments it atomically.
+// allocFileID reads the next file ID counter and increments it atomically.
 func (db *DB) allocFileID(txn *lmdb.Txn) (uint64, error) {
-	// Re-read settings from DB to get the authoritative NextFileID
-	val, err := txn.Get(db.contentDBI, []byte{prefixI})
+	id, err := iCounter(txn, db.dbi, "nextFileID")
 	if err != nil {
 		return 0, err
 	}
-	data := make([]byte, len(val))
-	copy(data, val)
-	var s Settings
-	if err := json.Unmarshal(data, &s); err != nil {
+	if id == 0 {
+		id = 1 // should not happen after Create, but be safe
+	}
+	if err := iSetCounter(txn, db.dbi, "nextFileID", id+1); err != nil {
 		return 0, err
 	}
-	fileid := s.NextFileID
-	s.NextFileID++
-	db.settings = s
-	if err := putSettings(txn, db.contentDBI, &db.settings); err != nil {
+	return id, nil
+}
+
+// allocChunkID reads the next chunk ID counter and increments it atomically.
+func (db *DB) allocChunkID(txn *lmdb.Txn) (uint64, error) {
+	id, err := iCounter(txn, db.dbi, "nextChunkID")
+	if err != nil {
 		return 0, err
 	}
-	return fileid, nil
-}
-
-func byteAliasesToJSON(aliases map[byte]byte) map[string]string {
-	if len(aliases) == 0 {
-		return nil
+	if id == 0 {
+		id = 1
 	}
-	m := make(map[string]string, len(aliases))
-	for k, v := range aliases {
-		m[string([]byte{k})] = string([]byte{v})
+	if err := iSetCounter(txn, db.dbi, "nextChunkID", id+1); err != nil {
+		return 0, err
 	}
-	return m
-}
-
-func byteAliasesFromJSON(m map[string]string) map[byte]byte {
-	if len(m) == 0 {
-		return nil
-	}
-	aliases := make(map[byte]byte, len(m))
-	for k, v := range m {
-		if len(k) > 0 && len(v) > 0 {
-			aliases[k[0]] = v[0]
-		}
-	}
-	return aliases
+	return id, nil
 }
 
 func (db *DB) saveSettings() error {
 	return db.env.Update(func(txn *lmdb.Txn) error {
-		return putSettings(txn, db.contentDBI, &db.settings)
+		return writeSettings(txn, db.dbi, &db.settings)
 	})
-}
-
-func putSettings(txn *lmdb.Txn, dbi lmdb.DBI, s *Settings) error {
-	data, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
-	return txn.Put(dbi, []byte{prefixI}, data, 0)
 }
 
