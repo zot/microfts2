@@ -127,6 +127,14 @@
 - **R251:** `FileChunkEntry` struct: `ChunkID uint64, Location string`
 - **R252:** Each record struct has `Marshal` and `Unmarshal` methods for LMDB encode/decode
 
+## Feature: TxnHolder Interface
+**Source:** specs/main.md
+
+- **R264:** `TxnHolder` interface: `Txn() *lmdb.Txn` — any value carrying an LMDB transaction
+- **R265:** CRecord implements `TxnHolder` via its `Txn()` accessor; internal DB methods accept `TxnHolder` instead of raw `*lmdb.Txn`
+- **R266:** `CRecord.FileRecord(fileid)` passes self as `TxnHolder` to internal read methods — no txn extraction needed
+- **R267:** (inferred) `txnWrap` struct wraps raw `*lmdb.Txn` from View/Update blocks into a `TxnHolder`
+
 ## Feature: Data-in-Key Pattern
 **Source:** specs/main.md
 

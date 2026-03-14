@@ -337,6 +337,19 @@ Options:
 - DBName — subdatabase name, default "fts"
 - MaxDBs — LMDB max named databases, default 2
 
+## TxnHolder interface
+
+Records read from LMDB are tied to the transaction that read them. `TxnHolder` abstracts this — any value that carries a transaction implements it. Internal DB methods accept `TxnHolder` instead of raw `*lmdb.Txn`, so callers pass whatever they have (a CRecord, a transaction wrapper) without extraction or conversion.
+
+```go
+// TxnHolder is anything that carries an LMDB transaction.
+type TxnHolder interface {
+    Txn() *lmdb.Txn
+}
+```
+
+CRecord implements `TxnHolder` via its `Txn()` accessor. A simple `txnWrap` struct wraps raw transactions from View/Update blocks. Navigation methods like `CRecord.FileRecord(fileid)` pass `self` as the TxnHolder — no extraction needed.
+
 ## Record structs
 
 Go structs for each LMDB record type. Encoding/decoding lives in methods on the structs. The rest of the code works with typed data, not raw bytes.
@@ -345,6 +358,7 @@ Go structs for each LMDB record type. Encoding/decoding lives in methods on the 
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
 // Carries unexported db/txn — the chunk is tied to the transaction that read it.
+// Implements TxnHolder.
 type CRecord struct {
     ChunkID  uint64
     Hash     [32]byte
@@ -356,11 +370,11 @@ type CRecord struct {
     txn      *lmdb.Txn              // unexported: transaction context
 }
 
-// Transaction context accessors — for filters needing direct LMDB access.
+// TxnHolder implementation + direct access for power-user filters.
 func (c *CRecord) Txn() *lmdb.Txn
 func (c *CRecord) DB() *DB
 
-// Convenience navigation within the same transaction.
+// Convenience navigation — passes self as TxnHolder.
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error)
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
