@@ -1,53 +1,51 @@
 # DB
-**Requirements:** R1, R2, R14, R15, R16, R17, R19, R20, R21, R27, R29, R30, R33, R35, R37, R38, R39, R40, R41, R42, R22, R23, R24, R32, R51, R52, R53, R55, R56, R63, R64, R65, R66, R67, R68, R69, R77, R78, R79, R80, R81, R82, R83, R84, R85, R86, R87, R88, R91, R92, R93, R94, R95, R96, R97, R98, R99, R101, R102, R103, R104, R105, R106, R107, R109, R110, R8, R111, R112, R115, R116, R117, R118, R119, R120, R121, R122, R123, R124, R125, R127, R128, R129, R130, R132, R134, R135, R136, R137, R139, R140, R141, R142, R143, R144, R146, R147, R148, R149, R150, R151, R152, R153, R154, R155, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R176, R178, R179, R180, R181, R182, R183, R184, R185, R186, R187, R188, R189, R190, R191, R196, R197, R198, R199, R200, R201, R202, R203, R206, R213, R214, R215, R216, R217
+**Requirements:** R1, R2, R17, R20, R25, R26, R27, R29, R33, R35, R37, R38, R39, R40, R41, R42, R22, R23, R24, R32, R51, R52, R53, R55, R56, R63, R64, R65, R66, R67, R68, R69, R77, R78, R79, R80, R81, R82, R84, R85, R86, R87, R88, R91, R92, R93, R94, R96, R97, R98, R99, R101, R103, R104, R105, R106, R107, R110, R111, R112, R115, R116, R117, R118, R119, R120, R121, R122, R124, R125, R127, R128, R129, R130, R132, R134, R135, R136, R137, R139, R140, R141, R142, R143, R144, R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R176, R178, R179, R180, R181, R182, R183, R184, R185, R186, R187, R188, R189, R190, R191, R196, R197, R198, R199, R200, R201, R202, R203, R206, R213, R214, R215, R216, R217, R218, R219, R220, R221, R222, R223, R224, R225, R226, R227, R228, R229, R230, R231, R232, R233, R234, R235, R236, R237, R238, R239, R240, R241, R242, R243, R244, R245, R246, R247, R248, R249, R250, R251, R252, R253, R254, R255, R256, R257, R258, R259, R260, R261, R262, R263
 
-Main database handle. Manages LMDB environment with two named subdatabases (content and index). Provides the public library API.
+Main database handle. Manages LMDB environment with a single named subdatabase. All records (I, H, C, F, N, T, W) are prefix-distinguished in one B-tree. Chunks are deduplicated by content hash. Provides the public library API.
 
 ## Knows
 - env: LMDB environment handle
-- contentDBI: content subdatabase handle
-- indexDBI: index subdatabase handle
-- settings: loaded from I record (chunking strategies, caseInsensitive, aliases)
-- FileInfo.ModTime: Unix nanoseconds at index time
-- FileInfo.ContentHash: SHA-256 hex string at index time
-- FileInfo.FileLength: int64, file size in bytes at index time
+- dbi: subdatabase handle (single)
+- dbName: subdatabase name (default "fts")
+- settings: loaded from I records (chunking strategies, caseInsensitive, aliases)
 - trigrams: Trigrams instance configured from settings (case insensitivity, byte aliases)
-- contentName: subdatabase name (default "ftscontent")
-- indexName: subdatabase name (default "ftsindex")
 - funcStrategies: map[string]ChunkFunc — in-memory Go function strategies
-- TrigramCount: exported struct {Trigram uint32, Count int} — trigram code paired with corpus document frequency
+- Record structs: CRecord, FRecord, TRecord, WRecord, HRecord — typed encode/decode
+- Supporting types: TrigramEntry, TokenEntry, FileChunkEntry
+- TrigramCount: exported struct {Trigram uint32, Count int}
 - TrigramFilter: exported function type deciding which query trigrams to search with
-- stock filters: FilterAll, FilterByRatio, FilterBestN — shipped as package-level functions
-- ChunkResult: exported struct {Path string, Range string, Content string, Index int} — a chunk with content and position
+- ChunkFilter: exported function type `func(chunk CRecord) bool` — predicate on full chunk data
+- stock filters: FilterAll, FilterByRatio, FilterBestN
+- ChunkResult: exported struct {Path, Range, Content string, Index int}
 
 ## Does
-- Create(path, opts): create new database, validate aliases (ASCII-only via Trigrams.ValidateAliases), set MaxDBs from opts (default 2), write I record with settings (no C initialization needed — sparse)
-- Open(path, opts): open existing database, set MaxDBs from opts (default 2), load settings from I record
+- Create(path, opts): create new database, validate aliases (ASCII-only), set MaxDBs from opts (default 2), write I records with settings using data-in-key pattern
+- Open(path, opts): open existing database, set MaxDBs from opts (default 2), load settings from I records
 - Close(): close LMDB environment
 - Env(): return underlying *lmdb.Env for sharing with other libraries in-process
-- AddFile(path, strategy): check for existing F records via FinalKey — return ErrAlreadyIndexed if present. Call chunker generator (yields Range+Content per chunk), compute trigrams on Content, check UTF-8 on Content, store F/N records (with chunkRanges), update C counts, write forward + reverse index entries. Returns (fileid, error)
+- AddFile(path, strategy): check for existing N records via FinalKey — return ErrAlreadyIndexed if present. Allocate fileid, create N/F records. Call chunker (yields Range+Content per chunk). For each chunk: hash content, check H record for dedup — if hit, add fileid to existing C record; if new, allocate chunkid, create H/C records. Batch T/W updates across all chunks. Update F record with chunk entries and token bag. Returns (fileid, error)
 - AddFileWithContent(path, strategy): like AddFile but also returns the raw file content. Returns (fileid, []byte, error)
 - ErrAlreadyIndexed: sentinel error — caller checks with errors.Is and uses Reindex or AppendChunks instead
-- RemoveFile(path): read R record to find file's index entries, delete forward entries, delete R record, remove F/N records, update C counts
-- Search(query, opts): extract trigrams, select query trigrams via TrigramFilter (default FilterAll), intersect posting lists, score using ScoreFunc. If WithVerify: re-chunk file using stored strategy, match by range to recover content, tokenize query into terms (space-split, quoted phrases as single terms), discard chunks where any term is absent (case-insensitive substring check). If regex filters/except-regex: compile patterns, re-chunk, apply AND/subtract post-filters via filterResults. Return SearchResults with IndexStatus
-- SearchRegex(pattern, opts): extract trigram query from regex AST (rsc approach), evaluate boolean query against full index, score results, then always verify — re-chunk file using stored strategy, run compiled regex against chunk content, discard non-matches. Then apply regex filters/except-regex post-filters if present. Return SearchResults with IndexStatus
-- ScoreFile(query, fpath, fn, opts): extract trigrams, select query trigrams via TrigramFilter (default FilterAll), compute per-chunk scores for one file's index entries using given ScoreFunc. Returns []ScoredChunk
-- Reindex(path, strategy): remove old records + index entries, re-add with new strategy + new index entries. Returns (fileid, error)
+- RemoveFile(path): read F record to get chunk list, for each chunkid: read C record, remove fileid — if no fileids remain, delete C/H records and remove chunkid from T/W records. Delete F and N records
+- Search(query, opts): extract trigrams, select via TrigramFilter (default FilterAll) using T record value lengths for DF. Read T records for candidate chunkids, intersect sets. Read C records for surviving candidates — apply ChunkFilter if present, then score using ScoreFunc. If WithVerify/regex filters: re-chunk file, apply post-filters via filterResults. Return SearchResults
+- SearchRegex(pattern, opts): extract trigram query from regex AST (rsc approach), evaluate boolean query against T records, apply ChunkFilter, score, then always verify — re-chunk file, run regex, discard non-matches. Apply regex/except-regex post-filters if present. Return SearchResults
+- ScoreFile(query, fpath, fn, opts): extract trigrams, select via TrigramFilter, compute per-chunk scores for one file's chunks using given ScoreFunc. Apply ChunkFilter if present. Returns []ScoredChunk
+- Reindex(path, strategy): remove old records (via RemoveFile path), re-add with new strategy. Returns (fileid, error)
 - ReindexWithContent(path, strategy): like Reindex but also returns the file content. Returns (fileid, []byte, error)
-- FileInfoByID(fileid): read N record for fileid, return FileInfo. Wraps readFileInfo in a View txn
-- CheckFile(path): stat + hash to determine fresh/stale/missing
-- StaleFiles(): scan N records, classify each, return []FileStatus
+- FileInfoByID(fileid): read F record for fileid, return FRecord. Wraps in a View txn
+- CheckFile(path): stat + hash to determine fresh/stale/missing using F record metadata
+- StaleFiles(): scan F records, classify each, return []FileStatus
 - RefreshStale(strategy): reindex all stale files, return ([]FileStatus, error)
-- AddStrategy(name, cmd): add chunking strategy to I record
-- AddStrategyFunc(name, fn): register Go function as chunking strategy; in-memory only, I record stores name with empty cmd
-- AppendChunks(fileid, content, strategy, opts): chunk content using strategy, add new chunks to existing file. Continue chunk numbering, write forward index + update R record + increment C counts + update N record. Single LMDB write transaction. WithBaseLine adjusts line-based ranges after chunking.
-- RemoveStrategy(name): remove chunking strategy from I record
-- GetChunks(fpath, targetRange, before, after): look up file's N record for chunkRanges, find target by exact range label match, compute neighbor window, re-chunk file from disk using stored strategy, return []ChunkResult in positional order
+- AddStrategy(name, cmd): add chunking strategy to I records
+- AddStrategyFunc(name, fn): register Go function as chunking strategy; in-memory only, I record stores name with empty value
+- AppendChunks(fileid, content, strategy, opts): chunk content using strategy, for each new chunk: hash, check H for dedup, create/update C records, batch T/W updates. Update F record: append chunk entries, merge token bag, update metadata. Single LMDB write transaction. WithBaseLine adjusts line-based ranges after chunking.
+- RemoveStrategy(name): remove chunking strategy from I records
+- GetChunks(fpath, targetRange, before, after): look up file's F record for chunk list, find target by exact range label match (location field), compute neighbor window, re-chunk file from disk using stored strategy, return []ChunkResult in positional order
 
 ## Collaborators
 - Trigrams: raw byte trigram extraction (with counts)
 - Chunker: wrap external chunking commands as ChunkFunc generators
-- KeyChain: encode/decode long filenames in F records
+- KeyChain: encode/decode long filenames in N records
 
 ## Sequences
 - seq-init.md

@@ -1,5 +1,5 @@
 # Sequence: Chunk Context Retrieval
-**Requirements:** R197, R198, R199, R200, R201, R202, R203, R204, R205, R206
+**Requirements:** R197, R198, R199, R200, R201, R202, R203, R204, R205, R206, R236
 
 Participants: CLI, DB
 
@@ -14,12 +14,12 @@ CLI                                       DB
  |-- GetChunks(fpath, range, before, after) ->
  |                                         |
  |                            View txn:    |
- |                            look up F record -> fileid
- |                            read N record -> FileInfo
- |                            (chunkRanges, strategy)
+ |                            look up N records -> fileid
+ |                            read F record -> FRecord
+ |                            (chunk list, strategy)
  |                                         |
- |                            find targetRange in chunkRanges
- |                            (exact string match, linear scan)
+ |                            find targetRange in chunk list
+ |                            (exact string match on location field)
  |                            if not found: return error
  |                                         |
  |                            compute window:

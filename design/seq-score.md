@@ -1,31 +1,34 @@
 # Sequence: Score File
-**Requirements:** R96, R97, R98, R103, R133, R135, R136, R137, R139, R143, R144
+**Requirements:** R96, R97, R98, R103, R133, R135, R136, R137, R139, R143, R144, R238, R239, R244, R255, R256, R260
 
 Participants: DB, Trigrams
 
 ```
 DB                                        Trigrams
  |                                          |
- |  look up fileid from F records           |
- |  read FileInfo from N record             |
+ |  look up fileid from N records           |
+ |  read F record -> FRecord                |
+ |  (chunk list, strategy)                  |
  |                                          |
  |-- Trigrams(query) ---------------------> |
  | <-- queryTrigrams[] -------------------- |
  |                                          |
  |  select query trigrams via filter:       |
  |    for each query trigram:               |
- |      point-read C[tri:3] for count       |
+ |      read T[tri] value length -> DF      |
  |    get total chunk count from DB         |
  |    call filter([]TrigramCount, total)    |
  |    (default: FilterAll — use all)        |
  |  if none: return empty []ScoredChunk     |
  |                                          |
- |  for each chunk of fileid:               |
- |    scan R record or index entries        |
- |      to build chunkCounts map            |
+ |  for each chunkid in file's chunk list:  |
+ |    read C record -> CRecord              |
+ |    apply ChunkFilters (AND) if present   |
+ |    build chunkCounts map from CRecord    |
+ |    tokenCount from CRecord tokens        |
  |    score = fn(queryTrigrams,             |
- |      chunkCounts, chunkTokenCount)       |
- |    read range from FileInfo.ChunkRanges  |
+ |      chunkCounts, tokenCount)            |
+ |    read location from FRecord chunks     |
  |    append ScoredChunk{range, score}      |
  |                                          |
  |  return []ScoredChunk                    |

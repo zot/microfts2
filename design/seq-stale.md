@@ -1,5 +1,5 @@
 # Sequence: Staleness Check and Refresh
-**Requirements:** R63, R64, R65, R66, R67, R68, R69
+**Requirements:** R63, R64, R65, R66, R67, R68, R69, R234
 
 Participants: DB
 
@@ -8,8 +8,8 @@ DB
  |
  |  === CheckFile(fpath) ===
  |
- |  look up fileid from F records
- |  read N record -> FileInfo (has ModTime, ContentHash)
+ |  look up fileid from N records
+ |  read F record -> FRecord (has ModTime, ContentHash)
  |  classifyFile(info):
  |    stat file on disk
  |      if file missing: return "missing"
@@ -17,13 +17,14 @@ DB
  |      return "fresh"
  |    compute SHA-256 of file contents
  |    if hash == stored hash:
+ |      update F record mod time (touch)
  |      return "fresh"  (mod time changed, content same)
  |    return "stale"
  |
  |  === StaleFiles() ===
  |
- |  scan all N records (prefix 'N')
- |  for each FileInfo:
+ |  scan all F records (prefix 'F')
+ |  for each FRecord:
  |    classifyFile(info)
  |    collect FileStatus
  |  return []FileStatus
@@ -33,7 +34,7 @@ DB
  |  call StaleFiles()
  |  for each stale file:
  |    determine strategy: param if non-empty, else file's existing strategy
- |    Reindex(file.Path, strategy)  [incremental index update]
+ |    Reindex(file.Path, strategy)
  |    collect into refreshed list
  |  return (refreshed []FileStatus, nil)
 ```

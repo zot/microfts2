@@ -4,7 +4,7 @@
 **Source:** specs/main.md
 
 - **R1:** Go CLI command, also usable as a Go library
-- **R2:** LMDB-backed storage using named subdatabases
+- **R2:** LMDB-backed storage using a single named subdatabase with prefix-distinguished records
 
 ## Feature: Raw Byte Trigrams
 **Source:** specs/main.md
@@ -14,7 +14,7 @@
 - **R5:** All non-whitespace bytes are indexed; UTF-8 multibyte characters produce cross-boundary byte trigrams
 - **R6:** 8 bits per byte, 24 bits per trigram, 16M possible trigrams
 - **R7:** ~~removed: A record replaced by dynamic TrigramFilter~~
-- **R8:** C records: sparse individual LMDB records `C[trigram:3] → count:8`, one per non-zero trigram
+- **R8:** ~~removed: old per-trigram C records replaced by T records and per-chunk C records~~
 - **R9:** Case-insensitive mode: `bytes.ToLower()` on input before trigram extraction
 - **R111:** AddFile checks each chunk's Content for valid UTF-8 (utf8.Valid); the raw file may be binary — the chunker produces UTF-8 text
 - **R112:** Character-internal byte trigrams are skipped: a 3-byte window entirely within one multibyte character is not emitted
@@ -25,7 +25,7 @@
 **Source:** specs/main.md
 
 - **R45:** Byte aliases map input bytes to replacement bytes before trigram extraction
-- **R46:** Aliases stored in I record as aliases object
+- **R46:** Aliases stored in I records using data-in-key pattern (one record per alias)
 - **R47:** Applied before trigram extraction (e.g. newline → `^` for line-start matching)
 - **R115:** Both source and target bytes in aliases must be ASCII (< 0x80) — aliasing UTF-8 continuation or leading bytes would corrupt multibyte characters and break character-internal trigram skipping
 
@@ -34,32 +34,98 @@
 
 - **R10:** Chunking strategies are configurable and added/removed dynamically (external commands or Go functions)
 - **R11:** Each strategy is a name mapped to an external command: `[cmd] [filename]` outputs `range\tcontent` lines
-- **R12:** Each file tracks which chunking strategy was used to index it
+- **R12:** Each file tracks which chunking strategy was used to index it (stored in F record)
 - **R13:** Files can be reindexed with a different strategy to allow migration
 - **R116:** `AddStrategyFunc(name, fn ChunkFunc)` registers a Go function as a chunking strategy; `ChunkFunc` type: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern
-- **R117:** Func strategies are in-memory only — not persisted to I record cmd field (re-register on Open); I record stores name with empty cmd
+- **R117:** Func strategies are in-memory only — not persisted to I record cmd field (re-register on Open); I record stores name with empty value
 - **R118:** When AddFile/Reindex uses a func strategy, call the function directly instead of exec
 - **R119:** Built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown) register as func strategies
 
-## Feature: Two-Tree Storage
+## Feature: Single Subdatabase
 **Source:** specs/main.md
 
-- **R14:** Content DB stores file metadata, trigram frequency counts, and settings
-- **R15:** Index DB stores the trigram-to-chunk inverted index with occurrence counts, maintained incrementally
+- **R14:** ~~removed: two-tree content/index split replaced by single subdatabase~~
+- **R15:** ~~removed: two-tree content/index split replaced by single subdatabase~~
+- **R218:** All records live in one LMDB named subdatabase, distinguished by prefix byte (I, H, C, F, N, T, W)
+- **R219:** Subdatabase name is a parameter: default `fts`, settable via CLI (`-db-name`) and library (`Options.DBName`)
 
-## Feature: Content DB Records
+## Feature: Encoding Conventions
 **Source:** specs/main.md
 
-- **R16:** `C` records: sparse `C[trigram:3] → count:8`, only non-zero trigrams stored
-- **R17:** `I` record: JSON database settings (chunking strategies, case-insensitive flag, aliases, search cutoff)
-- **R19:** `N` records: `[fileid:8]` → JSON with chunk ranges (opaque strings), token counts, and chunking strategy name; `chunkRanges` array index = chunk number (0-based), preserving chunker emission order; `chunkTokenCounts` is parallel
-- **R20:** `F` records: filename → fileid mapping using key chains for names exceeding 511 bytes
+- **R220:** Integer fields use varint encoding (Go `binary.PutUvarint` / `binary.ReadUvarint`)
+- **R221:** Trigram fields are fixed 3 bytes (24-bit); hash fields are fixed 32 bytes (SHA-256)
+- **R222:** Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes
 
-## Feature: Index DB Records
+## Feature: Chunk Deduplication
 **Source:** specs/main.md
 
-- **R21:** Forward index entries: `[trigram:3][count:2 desc][fileid:8][chunknum:8]` as keys (empty values); count stored as `0xFFFF - count` for descending sort, capped at 65535
-- **R102:** Reverse index entries: `R[fileid:8]` → packed `[chunknum:8][numTrigrams:2][[trigram:3][count:2]]...` groups; one record per file, used for removal
+- **R223:** Chunks are deduplicated by content hash (SHA-256) — same content = same chunkid across files
+- **R224:** `H` records: `H[hash:32] → chunkid:varint` — content hash to chunkid lookup
+- **R225:** During AddFile, each chunk's content is hashed; if H record exists, the chunk is a dedup hit (add fileid to existing C record, skip T/W updates)
+- **R226:** If H record does not exist, allocate new chunkid, create H record, create C record, update T and W records
+
+## Feature: C Records (Per-Chunk)
+**Source:** specs/main.md
+
+- **R16:** ~~removed: old per-trigram C records replaced by per-chunk C records~~
+- **R227:** `C` records: `C[chunkid:varint] → hash:32 + packed trigrams + packed tokens + packed attrs + packed fileids`
+- **R228:** C record trigrams: `[n-trigrams:varint] [[trigram:3] [count:varint]]...` — per-chunk trigram counts
+- **R229:** C record tokens: `[n-tokens:varint] [[count:varint] [token:str]]...` — per-chunk token counts
+- **R230:** C record attrs: `[n-attrs:varint] [[key:str] [value:str]]...` — optional key-value pairs from `HasAttrs` chunkers (e.g. timestamp, role)
+- **R231:** C record fileids: `[n-fileids:varint] [fileid:varint]...` — list of files containing this chunk
+- **R232:** C record is self-describing — all data needed for search, scoring, filtering, and removal in one read
+
+## Feature: F Records (Per-File)
+**Source:** specs/main.md
+
+- **R233:** `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
+- **R234:** F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
+- **R235:** F record names: `[filecount:varint] [name:str]...` — multiple names for duplicate/copied files sharing a fileid
+- **R236:** F record chunks: `[chunkcount:varint] [[chunkid:varint] [location:str]]...` — ordered chunk list with opaque range labels from chunker
+- **R237:** F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
+
+## Feature: I Records (Config)
+**Source:** specs/main.md
+
+- **R17:** `I` records use data-in-key pattern: `I[name:str] = [value:str] → empty` — each setting independently readable and writable
+- **R19:** ~~removed: N record JSON replaced by F record struct~~
+
+## Feature: N Records (Name Lookup)
+**Source:** specs/main.md
+
+- **R20:** `N` records: filename → fileid mapping using key chains for names exceeding 511 bytes
+- **R25:** Filenames exceeding LMDB's 511-byte key limit use multiple chained N keys
+- **R26:** `N` records use chain-byte to chain: `N[0-254][name:str] → empty` for prefix, `N[255][name:str] → [[full-name:str] [fileid:varint]]...` for final segment with full filename and fileid
+
+## Feature: T Records (Trigram Inverted Index)
+**Source:** specs/main.md
+
+- **R21:** ~~removed: forward index entries replaced by T records~~
+- **R238:** `T` records: `T[trigram:3] → [chunkid:varint]...` — packed list of chunkids per trigram
+- **R239:** Corpus trigram document frequency derived from T record value length — no separate count records needed
+- **R240:** One T record per distinct trigram; entry count proportional to vocabulary, not trigram-chunk pairs
+
+## Feature: W Records (Token Inverted Index)
+**Source:** specs/main.md
+
+- **R241:** `W` records: `W[token-hash:4] → [chunkid:varint]...` — packed list of chunkids per token hash
+- **R242:** Token IDF derived from W record value length — same structure as T records
+- **R243:** Provides exact token-level inverse document frequency for BM25 scoring
+
+## Feature: Record Structs
+**Source:** specs/main.md
+
+- **R95:** ~~removed: FileInfo struct replaced by FRecord~~
+- **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
+- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs map[string]string, FileIDs []uint64`
+- **R245:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
+- **R246:** `TRecord` struct: `Trigram uint32, ChunkIDs []uint64`
+- **R247:** `WRecord` struct: `TokenHash uint32, ChunkIDs []uint64`
+- **R248:** `HRecord` struct: `Hash [32]byte, ChunkID uint64`
+- **R249:** `TrigramEntry` struct: `Trigram uint32, Count int`
+- **R250:** `TokenEntry` struct: `Token string, Count int`
+- **R251:** `FileChunkEntry` struct: `ChunkID uint64, Location string`
+- **R252:** Each record struct has `Marshal` and `Unmarshal` methods for LMDB encode/decode
 
 ## Feature: Data-in-Key Pattern
 **Source:** specs/main.md
@@ -68,29 +134,30 @@
 - **R23:** Key ranges: `[key]...[key+1]` spans all items for a key
 - **R24:** Sets represented as `[key][info] → empty value`
 
-## Feature: Key Chains
-**Source:** specs/main.md
-
-- **R25:** Filenames exceeding LMDB's 511-byte key limit use multiple chained keys
-- **R26:** `F` records use name-part byte to chain: part 255 indicates final segment, value holds fileid
-
 ## Feature: Full Trigram Index
 **Source:** specs/main.md
 
-- **R27:** Index DB contains entries for ALL trigrams present in the content, not a frequency-selected subset
+- **R27:** T records contain entries for ALL trigrams present in the content, not a frequency-selected subset
 - **R28:** ~~removed: searchCutoff and A record replaced by dynamic TrigramFilter~~
 
 ## Feature: Adding Files
 **Source:** specs/main.md
 
-- **R29:** Adding a file: create `F` record (assigns fileid), call chunker generator (yields Range+Content per chunk), compute trigrams on Content, create `N` record (with chunk ranges and token counts), update C records (per-trigram, insert/increment), write forward and reverse index entries
+- **R29:** Adding a file: check for existing N records (dedup guard), allocate fileid, create N/F records, call chunker (yields Range+Content per chunk), for each chunk: hash content, check H record for dedup, create/update C records, batch T/W record updates
+- **R253:** Batch T/W updates: accumulate all chunkids per trigram/token across the file's chunks, then one read-modify-write per affected T/W record
+- **R110:** AddFile computes trigram counts per chunk from chunk Content, not raw file bytes
+
+## Feature: Removing Files
+**Source:** specs/main.md
+
+- **R254:** Removing a file: read F record to get chunk list, for each chunkid remove fileid from C record, if C has no remaining fileids delete C/H records and remove chunkid from T/W records, delete F and N records
 
 ## Feature: Searching
 **Source:** specs/main.md
 
-- **R30:** If the index DB does not exist, compute it before searching
+- **R30:** ~~removed: no separate index DB existence check — index is always maintained~~
 - **R31:** Literal search: trim whitespace, parse query into terms via parseQueryTerms, extract trigrams per term (not whole query), intersect per-term candidate sets, select via TrigramFilter (default: FilterAll)
-- **R32:** Literal search: for each active query trigram, scan index by trigram prefix (ignoring count field) to collect candidate (fileid, chunknum) pairs; intersect candidate sets across all active query trigrams; collect per-trigram counts from index keys for surviving candidates
+- **R32:** Literal search: for each selected query trigram, read T record to get candidate chunkid lists; intersect candidate sets across all selected trigrams; for each surviving chunkid, read C record to get per-trigram counts and fileids; resolve chunkid → (filepath, range) via C record fileids → F record chunk list
 - **R33:** Results scored using the selected scoring function (coverage or density), sorted by score descending
 - **R34:** CLI output: one result per line, `filepath:range`
 - **R35:** Library returns struct slices with file path, range string, score
@@ -108,7 +175,7 @@
 - **R39:** CLI `init` command creates a new database with case-insensitive and alias options
 - **R48:** ~~removed: build-index CLI command removed with A record~~
 - **R49:** CLI `strategy` subcommands: `add`, `remove`, `list` for managing chunking strategies
-- **R50:** All CLI commands require `-db` flag; shared optional flags `-content-db`, `-index-db`
+- **R50:** All CLI commands require `-db` flag; optional shared flag `-db-name` (subdatabase name, default `fts`)
 
 ## Feature: Library API
 **Source:** specs/main.md
@@ -118,7 +185,7 @@
 - **R53:** `Search` accepts variadic `SearchOption` and returns `*SearchResults` with Results slice and IndexStatus
 - **R54:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
 - **R55:** `AddStrategy`/`RemoveStrategy` for runtime strategy management
-- **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (ContentDBName, IndexDBName)
+- **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (DBName, MaxDBs)
 
 ## Feature: Built-in Chunking Strategies
 **Source:** specs/main.md
@@ -130,17 +197,17 @@
 - **R61:** Word pattern is a configurable regexp used to count and locate word boundaries
 - **R62:** Range for all built-in text chunkers is `startline-endline` (1-based, inclusive); content is the text of those lines
 
-## Feature: Subdatabase Names
+## Feature: Subdatabase Name
 **Source:** specs/main.md
 
-- **R40:** Content and index subdatabase names are parameters with defaults `ftscontent` and `ftsindex`
-- **R41:** Settable via CLI flags and library API
-- **R42:** Not stored in the I record — required to open the databases
+- **R40:** Subdatabase name is a parameter with default `fts`
+- **R41:** Settable via CLI flag (`-db-name`) and library API (`Options.DBName`)
+- **R42:** Not stored in the I record — required to open the database
 
 ## Feature: Staleness Detection
 **Source:** specs/main.md
 
-- **R63:** N record JSON stores file modification time (Unix nanoseconds) and content hash (SHA-256) at index time
+- **R63:** F record stores file modification time (Unix nanoseconds) and content hash (SHA-256) at index time
 - **R64:** A file is stale when its mod time differs from stored AND its content hash differs from stored
 - **R65:** A file is missing when it no longer exists on disk
 - **R66:** Mod time is checked first; if it matches, the file is fresh without hashing
@@ -153,31 +220,27 @@
 - **R73:** `-r` combined with a subcommand (e.g. `search`) refreshes first, then runs the subcommand
 - **R74:** Missing files are reported by `-r` but not deleted
 
-## Feature: A Record (Removed)
+## Feature: Incremental Index Update
 **Source:** specs/main.md
 
 - **R75:** ~~removed: A record replaced by dynamic TrigramFilter~~
 - **R76:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
-- **R77:** `AddFile`/`Reindex` write forward and reverse index entries for all of the file's trigrams
-- **R78:** `RemoveFile` reads the file's reverse index entry to find and delete its forward index entries
-
-## Feature: Incremental Index Update
-**Source:** specs/main.md
-
-- **R79:** `AddFile` always writes forward and reverse index entries (index is always maintained)
-- **R80:** `RemoveFile` uses the reverse index entry to delete forward entries, then deletes the reverse entry
+- **R77:** `AddFile`/`Reindex` create/update C, T, and W records for all of the file's chunks and trigrams
+- **R78:** `RemoveFile` reads the F record chunk list to find chunkids, removes fileid from C records, and cleans up T/W/H records for orphaned chunks
+- **R79:** `AddFile` always maintains the index incrementally (T/W/C records updated in the same transaction)
+- **R80:** `RemoveFile` uses C record fileid lists to determine orphaned chunks; orphaned chunks have their T/W/H entries deleted
 - **R81:** Index is always maintained incrementally — no separate "index exists" check needed
 
 ## Feature: Regex Search
 **Source:** specs/main.md
 
 - **R82:** `SearchRegex(pattern string, opts ...SearchOption)` searches using a Go regexp pattern against the full trigram index
-- **R83:** `IndexStatus` struct: `Built bool`
+- **R83:** ~~removed: IndexStatus.Built vestige of old build-index step~~
 - **R84:** Trigram query extracted from regex AST as boolean AND/OR expression, using rsc's approach (github.com/google/codesearch/regexp)
 - **R85:** `Search` returns `*SearchResults` containing both results and IndexStatus
 - **R86:** `RefreshStale` returns `([]FileStatus, error)` — no IndexStatus
-- **R87:** AND nodes in the trigram query intersect candidate sets; OR nodes union them
-- **R88:** Regex search queries the full index (no trigram filtering)
+- **R87:** AND nodes in the trigram query intersect candidate chunkid sets; OR nodes union them
+- **R88:** Regex search queries T records directly (no trigram filtering)
 - **R127:** Regex search always verifies: re-chunk file using stored strategy, run compiled regex against chunk content, discard non-matches (trigram query is a superset filter)
 - **R89:** CLI `search -regex` flag switches to regex mode
 
@@ -187,16 +250,15 @@
 - **R91:** `Env()` method returns the underlying `*lmdb.Env` for sharing with other libraries in the same process
 - **R92:** `AddFile` returns `(uint64, error)` — the fileid alongside the error
 - **R93:** `Reindex` returns `(uint64, error)` — the fileid alongside the error
-- **R94:** `FileInfoByID(fileid uint64)` returns `(FileInfo, error)` — resolves fileid to filename, chunk ranges, strategy, modTime, contentHash
-- **R95:** `FileInfo` is the exported struct type matching the N record JSON fields (ChunkRanges, ChunkTokenCounts, etc.)
-- **R96:** `ScoreFile(query, fpath string, fn ScoreFunc)` returns `([]ScoredChunk, error)` — per-chunk scores using the given scoring function
+- **R94:** `FileInfoByID(fileid uint64)` returns `(FRecord, error)` — resolves fileid to its F record data
+- **R96:** `ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)` returns `([]ScoredChunk, error)` — per-chunk scores using the given scoring function
 - **R97:** Coverage score = matching selected trigrams / total selected query trigrams, per chunk (default strategy)
 - **R98:** `ScoredChunk` struct: `Range string, Score float64`
-- **R99:** `SearchResult` gains `Score float64` field — per-chunk score in the general search path
+- **R99:** `SearchResult` struct: `Path string, Range string, Score float64`
 - **R100:** CLI `score` subcommand: `microfts score -db <path> [-score coverage|density] <query> <file>...` — output `filepath:range\tscore`
 - **R120:** `AddFileWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
 - **R121:** `ReindexWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
-- **R122:** Original `AddFile`/`Reindex` signatures unchanged (no breaking change); WithContent variants avoid a redundant file read in ark's hot path
+- **R122:** Original `AddFile`/`Reindex` signatures unchanged; WithContent variants avoid a redundant file read in ark's hot path
 
 ## Feature: Scoring Strategies
 **Source:** specs/main.md
@@ -207,7 +269,7 @@
 - **R106:** `WithDensity()` option: token-density scoring for long queries — tokenize on spaces, token strength = min trigram count, score = sum strengths / chunk token count
 - **R107:** `WithScoring(fn ScoreFunc)` option: use a custom scoring function
 - **R108:** CLI `search -score coverage|density` flag selects scoring strategy (default: coverage)
-- **R109:** N record stores `chunkRanges` (opaque strings from chunker) and `chunkTokenCounts` array — token count per chunk, computed from chunk Content during AddFile
+- **R109:** ~~removed: N record chunkRanges/chunkTokenCounts replaced by F record chunk list and C record token counts~~
 - **R110:** (inferred) AddFile computes trigram counts per chunk (map[uint32]int) from chunk Content, not raw file bytes
 
 ## Feature: MaxDBs Option
@@ -215,10 +277,10 @@
 
 - **R101:** `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
 
-## Feature: C Record BigEndian
+## Feature: Encoding
 **Source:** specs/main.md
 
-- **R123:** C record values (`count:8`) use big-endian encoding, consistent with all other integer fields in LMDB keys and values
+- **R123:** ~~removed: old C record BigEndian replaced by varint encoding~~
 
 ## Feature: WithVerify Post-filter
 **Source:** specs/main.md
@@ -234,8 +296,8 @@
 - **R129:** Chunkers are deterministic: same file produces same chunks with same ranges
 - **R130:** Chunkers serve dual purpose: indexing (produce chunks) and extraction (re-chunk to recover content by range match)
 - **R131:** External command chunkers output `range\tcontent` per line to stdout; a wrapper ChunkFunc parses this into Chunk yields
-- **R132:** `SearchResult` struct: `Path string, Range string, Score float64` (replaces StartLine/EndLine)
-- **R133:** `ScoredChunk` struct: `Range string, Score float64` (replaces StartLine/EndLine)
+- **R132:** `SearchResult` struct: `Path string, Range string, Score float64`
+- **R133:** `ScoredChunk` struct: `Range string, Score float64`
 - **R134:** Verify and regex verification re-chunk the file using stored strategy, match by range to find chunk content
 
 ## Feature: Dynamic Trigram Filtering
@@ -243,23 +305,23 @@
 
 - **R135:** `TrigramCount` struct: `Trigram uint32, Count int` — pairs a trigram code with its corpus document frequency
 - **R136:** `TrigramFilter` type: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — caller-supplied function deciding which query trigrams to search with
-- **R137:** `WithTrigramFilter(fn TrigramFilter)` search option: look up each query trigram's C record count, call the filter, use the returned subset
+- **R137:** `WithTrigramFilter(fn TrigramFilter)` search option: look up each query trigram's document frequency from T record value length, call the filter, use the returned subset
 - **R138:** ~~removed: no backward compat needed — default is FilterAll~~
 - **R139:** `WithTrigramFilter` applies to both `Search` and `ScoreFile`
 - **R140:** `FilterAll` stock filter: returns all trigrams unmodified (disables filtering)
 - **R141:** `FilterByRatio(maxRatio float64)` stock filter: skips trigrams appearing in more than `maxRatio` of total chunks
 - **R142:** `FilterBestN(n int)` stock filter: keeps the N trigrams with the lowest document frequency
-- **R143:** Trigram counts retrieved via per-query C record point reads (typically 3-10 LMDB reads per query)
-- **R144:** Total chunk count derived from the database for use by filter functions
+- **R143:** Trigram document frequencies retrieved via per-query T record reads (typically 3-10 LMDB reads per query)
+- **R144:** Total chunk count derived from the database (sum of file chunk counts from F records, or maintained as a counter)
 - **R145:** ~~removed: A record and BuildIndex fully removed~~
 
-## Feature: FileLength in N Record
+## Feature: FileLength in F Record
 **Source:** specs/main.md
 
-- **R146:** N record JSON stores `fileLength` (int64): file size in bytes at index time
+- **R146:** F record stores `fileLength` (varint): file size in bytes at index time
 - **R147:** `AddFile` and `Reindex` set `fileLength` from the content they already read
-- **R148:** `FileInfo` struct gains `FileLength int64` field
-- **R149:** (inferred) Existing N records without `fileLength` decode as zero — no migration needed, JSON omitempty handles it
+- **R148:** ~~removed: FileInfo struct replaced by FRecord~~
+- **R149:** ~~removed: N record migration not needed — F records are the new format~~
 
 ## Feature: AppendChunks API
 **Source:** specs/main.md
@@ -267,11 +329,11 @@
 - **R150:** `AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error` adds chunks to an existing file without full reindex
 - **R151:** `content` parameter is only the appended bytes, not the full file
 - **R152:** Chunks `content` using the named strategy's `ChunkFunc`
-- **R153:** Chunk numbering continues from the file's existing chunk count
-- **R154:** Forward index entries are written for new chunks only; existing entries are not touched
-- **R155:** R record is replaced with a new packed record containing both old and new chunk data
-- **R156:** C records are incremented for the new chunks' trigrams
-- **R157:** N record is updated: appended ChunkRanges, appended ChunkTokenCounts, new ContentHash, ModTime, FileLength
+- **R153:** New chunk numbering continues from the file's existing chunk count in the F record
+- **R154:** ~~removed: forward index replaced by T records~~
+- **R155:** ~~removed: R record replaced by C record fileid list~~
+- **R156:** For each new chunk: hash content, check H for dedup, create/update C records, batch T/W updates
+- **R157:** F record updated: appended chunk entries (chunkid + location), merged token bag, new ContentHash, ModTime, FileLength
 - **R158:** `AppendOption` functional option type: `func(*appendConfig)`
 - **R159:** `WithContentHash(hash string)` option: full-file SHA-256, caller pre-computed
 - **R160:** `WithModTime(t int64)` option: Unix nanoseconds for the updated file
@@ -332,7 +394,7 @@
 **Source:** specs/main.md
 
 - **R197:** `GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)` retrieves the target chunk and up to N positional neighbors before and after
-- **R198:** Target chunk identified by exact string match of range label against the file's `chunkRanges` array
+- **R198:** Target chunk identified by exact string match of range label against the F record's chunk list (location field)
 - **R199:** Neighbor window: `max(0, targetIndex - before)` to `min(len-1, targetIndex + after)`, inclusive
 - **R200:** Chunk content recovered by re-chunking the file from disk using its stored chunking strategy
 - **R201:** `ChunkResult` struct: `Path string, Range string, Content string, Index int` — index is 0-based position in the file's chunk list
@@ -355,8 +417,25 @@
 ## Feature: AddFile Duplicate Guard
 **Source:** specs/main.md
 
-- **R213:** `addFileInTxn` checks for existing F records (via `FinalKey` lookup) before allocating a new fileid
+- **R213:** `addFileInTxn` checks for existing N records (via `FinalKey` lookup) before allocating a new fileid
 - **R214:** If the file is already indexed, `AddFile` and `AddFileWithContent` return `ErrAlreadyIndexed`
 - **R215:** `ErrAlreadyIndexed` is a sentinel error: `var ErrAlreadyIndexed = errors.New("file already indexed")`
 - **R216:** Callers check with `errors.Is(err, ErrAlreadyIndexed)` and use `Reindex` or `AppendChunks` instead
 - **R217:** (inferred) The guard is a check, not a policy — no automatic reindex or append behavior
+
+## Feature: Chunk Filtering
+**Source:** specs/main.md
+
+- **R255:** `ChunkFilter` type: `func(chunk CRecord) bool` — receives full C record during candidate evaluation
+- **R256:** `WithChunkFilter(fn ChunkFilter) SearchOption` — called after T record intersection, before scoring; C record already loaded on hot path, zero extra I/O
+- **R257:** Multiple `WithChunkFilter` calls accumulate with AND semantics
+- **R258:** `WithAfter(t time.Time)` — sugar over ChunkFilter; keeps chunks with `timestamp` attr >= t; falls back to file mod time from F record if no timestamp attr
+- **R259:** `WithBefore(t time.Time)` — sugar over ChunkFilter; keeps chunks with `timestamp` attr < t; same fallback
+- **R260:** ChunkFilter applies to `Search`, `SearchRegex`, and `ScoreFile`
+
+## Feature: File-Level Token Bag
+**Source:** specs/main.md
+
+- **R261:** F record aggregated token bag is the union of all chunk tokens with summed counts
+- **R262:** Token bag maintained incrementally: AddFile/Reindex rebuilds, AppendChunks merges new chunk tokens
+- **R263:** Enables file-level scoring and pre-filtering without reading every chunk's C record

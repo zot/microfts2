@@ -3,8 +3,8 @@
 
 ## Test: create and open
 **Purpose:** database lifecycle
-**Input:** Create with charset "abcdefghijklmnopqrstuvwxyz0123456789", Close, Open
-**Expected:** settings preserved across close/open, I record matches
+**Input:** Create with case-insensitive, Close, Open
+**Expected:** settings preserved across close/open, I records match
 **Refs:** crc-DB.md, seq-init.md
 
 ## Test: add file and search
@@ -16,19 +16,19 @@
 ## Test: search works immediately after add
 **Purpose:** index maintained incrementally
 **Input:** add a file, search without any extra steps
-**Expected:** search succeeds (index entries written during add)
+**Expected:** search succeeds (T/W/C records written during add)
 **Refs:** crc-DB.md, seq-search.md
 
 ## Test: remove file
 **Purpose:** file deletion cleans records
 **Input:** add file, remove file, search for its content
-**Expected:** no results returned
-**Refs:** crc-DB.md
+**Expected:** no results returned; C/H/T/W records cleaned for orphaned chunks
+**Refs:** crc-DB.md, R254
 
 ## Test: reindex with different strategy
 **Purpose:** strategy migration
 **Input:** add file with strategy A, reindex with strategy B
-**Expected:** N record reflects new strategy, chunks updated
+**Expected:** F record reflects new strategy, chunks updated
 **Refs:** crc-DB.md
 
 ## Test: key chain for long filename
@@ -37,22 +37,22 @@
 **Expected:** file added successfully, searchable, filename recoverable
 **Refs:** crc-DB.md, crc-KeyChain.md
 
-## Test: custom subdatabase names
-**Purpose:** configurable DB names
-**Input:** Create with contentName="myc", indexName="myi"
-**Expected:** databases created with custom names, operations work normally
-**Refs:** crc-DB.md
+## Test: custom subdatabase name
+**Purpose:** configurable DB name
+**Input:** Create with DBName="mydb"
+**Expected:** database created with custom name, operations work normally
+**Refs:** crc-DB.md, R219
 
 ## Test: FileLength stored on add
-**Purpose:** FileLength in N record
-**Input:** add a file, read FileInfo
+**Purpose:** FileLength in F record
+**Input:** add a file, read FRecord via FileInfoByID
 **Expected:** FileLength matches actual file size
-**Refs:** crc-DB.md, seq-add.md
+**Refs:** crc-DB.md, seq-add.md, R146
 
 ## Test: append chunks
 **Purpose:** incremental chunk addition
 **Input:** add a 3-line file, then AppendChunks with 2 more lines
-**Expected:** file has 5 chunks total, new chunks searchable, old chunks still intact, C record counts correct
+**Expected:** file has 5 chunks total, new chunks searchable, old chunks still intact
 **Refs:** crc-DB.md, seq-append.md
 
 ## Test: append chunks with base line offset
@@ -61,11 +61,11 @@
 **Expected:** new chunk ranges are "4-4" and "5-5" (not "1-1" and "2-2")
 **Refs:** crc-DB.md, seq-append.md
 
-## Test: append chunks updates N record metadata
-**Purpose:** N record metadata after append
+## Test: append chunks updates F record metadata
+**Purpose:** F record metadata after append
 **Input:** add file, AppendChunks with WithContentHash, WithModTime, WithFileLength
-**Expected:** FileInfo reflects updated hash, modTime, fileLength, appended ranges and token counts
-**Refs:** crc-DB.md, seq-append.md
+**Expected:** FRecord reflects updated hash, modTime, fileLength, appended chunk entries and merged token bag
+**Refs:** crc-DB.md, seq-append.md, R157
 
 ## Test: append chunks invalid fileid
 **Purpose:** error on nonexistent fileid
@@ -156,3 +156,57 @@
 **Input:** add a file, then AddFile same path again
 **Expected:** second AddFile returns ErrAlreadyIndexed (errors.Is), file still searchable with original results (no duplication)
 **Refs:** crc-DB.md, seq-add.md, R213, R214, R215, R216
+
+## Test: chunk deduplication across files
+**Purpose:** same chunk content in two files produces one C record
+**Input:** create two files with identical line "hello world", add both
+**Expected:** H record maps to one chunkid, C record has two fileids, search returns both files, T record has chunkid once
+**Refs:** crc-DB.md, seq-add.md, R223, R224, R225
+
+## Test: chunk dedup removal cleans orphaned records
+**Purpose:** removing one file with shared chunks leaves the other intact
+**Input:** add two files sharing a chunk, remove one
+**Expected:** C record has one fileid remaining, search still finds the other file. Then remove the second file — C/H/T/W records deleted for orphaned chunk
+**Refs:** crc-DB.md, R254, R231
+
+## Test: CRecord marshal/unmarshal roundtrip
+**Purpose:** record struct encode/decode
+**Input:** create a CRecord with known trigrams, tokens, attrs, fileids, marshal, unmarshal
+**Expected:** all fields match after roundtrip
+**Refs:** crc-DB.md, R244, R252
+
+## Test: FRecord marshal/unmarshal roundtrip
+**Purpose:** record struct encode/decode
+**Input:** create an FRecord with known metadata, names, chunks, token bag, marshal, unmarshal
+**Expected:** all fields match after roundtrip
+**Refs:** crc-DB.md, R245, R252
+
+## Test: TRecord marshal/unmarshal roundtrip
+**Purpose:** record struct encode/decode with varint chunkids
+**Input:** create a TRecord with known chunkids, marshal, unmarshal
+**Expected:** all chunkids match after roundtrip
+**Refs:** crc-DB.md, R246, R252
+
+## Test: I record data-in-key pattern
+**Purpose:** settings stored as individual records
+**Input:** create DB with case-insensitive and aliases, close, re-open, read settings
+**Expected:** each setting readable independently; matches original values
+**Refs:** crc-DB.md, seq-init.md, R17
+
+## Test: chunk filter basic
+**Purpose:** WithChunkFilter filters candidates before scoring
+**Input:** add files with different content, search with a ChunkFilter that rejects chunks containing a specific fileid
+**Expected:** results from rejected fileid are absent
+**Refs:** crc-DB.md, seq-search.md, R255, R256
+
+## Test: chunk filter AND accumulation
+**Purpose:** multiple WithChunkFilter calls combine with AND
+**Input:** search with two ChunkFilters, one that allows chunkids < 100, one that allows even chunkids
+**Expected:** only even chunkids < 100 survive
+**Refs:** crc-DB.md, R257
+
+## Test: file-level token bag
+**Purpose:** F record token bag is aggregated from chunks
+**Input:** add a multi-line file, read FRecord
+**Expected:** token bag contains all tokens from all chunks with summed counts
+**Refs:** crc-DB.md, R237, R261

@@ -1,5 +1,5 @@
 # Sequence: Add File
-**Requirements:** R10, R11, R12, R19, R20, R25, R26, R29, R77, R79, R81, R92, R102, R109, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147, R213, R214, R215
+**Requirements:** R10, R11, R12, R20, R25, R26, R29, R77, R79, R81, R92, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147, R213, R214, R215, R223, R224, R225, R226, R227, R228, R229, R230, R231, R233, R234, R235, R236, R237, R238, R240, R241, R244, R245, R249, R250, R251, R252, R253, R261, R262
 
 Participants: DB, Chunker, Trigrams, KeyChain
 
@@ -7,11 +7,16 @@ Participants: DB, Chunker, Trigrams, KeyChain
 DB                      Chunker       Trigrams      KeyChain
  |                        |              |            |
  |  [in addFileInTxn]                    |            |
- |  check FinalKey(fpath) in content DB  |            |
+ |  check FinalKey(fpath) via N records  |            |
  |  if exists: return (0, ErrAlreadyIndexed)         |
  |                                       |            |
  |  stat file (mod time before read)     |            |
  |  read file, compute SHA-256           |            |
+ |                                       |            |
+ |  allocate fileid                      |            |
+ |-- Encode(filename) --------------------------------> |
+ | <-- N key/value pairs --------------------------------|
+ |  store N records (filename key chain) |            |
  |                                       |            |
  |  resolve ChunkFunc for strategy:      |            |
  |    if funcStrategy[name] exists:      |            |
@@ -23,30 +28,41 @@ DB                      Chunker       Trigrams      KeyChain
  |    for each yielded Chunk{Range, Content}:         |
  |      copy Range as string             |            |
  |      validate UTF-8 on Content        |            |
+ |      compute SHA-256 of Content       |            |
  |-- TrigramCounts(Content) -------->    |            |
  | <-- map[uint32]int ---------------    |            |
- |      count tokens on Content          |            |
- |      store range, triCounts, tokens   |            |
+ |      tokenize Content, count tokens   |            |
+ |      extract attrs (if HasAttrs)      |            |
  |                                       |            |
- |-- Encode(filename) --------------------------------> |
- | <-- F key/value pairs --------------------------------|
- |  store F records, assign fileid       |            |
+ |      check H[hash] for dedup:         |            |
+ |        if exists -> chunkid (dedup hit):           |
+ |          read C record, add fileid    |            |
+ |          write updated C record       |            |
+ |        if not found -> new chunk:     |            |
+ |          allocate chunkid             |            |
+ |          create H record: H[hash] -> chunkid      |
+ |          create C record: C[chunkid] ->           |
+ |            hash, trigrams, tokens,    |            |
+ |            attrs, [fileid]            |            |
+ |          accumulate trigrams for T batch          |
+ |          accumulate tokens for W batch            |
  |                                       |            |
- |  for each chunk:                      |            |
- |    update C records: get/put C[tri:3] per trigram  |
- |    write forward index entries:       |            |
- |      key=[trigram, 0xFFFF-count, fileid, chunknum] |
- |      val=empty                        |            |
- |    accumulate (chunknum, trigram, count) for R     |
+ |      collect (chunkid, location) for F record     |
+ |      merge tokens into file-level bag |            |
  |                                       |            |
- |  write R record: key=[R, fileid]      |            |
- |    val=packed chunk groups:           |            |
- |    [chunknum:8][numTri:2][[tri:3][count:2]]...     |
+ |  batch T record updates:              |            |
+ |    for each affected trigram:         |            |
+ |      read T[tri], append chunkids,   |            |
+ |      write T[tri]                     |            |
  |                                       |            |
- |  store N record: key=[N, fileid]      |            |
- |    val=JSON{chunkRanges,              |            |
- |      chunkTokenCounts, strategy,      |            |
- |      modTime, hash, fileLength}       |            |
+ |  batch W record updates:              |            |
+ |    for each affected token hash:      |            |
+ |      read W[hash], append chunkids,  |            |
+ |      write W[hash]                    |            |
+ |                                       |            |
+ |  create F record: F[fileid] ->        |            |
+ |    modTime, contentHash, fileLength,  |            |
+ |    strategy, names, chunks, tokenBag  |            |
  |                                       |            |
  |  return (fileid, nil)                 |            |
  |  WithContent: return (fileid, content, nil)       |
