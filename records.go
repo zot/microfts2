@@ -52,6 +52,12 @@ type CRecord struct {
 	txn      *lmdb.Txn
 }
 
+// attach sets the db and txn context for a CRecord.
+func (c *CRecord) attach(db *DB, txn *lmdb.Txn) {
+	c.db = db
+	c.txn = txn
+}
+
 // Txn returns the transaction this record was read from. Implements TxnHolder.
 func (c *CRecord) Txn() *lmdb.Txn { return c.txn }
 
@@ -427,16 +433,38 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 	return f, nil
 }
 
+// --- Shared chunkid list encoding ---
+
+// marshalChunkIDs encodes a packed list of varint chunkids.
+func marshalChunkIDs(ids []uint64) []byte {
+	buf := make([]byte, len(ids)*binary.MaxVarintLen64)
+	off := 0
+	for _, cid := range ids {
+		off += putUvarint(buf[off:], cid)
+	}
+	return buf[:off]
+}
+
 // --- TRecord marshal/unmarshal ---
 
 // MarshalValue encodes the TRecord value (packed chunkid list).
 func (t *TRecord) MarshalValue() []byte {
-	buf := make([]byte, len(t.ChunkIDs)*binary.MaxVarintLen64)
+	return marshalChunkIDs(t.ChunkIDs)
+}
+
+// countTValue counts the number of chunkids in a T record value without allocating.
+func countTValue(data []byte) int {
+	n := 0
 	off := 0
-	for _, cid := range t.ChunkIDs {
-		off += putUvarint(buf[off:], cid)
+	for off < len(data) {
+		_, size := readUvarint(data[off:])
+		if size <= 0 {
+			break
+		}
+		off += size
+		n++
 	}
-	return buf[:off]
+	return n
 }
 
 // UnmarshalTValue decodes a TRecord value. Trigram must be set separately (from key).
@@ -458,12 +486,7 @@ func UnmarshalTValue(data []byte) ([]uint64, error) {
 
 // MarshalValue encodes the WRecord value (packed chunkid list, same as TRecord).
 func (w *WRecord) MarshalValue() []byte {
-	buf := make([]byte, len(w.ChunkIDs)*binary.MaxVarintLen64)
-	off := 0
-	for _, cid := range w.ChunkIDs {
-		off += putUvarint(buf[off:], cid)
-	}
-	return buf[:off]
+	return marshalChunkIDs(w.ChunkIDs)
 }
 
 // UnmarshalWValue decodes a WRecord value. Same format as TRecord.
