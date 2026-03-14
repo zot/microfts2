@@ -344,6 +344,7 @@ Go structs for each LMDB record type. Encoding/decoding lives in methods on the 
 ```go
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
+// Carries unexported db/txn — the chunk is tied to the transaction that read it.
 type CRecord struct {
     ChunkID  uint64
     Hash     [32]byte
@@ -351,7 +352,16 @@ type CRecord struct {
     Tokens   []TokenEntry            // {Token string, Count int}
     Attrs    map[string]string       // from HasAttrs chunkers (timestamp, role, etc.)
     FileIDs  []uint64
+    db       *DB                     // unexported: transaction context
+    txn      *lmdb.Txn              // unexported: transaction context
 }
+
+// Transaction context accessors — for filters needing direct LMDB access.
+func (c *CRecord) Txn() *lmdb.Txn
+func (c *CRecord) DB() *DB
+
+// Convenience navigation within the same transaction.
+func (c *CRecord) FileRecord(fileid uint64) (FRecord, error)
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
 type FRecord struct {
@@ -403,7 +413,9 @@ Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn S
 
 ## Chunk filtering
 
-`ChunkFilter` receives the full `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for per-trigram counts), so filtering adds a conditional check on data already in memory. Zero extra I/O.
+`ChunkFilter` receives the `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for per-trigram counts), so filtering adds a conditional check on data already in memory.
+
+The CRecord carries unexported `db` and `txn` fields — the chunk is inherently tied to the transaction that read it. `Txn()` and `DB()` accessors expose the context for power-user filters. `FileRecord(fileid)` is a convenience method for the common case.
 
 ```go
 type ChunkFilter func(chunk CRecord) bool
@@ -412,7 +424,7 @@ WithChunkFilter(fn ChunkFilter) SearchOption
 ```
 
 Built-in chunk filters:
-- `WithAfter(t time.Time)` — keep chunks with `timestamp` attr >= t; falls back to file mod time if no attr
+- `WithAfter(t time.Time)` — keep chunks with `timestamp` attr >= t; falls back to file mod time via `chunk.FileRecord(fileid)` if no attr
 - `WithBefore(t time.Time)` — keep chunks with `timestamp` attr < t; same fallback
 
 Chunk filters compose: multiple `WithChunkFilter` calls accumulate (AND semantics). `WithAfter`/`WithBefore` are sugar that append chunk filters internally.
