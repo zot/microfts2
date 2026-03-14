@@ -149,6 +149,17 @@ type searchConfig struct {
 	trigramFilter      TrigramFilter       // if non-nil, caller-supplied trigram selection
 	regexFilters       []string            // AND: every pattern must match chunk content R183
 	exceptRegexFilters []string            // subtract: any match rejects chunk R184
+	chunkFilters       []ChunkFilter       // AND: all must pass for chunk to be included R255-R257
+}
+
+// ChunkFilter receives a CRecord during candidate evaluation.
+// Return true to keep the chunk, false to reject it.
+// The CRecord carries transaction context — use Txn() and DB() for lookups.
+type ChunkFilter func(chunk CRecord) bool
+
+// WithChunkFilter adds a chunk filter. Multiple calls accumulate (AND semantics).
+func WithChunkFilter(fn ChunkFilter) SearchOption {
+	return func(c *searchConfig) { c.chunkFilters = append(c.chunkFilters, fn) }
 }
 
 // WithCoverage uses coverage scoring (default): matching / total active query trigrams.
@@ -438,7 +449,8 @@ func decodeRValue(data []byte) []struct {
 	return result
 }
 
-// lookupTrigramCounts reads C records for deduplicated query trigrams and returns their corpus counts.
+// lookupTrigramCounts reads T records for query trigrams and returns document frequencies.
+// DF is derived from the number of varint-encoded chunkids in the T record value.
 func lookupTrigramCounts(txn *lmdb.Txn, dbi lmdb.DBI, queryTrigrams []uint32) []TrigramCount {
 	seen := make(map[uint32]bool)
 	var result []TrigramCount
@@ -447,18 +459,20 @@ func lookupTrigramCounts(txn *lmdb.Txn, dbi lmdb.DBI, queryTrigrams []uint32) []
 			continue
 		}
 		seen[t] = true
-		key := makeOldCKey(t)
+		key := makeTKey(t)
 		var count int
 		val, err := txn.Get(dbi, key)
-		if err == nil && len(val) == 8 {
-			count = int(binary.BigEndian.Uint64(val))
+		if err == nil {
+			// Count varint-encoded chunkids in the value
+			ids, _ := UnmarshalTValue(val)
+			count = len(ids)
 		}
 		result = append(result, TrigramCount{Trigram: t, Count: count})
 	}
 	return result
 }
 
-// countTotalChunks scans N records and sums up the chunk count across all files.
+// countTotalChunks scans F records and sums up the chunk count across all files.
 func countTotalChunks(txn *lmdb.Txn, dbi lmdb.DBI) int {
 	total := 0
 	cursor, err := txn.OpenCursor(dbi)
@@ -466,15 +480,13 @@ func countTotalChunks(txn *lmdb.Txn, dbi lmdb.DBI) int {
 		return 0
 	}
 	defer cursor.Close()
-	key, val, err := cursor.Get([]byte{prefixN}, nil, lmdb.SetRange)
-	for err == nil && len(key) > 0 && key[0] == prefixN {
-		if len(key) == 9 {
-			data := make([]byte, len(val))
-			copy(data, val)
-			var info FileInfo
-			if json.Unmarshal(data, &info) == nil {
-				total += len(info.ChunkRanges)
-			}
+	key, val, err := cursor.Get([]byte{prefixF}, nil, lmdb.SetRange)
+	for err == nil && len(key) > 0 && key[0] == prefixF {
+		data := make([]byte, len(val))
+		copy(data, val)
+		frec, fErr := UnmarshalFValue(data)
+		if fErr == nil {
+			total += len(frec.Chunks)
 		}
 		key, val, err = cursor.Get(nil, nil, lmdb.Next)
 	}
@@ -1175,7 +1187,9 @@ func (db *DB) RemoveFile(fpath string) error {
 	})
 }
 
+// R254: Remove via F record → C records → T/W cleanup for orphaned chunks
 func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
+	// Look up fileid from N records
 	finalKey := FinalKey(fpath)
 	val, err := txn.Get(db.dbi, finalKey)
 	if lmdb.IsNotFound(err) {
@@ -1183,37 +1197,118 @@ func (db *DB) removeFileInTxn(txn *lmdb.Txn, fpath string) error {
 	} else if err != nil {
 		return fmt.Errorf("lookup %s: %w", fpath, err)
 	}
-	fileid := binary.BigEndian.Uint64(val)
+	// Parse N-255 value: [name-len:varint][name:str][fileid:varint]
+	_, n := readString(val)
+	fileid, _ := readUvarint(val[n:])
 
-	// Read R record to find all forward index entries
-	rKey := makeRKey(fileid)
-	rVal, err := txn.Get(db.dbi, rKey)
-	if err != nil && !lmdb.IsNotFound(err) {
-		return fmt.Errorf("read R record for %s: %w", fpath, err)
+	// Read F record
+	frec, err := db.readFRecord(txnWrap{txn}, fileid)
+	if err != nil {
+		return fmt.Errorf("read F record for %s: %w", fpath, err)
 	}
 
-	if rVal != nil {
-		entries := decodeRValue(slices.Clone(rVal))
-		for _, e := range entries {
-			// Delete forward index entry
-			txn.Del(db.dbi, makeIndexKey(e.trigram, e.count, fileid, e.chunknum), nil)
-
-			// Decrement sparse C record
-			decrementCCount(txn, db.dbi, e.trigram)
+	// For each chunk: remove fileid from C record, clean up orphans
+	for _, fce := range frec.Chunks {
+		cKey := makeCKey(fce.ChunkID)
+		cVal, err := txn.Get(db.dbi, cKey)
+		if err != nil {
+			continue // C record missing — skip
+		}
+		cData := make([]byte, len(cVal))
+		copy(cData, cVal)
+		crec, err := UnmarshalCValue(cData)
+		if err != nil {
+			continue
 		}
 
-		// Delete R record
-		txn.Del(db.dbi, rKey, nil)
+		// Remove this fileid from the C record
+		newFIDs := make([]uint64, 0, len(crec.FileIDs))
+		for _, fid := range crec.FileIDs {
+			if fid != fileid {
+				newFIDs = append(newFIDs, fid)
+			}
+		}
+
+		if len(newFIDs) > 0 {
+			// Chunk still referenced by other files — update C record
+			crec.FileIDs = newFIDs
+			if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
+				return err
+			}
+		} else {
+			// Orphaned chunk — delete C, H, and remove from T/W records
+			txn.Del(db.dbi, cKey, nil)
+			txn.Del(db.dbi, makeHKey(crec.Hash), nil)
+
+			// Remove chunkid from T records
+			for _, te := range crec.Trigrams {
+				removeFromTRecord(txn, db.dbi, te.Trigram, fce.ChunkID)
+			}
+			// Remove chunkid from W records
+			seen := make(map[uint32]bool)
+			for _, te := range crec.Tokens {
+				h := tokenHash(te.Token)
+				if seen[h] {
+					continue
+				}
+				seen[h] = true
+				removeFromWRecord(txn, db.dbi, h, fce.ChunkID)
+			}
+		}
 	}
 
-	if err := txn.Del(db.dbi, makeNKey(fileid), nil); err != nil {
-		return err
-	}
+	// Delete F record
+	txn.Del(db.dbi, makeFKey(fileid), nil)
 
+	// Delete N records (key chain)
 	for _, pair := range EncodeFilename(fpath) {
 		txn.Del(db.dbi, pair.Key, nil)
 	}
 	return nil
+}
+
+// removeFromTRecord removes a chunkid from a T record value.
+func removeFromTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint64) {
+	key := makeTKey(trigram)
+	val, err := txn.Get(dbi, key)
+	if err != nil {
+		return
+	}
+	ids, _ := UnmarshalTValue(val)
+	var newIDs []uint64
+	for _, id := range ids {
+		if id != chunkid {
+			newIDs = append(newIDs, id)
+		}
+	}
+	if len(newIDs) == 0 {
+		txn.Del(dbi, key, nil)
+	} else {
+		tr := TRecord{ChunkIDs: newIDs}
+		txn.Put(dbi, key, tr.MarshalValue(), 0)
+	}
+}
+
+// removeFromWRecord removes a chunkid from a W record value.
+func removeFromWRecord(txn *lmdb.Txn, dbi lmdb.DBI, tokHash uint32, chunkid uint64) {
+	key := makeWKey(tokHash)
+	val, err := txn.Get(dbi, key)
+	if err != nil {
+		return
+	}
+	ids, _ := UnmarshalWValue(val)
+	var newIDs []uint64
+	for _, id := range ids {
+		if id != chunkid {
+			newIDs = append(newIDs, id)
+		}
+	}
+	if len(newIDs) == 0 {
+		txn.Del(dbi, key, nil)
+	} else {
+		wr := WRecord{ChunkIDs: newIDs}
+		txn.Put(dbi, key, wr.MarshalValue(), 0)
+	}
 }
 
 // --- Reindex ---
@@ -1490,16 +1585,9 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			activeSet[t] = true
 		}
 
-		cursor, err := txn.OpenCursor(db.dbi)
-		if err != nil {
-			return err
-		}
-		defer cursor.Close()
-
-		// Collect and intersect candidates per term, then across terms
-		var candidates map[chunkID]*chunkCandidate
+		// Read T records for each term's active trigrams, intersect chunkid sets
+		var candidateChunks map[uint64]bool
 		for _, tris := range termTrigrams {
-			// Filter to only active trigrams for this term
 			var termActive []uint32
 			for _, t := range tris {
 				if activeSet[t] {
@@ -1509,18 +1597,19 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 			if len(termActive) == 0 {
 				continue
 			}
-			termCandidates := collectCandidates(cursor, termActive)
-			if candidates == nil {
-				candidates = termCandidates
+			termChunks := collectChunkIDs(txn, db.dbi, termActive)
+			if candidateChunks == nil {
+				candidateChunks = termChunks
 			} else {
-				candidates = intersectCandidates(candidates, termCandidates)
+				candidateChunks = intersectChunkSets(candidateChunks, termChunks)
 			}
-			if len(candidates) == 0 {
+			if len(candidateChunks) == 0 {
 				return nil
 			}
 		}
 
-		results = resolveResults(txn, db.dbi, candidates, active, cfg)
+		// Read C records for surviving chunkids, score, resolve to results
+		results = db.scoreAndResolve(txn, candidateChunks, active, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1542,6 +1631,159 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		Results: results,
 		Status:  IndexStatus{Built: true},
 	}, nil
+}
+
+// collectChunkIDs reads T records for each trigram and returns the intersection of chunkid sets.
+func collectChunkIDs(txn *lmdb.Txn, dbi lmdb.DBI, trigrams []uint32) map[uint64]bool {
+	if len(trigrams) == 0 {
+		return nil
+	}
+	// Read first trigram's T record
+	val, err := txn.Get(dbi, makeTKey(trigrams[0]))
+	if err != nil {
+		return nil
+	}
+	ids, _ := UnmarshalTValue(val)
+	result := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		result[id] = true
+	}
+
+	// Intersect with remaining trigrams
+	for _, tri := range trigrams[1:] {
+		if len(result) == 0 {
+			return nil
+		}
+		val, err := txn.Get(dbi, makeTKey(tri))
+		if err != nil {
+			return nil // trigram not in index → empty intersection
+		}
+		ids, _ := UnmarshalTValue(val)
+		next := make(map[uint64]bool, len(ids))
+		for _, id := range ids {
+			if result[id] {
+				next[id] = true
+			}
+		}
+		result = next
+	}
+	return result
+}
+
+// intersectChunkSets returns the intersection of two chunkid sets.
+func intersectChunkSets(a, b map[uint64]bool) map[uint64]bool {
+	// Iterate over the smaller set
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	result := make(map[uint64]bool, len(a))
+	for id := range a {
+		if b[id] {
+			result[id] = true
+		}
+	}
+	return result
+}
+
+// scoreAndResolve reads C records for candidate chunkids, scores them, and resolves to SearchResults.
+func (db *DB) scoreAndResolve(txn *lmdb.Txn, candidates map[uint64]bool, active []uint32, cfg searchConfig) []SearchResult {
+	var results []SearchResult
+	activeSet := make(map[uint32]bool, len(active))
+	for _, t := range active {
+		activeSet[t] = true
+	}
+
+	// Cache F records to avoid re-reading for same file
+	frecCache := make(map[uint64]*FRecord)
+
+	for chunkid := range candidates {
+		// Read C record
+		cVal, err := txn.Get(db.dbi, makeCKey(chunkid))
+		if err != nil {
+			continue
+		}
+		cData := make([]byte, len(cVal))
+		copy(cData, cVal)
+		crec, err := UnmarshalCValue(cData)
+		if err != nil {
+			continue
+		}
+		crec.ChunkID = chunkid
+		crec.db = db
+		crec.txn = txn
+
+		// Apply ChunkFilters
+		if !applyChunkFilters(crec, cfg) {
+			continue
+		}
+
+		// Build chunkCounts map from C record trigrams (only active ones)
+		chunkCounts := make(map[uint32]int, len(crec.Trigrams))
+		for _, te := range crec.Trigrams {
+			chunkCounts[te.Trigram] = te.Count
+		}
+
+		// Token count from C record
+		tokenCount := len(crec.Tokens)
+
+		// Score
+		score := cfg.scoreFunc(active, chunkCounts, tokenCount)
+		if score <= 0 {
+			continue
+		}
+
+		// Resolve: for each fileid, find this chunk's location in the F record
+		for _, fid := range crec.FileIDs {
+			// File ID filter (WithOnly/WithExcept)
+			if cfg.onlyIDs != nil {
+				if _, ok := cfg.onlyIDs[fid]; !ok {
+					continue
+				}
+			}
+			if cfg.exceptIDs != nil {
+				if _, ok := cfg.exceptIDs[fid]; ok {
+					continue
+				}
+			}
+
+			frec, ok := frecCache[fid]
+			if !ok {
+				f, err := db.readFRecord(txnWrap{txn}, fid)
+				if err != nil {
+					continue
+				}
+				frec = &f
+				frecCache[fid] = frec
+			}
+
+			// Find the chunk's location in the F record
+			for _, fce := range frec.Chunks {
+				if fce.ChunkID == chunkid {
+					path := ""
+					if len(frec.Names) > 0 {
+						path = frec.Names[0]
+					}
+					results = append(results, SearchResult{
+						Path:  path,
+						Range: fce.Location,
+						Score: score,
+					})
+					break
+				}
+			}
+		}
+	}
+	return results
+}
+
+// applyChunkFilters runs all ChunkFilter functions, returning false if any rejects.
+func applyChunkFilters(crec CRecord, cfg searchConfig) bool {
+	for _, f := range cfg.chunkFilters {
+		if !f(crec) {
+			return false
+		}
+	}
+	return true
 }
 
 // collectCandidates scans the index for each trigram, intersecting to find
