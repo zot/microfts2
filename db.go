@@ -43,14 +43,7 @@ type collectedChunk struct {
 	tokenCount int
 }
 
-// Record prefixes for content DB keys.
-const (
-	prefixC = 'C' // trigram counts (sparse: C[tri:3] -> count:8)
-	prefixI = 'I' // settings JSON
-	prefixN = 'N' // file info JSON
-)
-
-// prefixR is the reverse index prefix in the index DB.
+// prefixR is the reverse index prefix in the index DB (legacy, pending rewrite).
 const prefixR = 'R'
 
 // Chunk is a single chunk yielded by a ChunkFunc generator.
@@ -346,8 +339,8 @@ func makeNKey(fileid uint64) []byte {
 	return key
 }
 
-// makeCKey builds a C record key: C[trigram:3] = 4 bytes.
-func makeCKey(trigram uint32) []byte {
+// makeOldCKey builds a C record key: C[trigram:3] = 4 bytes.
+func makeOldCKey(trigram uint32) []byte {
 	key := make([]byte, 4)
 	key[0] = prefixC
 	key[1] = byte(trigram >> 16)
@@ -464,7 +457,7 @@ func lookupTrigramCounts(txn *lmdb.Txn, dbi lmdb.DBI, queryTrigrams []uint32) []
 			continue
 		}
 		seen[t] = true
-		key := makeCKey(t)
+		key := makeOldCKey(t)
 		var count int
 		val, err := txn.Get(dbi, key)
 		if err == nil && len(val) == 8 {
@@ -2013,7 +2006,7 @@ func classifyFile(info FileInfo) string {
 
 // incrementCCount increments the sparse C record for a trigram, creating it if needed.
 func incrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) error {
-	key := makeCKey(trigram)
+	key := makeOldCKey(trigram)
 	var c uint64
 	val, err := txn.Get(dbi, key)
 	if err == nil && len(val) == 8 {
@@ -2027,7 +2020,7 @@ func incrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) error {
 
 // decrementCCount decrements the sparse C record for a trigram, deleting it if it reaches zero.
 func decrementCCount(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32) {
-	key := makeCKey(trigram)
+	key := makeOldCKey(trigram)
 	val, err := txn.Get(dbi, key)
 	if err != nil || len(val) != 8 {
 		return
