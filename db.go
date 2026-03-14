@@ -38,9 +38,10 @@ type chunkID struct{ fileid, chunknum uint64 }
 
 // collectedChunk holds processed chunk data between generator collection and DB write.
 type collectedChunk struct {
-	rangeStr   string
-	triCounts  map[uint32]int
-	tokenCount int
+	rangeStr  string
+	hash      [32]byte
+	triCounts map[uint32]int
+	tokens    []TokenEntry
 }
 
 // prefixR is the reverse index prefix in the index DB (legacy, pending rewrite).
@@ -517,6 +518,137 @@ func countTokens(data []byte) int {
 	return n
 }
 
+// tokenizeCounts extracts space-separated tokens and returns their occurrence counts.
+func tokenizeCounts(data []byte) []TokenEntry {
+	counts := make(map[string]int)
+	lower := bytes.ToLower(data)
+	start := -1
+	for i, b := range lower {
+		if isWhitespace(b) {
+			if start >= 0 {
+				counts[string(lower[start:i])]++
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		counts[string(lower[start:])]++
+	}
+	entries := make([]TokenEntry, 0, len(counts))
+	for tok, cnt := range counts {
+		entries = append(entries, TokenEntry{Token: tok, Count: cnt})
+	}
+	return entries
+}
+
+// tokenHash computes a 4-byte hash of a token string for W record keys.
+// Uses FNV-1a for good distribution.
+func tokenHash(token string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(token); i++ {
+		h ^= uint32(token[i])
+		h *= 16777619
+	}
+	return h
+}
+
+// mergeTokenBag merges source token entries into a destination bag (summing counts).
+func mergeTokenBag(dst map[string]int, src []TokenEntry) {
+	for _, te := range src {
+		dst[te.Token] += te.Count
+	}
+}
+
+// tokenBagToEntries converts a map bag to a slice of TokenEntry.
+func tokenBagToEntries(bag map[string]int) []TokenEntry {
+	entries := make([]TokenEntry, 0, len(bag))
+	for tok, cnt := range bag {
+		entries = append(entries, TokenEntry{Token: tok, Count: cnt})
+	}
+	return entries
+}
+
+// --- T/W record helpers ---
+
+// appendToTRecord adds a chunkid to a T record (read-modify-write).
+func appendToTRecord(txn *lmdb.Txn, dbi lmdb.DBI, trigram uint32, chunkid uint64) error {
+	key := makeTKey(trigram)
+	var existing []byte
+	val, err := txn.Get(dbi, key)
+	if err == nil {
+		existing = make([]byte, len(val))
+		copy(existing, val)
+	} else if !lmdb.IsNotFound(err) {
+		return err
+	}
+	// Append the new chunkid
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], chunkid)
+	newVal := append(existing, buf[:n]...)
+	return txn.Put(dbi, key, newVal, 0)
+}
+
+// appendToWRecord adds a chunkid to a W record (read-modify-write).
+func appendToWRecord(txn *lmdb.Txn, dbi lmdb.DBI, tokHash uint32, chunkid uint64) error {
+	key := makeWKey(tokHash)
+	var existing []byte
+	val, err := txn.Get(dbi, key)
+	if err == nil {
+		existing = make([]byte, len(val))
+		copy(existing, val)
+	} else if !lmdb.IsNotFound(err) {
+		return err
+	}
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], chunkid)
+	newVal := append(existing, buf[:n]...)
+	return txn.Put(dbi, key, newVal, 0)
+}
+
+// batchAppendT appends a chunkid to multiple T records.
+func batchAppendT(txn *lmdb.Txn, dbi lmdb.DBI, trigrams []uint32, chunkid uint64) error {
+	for _, tri := range trigrams {
+		if err := appendToTRecord(txn, dbi, tri, chunkid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// batchAppendW appends a chunkid to multiple W records.
+func batchAppendW(txn *lmdb.Txn, dbi lmdb.DBI, tokens []TokenEntry, chunkid uint64) error {
+	seen := make(map[uint32]bool)
+	for _, te := range tokens {
+		h := tokenHash(te.Token)
+		if seen[h] {
+			continue // same hash already appended in this batch
+		}
+		seen[h] = true
+		if err := appendToWRecord(txn, dbi, h, chunkid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readFRecord reads an F record by fileid. TxnHolder-compatible.
+func (db *DB) readFRecord(th TxnHolder, fileid uint64) (FRecord, error) {
+	val, err := th.Txn().Get(db.dbi, makeFKey(fileid))
+	if err != nil {
+		return FRecord{}, fmt.Errorf("read F record %d: %w", fileid, err)
+	}
+	data := make([]byte, len(val))
+	copy(data, val)
+	f, err := UnmarshalFValue(data)
+	if err != nil {
+		return FRecord{}, err
+	}
+	f.FileID = fileid
+	return f, nil
+}
+
 // --- I record helpers (data-in-key settings) ---
 
 // iGet reads a single I record value. Returns ("", nil) if not found.
@@ -698,7 +830,10 @@ func Create(path string, opts Options) (*DB, error) {
 		if err := iSetCounter(txn, dbi, "nextFileID", 1); err != nil {
 			return err
 		}
-		return iSetCounter(txn, dbi, "nextChunkID", 1)
+		if err := iSetCounter(txn, dbi, "nextChunkID", 1); err != nil {
+			return err
+		}
+		return iPut(txn, dbi, "version", "2")
 	})
 	if err != nil {
 		env.Close()
@@ -829,10 +964,12 @@ func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, i
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
 		}
+		h := sha256.Sum256(c.Content)
 		chunks = append(chunks, collectedChunk{
-			rangeStr:   string(c.Range),
-			triCounts:  db.trigrams.TrigramCounts(c.Content),
-			tokenCount: countTokens(c.Content),
+			rangeStr:  string(c.Range),
+			hash:      h,
+			triCounts: db.trigrams.TrigramCounts(c.Content),
+			tokens:    tokenizeCounts(c.Content),
 		})
 		return true
 	}); err != nil {
@@ -876,9 +1013,9 @@ func (db *DB) resolveChunkFunc(strategy string) ChunkFunc {
 	return RunChunkerFunc(cmd)
 }
 
-// Seq: seq-add.md | R213, R214
+// Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
 func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []collectedChunk, modTime int64, hash string, fileLength int64) (uint64, error) {
-	// Dedup guard: check for existing F records before allocating a fileid
+	// Dedup guard: check for existing N records before allocating a fileid
 	finalKey := FinalKey(fpath)
 	_, err := txn.Get(db.dbi, finalKey)
 	if err == nil {
@@ -892,74 +1029,142 @@ func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []colle
 		return 0, err
 	}
 
-	// Write F records
+	// Write N records (filename key chain)
 	pairs := EncodeFilename(fpath)
-	fileidBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(fileidBytes, fileid)
+	fileidBuf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(fileidBuf, fileid)
 	for i, pair := range pairs {
 		val := []byte{}
 		if i == len(pairs)-1 {
-			val = fileidBytes
+			// Final key value: length-prefixed full name + fileid varint
+			nameBytes := []byte(fpath)
+			v := make([]byte, binary.MaxVarintLen64+len(nameBytes)+n)
+			off := binary.PutUvarint(v, uint64(len(nameBytes)))
+			off += copy(v[off:], nameBytes)
+			off += copy(v[off:], fileidBuf[:n])
+			val = v[:off]
 		}
 		if err := txn.Put(db.dbi, pair.Key, val, 0); err != nil {
 			return 0, err
 		}
 	}
 
-	// Process each chunk — write forward index entries
-	rChunks := make(map[uint64][]chunkTrigramEntry)
-	chunkRanges := make([]string, len(chunks))
-	tokenCounts := make([]int, len(chunks))
+	// Process each chunk — chunk dedup via H records
+	fileChunks := make([]FileChunkEntry, len(chunks))
+	fileBag := make(map[string]int) // file-level token bag
+
+	// Accumulate trigrams and tokens per new chunkid for batch T/W updates
+	type newChunkTW struct {
+		chunkid  uint64
+		trigrams []uint32
+		tokens   []TokenEntry
+	}
+	var newChunks []newChunkTW
 
 	for i, ch := range chunks {
-		chunknum := uint64(i)
-		chunkRanges[i] = ch.rangeStr
-		tokenCounts[i] = ch.tokenCount
+		// Check H record for dedup
+		hKey := makeHKey(ch.hash)
+		var chunkid uint64
 
-		var entries []chunkTrigramEntry
-		for tri, cnt := range ch.triCounts {
-			// Update sparse C record
-			if err := incrementCCount(txn, db.dbi, tri); err != nil {
+		hVal, err := txn.Get(db.dbi, hKey)
+		if err == nil {
+			// Dedup hit — chunk already exists, add our fileid to its C record
+			chunkid, _ = readUvarint(hVal)
+			// Read existing C record, add fileid
+			cKey := makeCKey(chunkid)
+			cVal, err := txn.Get(db.dbi, cKey)
+			if err != nil {
+				return 0, fmt.Errorf("read C record %d: %w", chunkid, err)
+			}
+			cData := make([]byte, len(cVal))
+			copy(cData, cVal)
+			crec, err := UnmarshalCValue(cData)
+			if err != nil {
+				return 0, err
+			}
+			crec.FileIDs = append(crec.FileIDs, fileid)
+			if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
+				return 0, err
+			}
+			// No T/W updates needed — chunk already indexed
+		} else if lmdb.IsNotFound(err) {
+			// New chunk — allocate chunkid, create H and C records
+			chunkid, err = db.allocChunkID(txn)
+			if err != nil {
 				return 0, err
 			}
 
-			// Clamp count for index key
-			idxCount := uint16(cnt)
-			if cnt > 65535 {
-				idxCount = 65535
-			}
-
-			// Write forward index entry
-			if err := txn.Put(db.dbi, makeIndexKey(tri, idxCount, fileid, chunknum), []byte{}, 0); err != nil {
+			// Write H record
+			var hValBuf [binary.MaxVarintLen64]byte
+			hn := binary.PutUvarint(hValBuf[:], chunkid)
+			if err := txn.Put(db.dbi, hKey, hValBuf[:hn], 0); err != nil {
 				return 0, err
 			}
 
-			entries = append(entries, chunkTrigramEntry{tri, idxCount})
+			// Build trigram entries
+			triEntries := make([]TrigramEntry, 0, len(ch.triCounts))
+			triList := make([]uint32, 0, len(ch.triCounts))
+			for tri, cnt := range ch.triCounts {
+				triEntries = append(triEntries, TrigramEntry{Trigram: tri, Count: cnt})
+				triList = append(triList, tri)
+			}
+
+			// Create C record
+			crec := CRecord{
+				ChunkID:  chunkid,
+				Hash:     ch.hash,
+				Trigrams: triEntries,
+				Tokens:   ch.tokens,
+				FileIDs:  []uint64{fileid},
+			}
+			if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
+				return 0, err
+			}
+
+			// Accumulate for batch T/W
+			newChunks = append(newChunks, newChunkTW{
+				chunkid:  chunkid,
+				trigrams: triList,
+				tokens:   ch.tokens,
+			})
+		} else {
+			return 0, err
 		}
-		rChunks[chunknum] = entries
+
+		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr}
+		mergeTokenBag(fileBag, ch.tokens)
 	}
 
-	// Write R record (reverse index)
-	if err := txn.Put(db.dbi, makeRKey(fileid), encodeRValue(rChunks), 0); err != nil {
-		return 0, err
+	// Batch T record updates — one read-modify-write per affected trigram
+	for _, nc := range newChunks {
+		if err := batchAppendT(txn, db.dbi, nc.trigrams, nc.chunkid); err != nil {
+			return 0, err
+		}
 	}
 
-	// Write N record
-	// R146, R147
-	info := FileInfo{
-		Filename:         fpath,
-		ChunkRanges:      chunkRanges,
-		ChunkTokenCounts: tokenCounts,
-		ChunkingStrategy: strategy,
-		ModTime:          modTime,
-		ContentHash:      hash,
-		FileLength:       fileLength,
+	// Batch W record updates — one read-modify-write per affected token hash
+	for _, nc := range newChunks {
+		if err := batchAppendW(txn, db.dbi, nc.tokens, nc.chunkid); err != nil {
+			return 0, err
+		}
 	}
-	infoJSON, err := json.Marshal(info)
-	if err != nil {
-		return 0, err
+
+	// Write F record
+	var contentHashBytes [32]byte
+	hb, _ := hex.DecodeString(hash)
+	copy(contentHashBytes[:], hb)
+
+	frec := FRecord{
+		FileID:      fileid,
+		ModTime:     modTime,
+		ContentHash: contentHashBytes,
+		FileLength:  fileLength,
+		Strategy:    strategy,
+		Names:       []string{fpath},
+		Chunks:      fileChunks,
+		Tokens:      tokenBagToEntries(fileBag),
 	}
-	return fileid, txn.Put(db.dbi, makeNKey(fileid), infoJSON, 0)
+	return fileid, txn.Put(db.dbi, makeFKey(fileid), frec.MarshalValue(), 0)
 }
 
 // --- RemoveFile ---
@@ -1133,10 +1338,12 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
 			return false
 		}
+		h := sha256.Sum256(c.Content)
 		newChunks = append(newChunks, collectedChunk{
-			rangeStr:   string(c.Range),
-			triCounts:  db.trigrams.TrigramCounts(c.Content),
-			tokenCount: countTokens(c.Content),
+			rangeStr:  string(c.Range),
+			hash:      h,
+			triCounts: db.trigrams.TrigramCounts(c.Content),
+			tokens:    tokenizeCounts(c.Content),
 		})
 		return true
 	}); err != nil {
@@ -1201,7 +1408,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		// Update N record (R157)
 		for _, ch := range newChunks {
 			info.ChunkRanges = append(info.ChunkRanges, ch.rangeStr)
-			info.ChunkTokenCounts = append(info.ChunkTokenCounts, ch.tokenCount)
+			info.ChunkTokenCounts = append(info.ChunkTokenCounts, countTokens(nil)) // legacy compat, will be rewritten
 		}
 		if cfg.contentHash != "" {
 			info.ContentHash = cfg.contentHash

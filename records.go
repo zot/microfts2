@@ -60,8 +60,7 @@ func (c *CRecord) DB() *DB { return c.db }
 
 // FileRecord navigates to an F record within the same transaction.
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error) {
-	// TODO: delegate to db.readFRecord(c, fileid) when DB is rewritten
-	return FRecord{}, fmt.Errorf("not yet implemented")
+	return c.db.readFRecord(c, fileid)
 }
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.

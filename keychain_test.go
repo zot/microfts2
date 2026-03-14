@@ -10,11 +10,11 @@ func TestEncodeFilenameShort(t *testing.T) {
 	if len(pairs) != 1 {
 		t.Fatalf("got %d pairs, want 1", len(pairs))
 	}
-	if pairs[0].Key[0] != fPrefix {
-		t.Errorf("key[0] = %c, want %c", pairs[0].Key[0], fPrefix)
+	if pairs[0].Key[0] != nPrefix {
+		t.Errorf("key[0] = %c, want %c", pairs[0].Key[0], nPrefix)
 	}
-	if pairs[0].Key[1] != fFinalPart {
-		t.Errorf("key[1] = %d, want %d (final)", pairs[0].Key[1], fFinalPart)
+	if pairs[0].Key[1] != nFinalPart {
+		t.Errorf("key[1] = %d, want %d (final)", pairs[0].Key[1], nFinalPart)
 	}
 	if string(pairs[0].Key[2:]) != "/tmp/test.txt" {
 		t.Errorf("key payload = %q, want %q", string(pairs[0].Key[2:]), "/tmp/test.txt")
@@ -34,10 +34,10 @@ func TestEncodeFilenameLong(t *testing.T) {
 			t.Errorf("pair %d: part = %d, want %d", i, pairs[i].Key[1], i)
 		}
 	}
-	// Final part has fFinalPart
+	// Final part has nFinalPart
 	last := pairs[len(pairs)-1]
-	if last.Key[1] != fFinalPart {
-		t.Errorf("last pair: part = %d, want %d (final)", last.Key[1], fFinalPart)
+	if last.Key[1] != nFinalPart {
+		t.Errorf("last pair: part = %d, want %d (final)", last.Key[1], nFinalPart)
 	}
 }
 
