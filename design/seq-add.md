@@ -1,11 +1,15 @@
 # Sequence: Add File
-**Requirements:** R10, R11, R12, R19, R20, R25, R26, R29, R77, R79, R81, R92, R102, R109, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147
+**Requirements:** R10, R11, R12, R19, R20, R25, R26, R29, R77, R79, R81, R92, R102, R109, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147, R213, R214, R215
 
 Participants: DB, Chunker, Trigrams, KeyChain
 
 ```
 DB                      Chunker       Trigrams      KeyChain
  |                        |              |            |
+ |  [in addFileInTxn]                    |            |
+ |  check FinalKey(fpath) in content DB  |            |
+ |  if exists: return (0, ErrAlreadyIndexed)         |
+ |                                       |            |
  |  stat file (mod time before read)     |            |
  |  read file, compute SHA-256           |            |
  |                                       |            |

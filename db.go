@@ -27,6 +27,10 @@ import (
 // ErrNoChunks is returned when a chunker produces zero chunks for a file.
 var ErrNoChunks = errors.New("chunker produced no chunks")
 
+// ErrAlreadyIndexed is returned when AddFile is called for a path that already
+// has F records in the database. Use Reindex or AppendChunks instead. R215
+var ErrAlreadyIndexed = errors.New("file already indexed")
+
 // CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-score.md, seq-stale.md, seq-append.md, seq-chunks.md
 
 // chunkID identifies a specific chunk within a file.
@@ -784,7 +788,17 @@ func (db *DB) resolveChunkFunc(strategy string) ChunkFunc {
 	return RunChunkerFunc(cmd)
 }
 
+// Seq: seq-add.md | R213, R214
 func (db *DB) addFileInTxn(txn *lmdb.Txn, fpath, strategy string, chunks []collectedChunk, modTime int64, hash string, fileLength int64) (uint64, error) {
+	// Dedup guard: check for existing F records before allocating a fileid
+	finalKey := FinalKey(fpath)
+	_, err := txn.Get(db.contentDBI, finalKey)
+	if err == nil {
+		return 0, ErrAlreadyIndexed
+	} else if !lmdb.IsNotFound(err) {
+		return 0, fmt.Errorf("check existing %s: %w", fpath, err)
+	}
+
 	fileid, err := db.allocFileID(txn)
 	if err != nil {
 		return 0, err

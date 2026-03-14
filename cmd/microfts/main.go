@@ -178,10 +178,12 @@ func cmdAdd() {
 	}
 }
 
+// Seq: seq-search.md | R207, R208, R209, R210, R211, R212
 func cmdSearch() {
 	fs := flag.CommandLine
 	dbPath, contentDB, indexDB := dbFlags(fs)
 	useRegex := fs.Bool("regex", false, "treat query as a Go regexp pattern")
+	contains := fs.String("contains", "", "FTS text query (composes with --regex)")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	verify := fs.Bool("verify", false, "post-filter: verify query terms in chunk text")
 	var filterRegex, exceptRegex stringSlice
@@ -189,8 +191,14 @@ func cmdSearch() {
 	fs.Var(&exceptRegex, "except-regex", "subtract post-filter regex (repeatable)")
 	fs.Parse(os.Args[1:])
 
-	if *dbPath == "" || fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "search: -db and query required")
+	positional := strings.Join(fs.Args(), " ")
+
+	if *dbPath == "" {
+		fmt.Fprintln(os.Stderr, "search: -db required")
+		os.Exit(1)
+	}
+	if *contains == "" && positional == "" {
+		fmt.Fprintln(os.Stderr, "search: query required (positional args or --contains)")
 		os.Exit(1)
 	}
 
@@ -204,8 +212,6 @@ func cmdSearch() {
 		fmt.Fprintf(os.Stderr, "search: unknown score mode: %s\n", *scoreMode)
 		os.Exit(1)
 	}
-
-	query := strings.Join(fs.Args(), " ")
 
 	db, err := microfts2.Open(*dbPath, openOpts(*contentDB, *indexDB))
 	if err != nil {
@@ -227,10 +233,19 @@ func cmdSearch() {
 	}
 
 	var sr *microfts2.SearchResults
-	if *useRegex {
-		sr, err = db.SearchRegex(query, opts...)
-	} else {
-		sr, err = db.Search(query, opts...)
+	switch {
+	case *contains != "" && *useRegex:
+		// FTS narrows candidates, regex post-filters
+		if positional != "" {
+			opts = append(opts, microfts2.WithRegexFilter(positional))
+		}
+		sr, err = db.Search(*contains, opts...)
+	case *useRegex:
+		sr, err = db.SearchRegex(positional, opts...)
+	case *contains != "":
+		sr, err = db.Search(*contains, opts...)
+	default:
+		sr, err = db.Search(positional, opts...)
 	}
 	if err != nil {
 		fatal("search", err)

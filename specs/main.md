@@ -310,6 +310,16 @@ Stock filters: `FilterAll` (use all), `FilterByRatio(maxRatio float64)` (skip hi
 AppendOption: `func(*appendConfig)` — functional option pattern
 Built-in append options: `WithContentHash(hash string)` (full-file SHA-256 — caller pre-computed), `WithModTime(t int64)` (Unix nanos), `WithFileLength(n int64)` (full file size after append), `WithBaseLine(n int)` (1-based line number offset for line-based chunker ranges; 0 means no adjustment)
 
+# AddFile Duplicate Guard
+
+`AddFile` and `AddFileWithContent` must not create duplicate entries for an already-indexed path. Before allocating a new fileid, `addFileInTxn` checks whether F records already exist for the path (via `FinalKey` lookup). If the file is already indexed, return `ErrAlreadyIndexed` — a sentinel error the caller can check with `errors.Is`. The caller should use `Reindex` or `AppendChunks` instead.
+
+```go
+var ErrAlreadyIndexed = errors.New("file already indexed")
+```
+
+This is a guard, not a policy decision — the caller decides what to do when they get this error.
+
 # Scoring Strategies
 
 The search function accepts a scoring strategy that determines how candidate chunks are ranked. microfts2 provides built-in strategies and allows custom ones via `ScoreFunc`.
@@ -507,7 +517,7 @@ Patterns are stored as strings in the search config. They are compiled to `*rege
 ## CLI
 
 ```
-microfts search -db <path> [-regex] [-filter-regex <pattern>]... [-except-regex <pattern>]... <query>
+microfts search -db <path> [-regex] [-contains <text>] [-filter-regex <pattern>]... [-except-regex <pattern>]... <query>
 ```
 
 - `-filter-regex` is repeatable: each invocation adds an AND regex filter
@@ -515,9 +525,21 @@ microfts search -db <path> [-regex] [-filter-regex <pattern>]... [-except-regex 
 - Both work with literal and regex search modes
 - Implemented via a custom `flag.Value` type for string slice accumulation
 
-## Use case
+### Composing `--contains` with `--regex`
+
+`--contains` provides an explicit FTS text query. When combined with `--regex`, the two compose naturally:
+
+- `--regex` alone with positional args: positional args are the regex pattern → `SearchRegex` (unchanged)
+- `--contains` alone (no positional args needed): FTS text query → `Search`
+- `--contains` with `--regex` and positional args: FTS on the `--contains` text via `Search`, with the positional regex pattern added as a `WithRegexFilter` post-filter
+- Neither flag, positional args: FTS text query → `Search` (unchanged)
+
+This removes the mutual exclusion between FTS and regex — `--contains` narrows candidates via trigram index, `--regex` verifies via post-filter.
+
+## Use cases
 
 ```
+microfts search -db idx --contains "chunk" --regex '@to-project:.*\bmicrofts2\b'
 ark search --regex '@to-project:.*\bark\b' --except-regex '@status:.*\bdone\b'
 ```
 

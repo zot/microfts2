@@ -341,3 +341,22 @@
 - **R204:** CLI `chunks` subcommand: `microfts chunks -db <path> [-before N] [-after N] <file> <range>` — JSONL output with `path`, `range`, `content`, `index` fields
 - **R205:** `-before` and `-after` default to 0 (target chunk only)
 - **R206:** (inferred) Expansion unit is chunks (strategy-agnostic), not lines or bytes — range labels are opaque
+
+## Feature: Composable --contains and --regex
+**Source:** specs/main.md
+
+- **R207:** CLI `--contains` string flag provides an explicit FTS text query for the `search` subcommand
+- **R208:** When `--contains` is used with `--regex`, `Search(containsText)` is called with the positional-arg regex pattern added as a `WithRegexFilter` post-filter
+- **R209:** When `--regex` is used alone (no `--contains`), positional args are the regex pattern → `SearchRegex` (unchanged behavior)
+- **R210:** When `--contains` is used alone, it is the FTS query → `Search` (no positional args required)
+- **R211:** When neither `--contains` nor `--regex` is set, positional args are the FTS query → `Search` (unchanged behavior)
+- **R212:** (inferred) Error if no query is determinable — no positional args and no `--contains`
+
+## Feature: AddFile Duplicate Guard
+**Source:** specs/main.md
+
+- **R213:** `addFileInTxn` checks for existing F records (via `FinalKey` lookup) before allocating a new fileid
+- **R214:** If the file is already indexed, `AddFile` and `AddFileWithContent` return `ErrAlreadyIndexed`
+- **R215:** `ErrAlreadyIndexed` is a sentinel error: `var ErrAlreadyIndexed = errors.New("file already indexed")`
+- **R216:** Callers check with `errors.Is(err, ErrAlreadyIndexed)` and use `Reindex` or `AppendChunks` instead
+- **R217:** (inferred) The guard is a check, not a policy — no automatic reindex or append behavior

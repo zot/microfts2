@@ -150,3 +150,9 @@
 **Input:** GetChunks("nonexistent.txt", "1-1", 0, 0)
 **Expected:** returns error
 **Refs:** crc-DB.md, seq-chunks.md, R203
+
+## Test: add file already indexed returns ErrAlreadyIndexed
+**Purpose:** dedup guard prevents duplicate fileids
+**Input:** add a file, then AddFile same path again
+**Expected:** second AddFile returns ErrAlreadyIndexed (errors.Is), file still searchable with original results (no duplication)
+**Refs:** crc-DB.md, seq-add.md, R213, R214, R215, R216

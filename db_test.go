@@ -1,6 +1,7 @@
 package microfts2
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1378,5 +1379,33 @@ func TestGetChunksFileNotInDB(t *testing.T) {
 	_, err := db.GetChunks("/nonexistent/file.txt", "1-1", 0, 0)
 	if err == nil {
 		t.Fatal("expected error for file not in database")
+	}
+}
+
+// test-DB.md: add file already indexed returns ErrAlreadyIndexed | R213, R214, R215, R216
+func TestAddFileAlreadyIndexed(t *testing.T) {
+	db, dir := testDB(t)
+
+	fp := filepath.Join(dir, "dup.txt")
+	os.WriteFile(fp, []byte("hello world\n"), 0644)
+
+	_, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second add should return ErrAlreadyIndexed
+	_, err = db.AddFile(fp, "line")
+	if !errors.Is(err, ErrAlreadyIndexed) {
+		t.Fatalf("expected ErrAlreadyIndexed, got %v", err)
+	}
+
+	// Original file still searchable, no duplication
+	sr, err := db.Search("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(sr.Results))
 	}
 }
