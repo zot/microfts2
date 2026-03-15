@@ -3,3 +3,6 @@
 .#*
 /requests/
 /.scratch/
+/.fslckout
+/.claude/skills/ark
+/resources/

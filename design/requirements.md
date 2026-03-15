@@ -189,6 +189,7 @@
 **Source:** specs/main.md
 
 - **R51:** `Create`/`Open`/`Close`/`Settings` lifecycle functions
+- **R268:** `Version() (string, error)` returns the DB format version string from the I record; read-only transaction
 - **R52:** `AddFile`/`RemoveFile`/`Reindex` content management methods
 - **R53:** `Search` accepts variadic `SearchOption` and returns `*SearchResults` with Results slice and IndexStatus
 - **R54:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
@@ -447,3 +448,41 @@
 - **R261:** F record aggregated token bag is the union of all chunk tokens with summed counts
 - **R262:** Token bag maintained incrementally: AddFile/Reindex rebuilds, AppendChunks merges new chunk tokens
 - **R263:** Enables file-level scoring and pre-filtering without reading every chunk's C record
+
+## Feature: Overlap Scoring
+**Source:** specs/main.md
+
+- **R269:** `ScoreOverlap` score function: count of matching query trigrams, no normalization (OR semantics)
+- **R270:** Fits `ScoreFunc` signature directly — pure function, no extra state
+- **R271:** `WithOverlap()` search option: sugar for `WithScoring(ScoreOverlap)`
+
+## Feature: BM25 Scoring
+**Source:** specs/main.md
+
+- **R272:** `ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc` — closure factory capturing IDF and avgdl
+- **R273:** BM25 formula: `idf(t) * (tf * (k1+1)) / (tf + k1 * (1 - b + b * dl/avgdl))` with k1=1.2, b=0.75
+- **R274:** `BM25Func(queryTrigrams []uint32) (ScoreFunc, error)` — convenience helper that reads T records for IDF, I record counters for avgdl, returns a ScoreBM25 closure
+- **R275:** I record counter `totalTokens`: sum of all chunk token counts, maintained atomically during AddFile/RemoveFile/AppendChunks
+- **R276:** I record counter `totalChunks`: total number of unique chunks, maintained atomically during AddFile/RemoveFile/AppendChunks
+- **R277:** `avgdl = totalTokens / totalChunks` — average chunk token count across corpus
+- **R278:** (inferred) IDF per trigram: `df(t)` derived from T record value length; `N` from totalChunks I record counter
+
+## Feature: Proximity Reranking
+**Source:** specs/main.md
+
+- **R279:** `WithProximityRerank(topN int) SearchOption` — post-filter that reranks top-N results by query term proximity in chunk text
+- **R280:** Proximity bonus: `1 / (1 + minSpan)` where minSpan is the smallest token window containing all query terms
+- **R281:** Re-chunks file to recover chunk text (same mechanism as WithVerify)
+- **R282:** Applied after scoring, before final sort; works with Search, SearchMulti, and ScoreFile
+
+## Feature: Multi-Strategy Search
+**Source:** specs/main.md
+
+- **R283:** `SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error)`
+- **R284:** Candidate collection (trigram intersection, T record reads, C record reads, chunk filters) computed once in a single View transaction
+- **R285:** Each strategy scores the same candidate set independently, keeping its own top-k sorted by score descending
+- **R286:** `MultiSearchResult` struct: `Strategy string, Results []SearchResult`
+- **R287:** Same k for all strategies
+- **R288:** No deduplication — same chunk can appear in results from multiple strategies; caller handles merge
+- **R289:** Shared SearchOptions (TrigramFilter, ChunkFilter, verify, regex filters) applied once during candidate collection
+- **R290:** (inferred) Post-filters (verify, regex, proximity rerank) applied per strategy's result set after scoring

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bmatsuo/lmdb-go/lmdb"
 )
 
 // CRC: crc-DB.md
@@ -446,6 +448,17 @@ func TestDBEnv(t *testing.T) {
 	env := db.Env()
 	if env == nil {
 		t.Fatal("Env() returned nil")
+	}
+}
+
+func TestDBVersion(t *testing.T) {
+	db, _ := testDB(t)
+	v, err := db.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != "2" {
+		t.Fatalf("Version() = %q, want %q", v, "2")
 	}
 }
 
@@ -1408,5 +1421,177 @@ func TestAddFileAlreadyIndexed(t *testing.T) {
 	}
 	if len(sr.Results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(sr.Results))
+	}
+}
+
+func TestScoreOverlap(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "alpha beta gamma delta\n")
+	writeTestFile(t, dir, "b.txt", "alpha zeta\n")
+	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+
+	// Search for a single term present in both files
+	sr, err := db.Search("alpha", WithOverlap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) < 2 {
+		t.Fatalf("expected >=2 results, got %d", len(sr.Results))
+	}
+	// Both should have positive overlap scores
+	for _, r := range sr.Results {
+		if r.Score <= 0 {
+			t.Errorf("expected positive score, got %.2f for %s", r.Score, r.Path)
+		}
+	}
+}
+
+func TestSearchMulti(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "alpha beta gamma delta\n")
+	writeTestFile(t, dir, "b.txt", "alpha beta\n")
+	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+
+	strategies := map[string]ScoreFunc{
+		"coverage": scoreCoverage,
+		"overlap":  ScoreOverlap,
+	}
+	results, err := db.SearchMulti("alpha beta", strategies, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 strategy results, got %d", len(results))
+	}
+	for _, mr := range results {
+		if mr.Strategy == "" {
+			t.Error("strategy name is empty")
+		}
+		if len(mr.Results) == 0 {
+			t.Errorf("strategy %s has no results", mr.Strategy)
+		}
+	}
+}
+
+func TestSearchMultiSharedFilters(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "alpha beta\n")
+	writeTestFile(t, dir, "b.txt", "alpha gamma\n")
+	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+
+	// Filter that rejects any chunk whose file contains "gamma"
+	filter := func(c CRecord) bool {
+		for _, fid := range c.FileIDs {
+			frec, err := c.FileRecord(fid)
+			if err == nil && len(frec.Names) > 0 {
+				if frec.Names[0] == dir+"/b.txt" {
+					return false
+				}
+			}
+		}
+		return true
+	}
+
+	strategies := map[string]ScoreFunc{
+		"coverage": scoreCoverage,
+		"overlap":  ScoreOverlap,
+	}
+	results, err := db.SearchMulti("alpha", strategies, 10, WithChunkFilter(filter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mr := range results {
+		for _, r := range mr.Results {
+			if r.Path == dir+"/b.txt" {
+				t.Errorf("strategy %s should not contain filtered file b.txt", mr.Strategy)
+			}
+		}
+	}
+}
+
+func TestBM25Func(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "hello world foo bar\n")
+	writeTestFile(t, dir, "b.txt", "hello world\n")
+	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+
+	tris := db.trigrams.ExtractTrigrams([]byte("hello world"))
+	scoreFn, err := db.BM25Func(tris)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoreFn == nil {
+		t.Fatal("BM25Func returned nil ScoreFunc")
+	}
+
+	sr, err := db.Search("hello world", WithScoring(scoreFn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Fatal("expected results from BM25 search")
+	}
+}
+
+func TestIRecordCounters(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "hello world\nfoo bar\n")
+	db.AddFile(fp, "line")
+
+	var totalChunks, totalTokens uint64
+	db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
+		totalChunks, _ = iCounter(th, db.dbi, "totalChunks")
+		totalTokens, _ = iCounter(th, db.dbi, "totalTokens")
+		return nil
+	})
+
+	if totalChunks == 0 {
+		t.Error("totalChunks should be > 0 after add")
+	}
+	if totalTokens == 0 {
+		t.Error("totalTokens should be > 0 after add")
+	}
+
+	db.RemoveFile(fp)
+
+	db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
+		totalChunks, _ = iCounter(th, db.dbi, "totalChunks")
+		totalTokens, _ = iCounter(th, db.dbi, "totalTokens")
+		return nil
+	})
+
+	if totalChunks != 0 {
+		t.Errorf("totalChunks should be 0 after remove, got %d", totalChunks)
+	}
+	if totalTokens != 0 {
+		t.Errorf("totalTokens should be 0 after remove, got %d", totalTokens)
+	}
+}
+
+func TestProximityRerank(t *testing.T) {
+	db, dir := testDB(t)
+	// Chunk with terms adjacent
+	writeTestFile(t, dir, "close.txt", "alpha beta nearby words\n")
+	// Chunk with terms far apart
+	writeTestFile(t, dir, "far.txt", "alpha one two three four five six seven eight nine ten beta\n")
+	db.AddFile(dir+"/close.txt", "line")
+	db.AddFile(dir+"/far.txt", "line")
+
+	sr, err := db.Search("alpha beta", WithProximityRerank(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) < 2 {
+		t.Fatalf("expected >=2 results, got %d", len(sr.Results))
+	}
+	// close.txt should rank first after proximity rerank
+	if sr.Results[0].Path != dir+"/close.txt" {
+		t.Errorf("expected close.txt first, got %s", sr.Results[0].Path)
 	}
 }

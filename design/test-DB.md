@@ -210,3 +210,45 @@
 **Input:** add a multi-line file, read FRecord
 **Expected:** token bag contains all tokens from all chunks with summed counts
 **Refs:** crc-DB.md, R237, R261
+
+## Test: ScoreOverlap
+**Purpose:** overlap scoring counts matching trigrams without normalization
+**Input:** add files with varying overlap with query, search with WithOverlap()
+**Expected:** scores are raw matching trigram counts (float64), higher for more overlap
+**Refs:** crc-DB.md, R269, R270, R271
+
+## Test: SearchMulti returns per-strategy results
+**Purpose:** multi-strategy search collects candidates once, scores N ways
+**Input:** add files, SearchMulti with coverage and overlap strategies, k=2
+**Expected:** returns two MultiSearchResult entries (one per strategy), each with up to 2 results, same candidates may appear in both
+**Refs:** crc-DB.md, seq-search-multi.md, R283, R285, R286, R287, R288
+
+## Test: SearchMulti shared filters
+**Purpose:** ChunkFilter and TrigramFilter applied once, shared across strategies
+**Input:** SearchMulti with a ChunkFilter that rejects some chunks
+**Expected:** rejected chunks absent from all strategies' results
+**Refs:** crc-DB.md, seq-search-multi.md, R284, R289
+
+## Test: BM25Func returns valid ScoreFunc
+**Purpose:** BM25 convenience helper
+**Input:** add files, call BM25Func with query trigrams, use returned ScoreFunc in Search
+**Expected:** returns non-nil ScoreFunc, search produces scored results
+**Refs:** crc-DB.md, R272, R274
+
+## Test: I record counters maintained on add/remove
+**Purpose:** totalTokens and totalChunks counters
+**Input:** add file (N chunks, M total tokens), check counters. Remove file, check again.
+**Expected:** after add: totalChunks = N, totalTokens = M. After remove: both 0.
+**Refs:** crc-DB.md, R275, R276
+
+## Test: I record counters maintained on append
+**Purpose:** AppendChunks updates counters
+**Input:** add file, then AppendChunks. Check totalChunks and totalTokens.
+**Expected:** counters reflect the sum of original + appended chunks and tokens
+**Refs:** crc-DB.md, R275, R276
+
+## Test: WithProximityRerank reorders results
+**Purpose:** proximity reranking adjusts scores by term closeness
+**Input:** add chunks: one with "alpha beta" adjacent, one with "alpha ... many words ... beta". Search "alpha beta" with WithProximityRerank(10)
+**Expected:** adjacent chunk ranks higher than distant chunk
+**Refs:** crc-DB.md, R279, R280, R281, R282

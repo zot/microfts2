@@ -305,6 +305,7 @@ func Open(path string, opts Options) (*DB, error)
 func (db *DB) Close() error
 func (db *DB) Settings() Settings
 func (db *DB) Env() *lmdb.Env
+func (db *DB) Version() (string, error)
 
 // Content
 func (db *DB) AddFile(fpath, strategy string) (uint64, error)
@@ -318,7 +319,9 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 // Search
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error)
+func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error)
 func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption) ([]ScoredChunk, error)
+func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error)
 
 // Chunk Retrieval
 func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
@@ -420,10 +423,12 @@ SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
 ScoredChunk: `{ Range string, Score float64 }`
 ChunkResult: `{ Path string, Range string, Content string, Index int }` — a chunk with its content and position in the file's chunk list
+MultiSearchResult: `{ Strategy string, Results []SearchResult }` — one strategy's top-k results from SearchMulti
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 SearchOption: `func(*searchConfig)` — functional option pattern
-Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection)
+Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithOverlap()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection), `WithProximityRerank(topN int)` (post-filter: rerank top-N by query term proximity in chunk text)
+Built-in score functions: `ScoreOverlap` (matching trigram count), `ScoreBM25(idf, avgdl)` (returns ScoreFunc closure)
 
 ## Chunk filtering
 
@@ -493,6 +498,90 @@ For long queries (conversation turns, full documents) where most query tokens wo
 4. Score = sum of token match strengths / chunk token count
 
 Normalizing by chunk token count prevents long chunks from winning on surface area alone. A 50-word chunk with 10 matching words scores higher than a 500-word chunk with the same 10 words.
+
+## Overlap (OR semantics)
+
+"How many of my query trigrams appear in this chunk?"
+
+Count of matching query trigrams, no normalization. The simplest fuzzy score — more matches = better. Useful when any partial match is interesting and the caller wants to rank by breadth of overlap rather than precision.
+
+```go
+func ScoreOverlap(queryTrigrams []uint32, chunkCounts map[uint32]int, _ int) float64
+```
+
+Fits `ScoreFunc` signature directly. Pure function, no extra state.
+
+## BM25
+
+Standard term frequency / inverse document frequency scoring. Uses per-trigram TF from the chunk's C record and corpus-wide IDF from T record value lengths.
+
+BM25 needs IDF data that isn't available through the `ScoreFunc` signature. Solution: a closure factory that captures IDF and average document length, returning a `ScoreFunc`.
+
+```go
+func ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc
+```
+
+The caller pre-computes IDF from T record value lengths and average token count from I record counters, then passes the returned closure as a `ScoreFunc`. No signature change needed.
+
+### BM25 formula
+
+For each query trigram t in the chunk:
+- `tf(t)` = trigram count in the chunk (from C record)
+- `idf(t) = ln((N - df(t) + 0.5) / (df(t) + 0.5) + 1)` where N = total chunks, df(t) = T record value length
+- `score += idf(t) * (tf(t) * (k1 + 1)) / (tf(t) + k1 * (1 - b + b * dl/avgdl))`
+- `k1 = 1.2`, `b = 0.75` (standard defaults)
+- `dl` = chunk token count, `avgdl` = average chunk token count across corpus
+
+### BM25 helper
+
+```go
+func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error)
+```
+
+Reads T records for per-trigram document frequencies, reads I record counters for total chunks and total tokens, computes IDF map and avgdl, returns a `ScoreBM25` closure. Convenience for callers who don't need custom IDF computation.
+
+### I record counters for BM25
+
+Two I record counters maintained atomically during AddFile, RemoveFile, and AppendChunks:
+- `totalTokens`: sum of all chunk token counts across the corpus
+- `totalChunks`: total number of unique chunks
+
+Average document length: `avgdl = totalTokens / totalChunks`.
+
+Updated in the same write transaction as other record changes — one extra `Get` + `Put` per counter, no additional I/O round-trips.
+
+## Proximity reranking
+
+Position-aware reranking for multi-term queries. Takes top-N results from the primary scorer, re-chunks each file to recover text, finds query term positions in the chunk content, and computes a proximity bonus based on how close the terms appear to each other.
+
+```go
+func WithProximityRerank(topN int) SearchOption
+```
+
+Proximity is a post-filter, not a primary scorer — it needs chunk text that isn't in the index. Applied after scoring and before final sort. Works with `Search`, `SearchMulti`, and `ScoreFile`.
+
+The proximity bonus is computed as: for each pair of query terms found in the chunk, measure the minimum token distance. Score adjustment = `1 / (1 + minSpan)` where minSpan is the smallest window (in tokens) containing all query terms. Chunks where terms appear closer together get a higher adjustment.
+
+# Multi-Strategy Search
+
+`SearchMulti` runs one query through multiple scoring strategies in a single LMDB read transaction, sharing candidate collection. The candidate set (trigram intersection, T record reads, C record reads, chunk filter application) is computed once; only scoring diverges.
+
+```go
+type MultiSearchResult struct {
+    Strategy string
+    Results  []SearchResult
+}
+
+func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc,
+    k int, opts ...SearchOption) ([]MultiSearchResult, error)
+```
+
+- `strategies`: map of name → ScoreFunc. Each strategy scores the same candidate set independently.
+- `k`: number of top results to keep per strategy. Same k for all strategies.
+- `opts`: shared SearchOptions (TrigramFilter, ChunkFilter, verify, regex filters) applied once during candidate collection.
+- Returns one `MultiSearchResult` per strategy, each containing that strategy's top-k results sorted by score descending.
+
+The same chunk can appear in results from multiple strategies. No deduplication — the caller handles merge and can use cross-strategy agreement as a confidence signal.
 
 # Staleness Detection
 

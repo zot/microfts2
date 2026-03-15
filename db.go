@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -131,6 +132,7 @@ type searchConfig struct {
 	regexFilters       []string            // AND: every pattern must match chunk content R183
 	exceptRegexFilters []string            // subtract: any match rejects chunk R184
 	chunkFilters       []ChunkFilter       // AND: all must pass for chunk to be included R255-R257
+	proximityTopN      int                 // if > 0, rerank top-N by proximity R279
 }
 
 // ChunkFilter receives a CRecord during candidate evaluation.
@@ -151,6 +153,12 @@ func WithCoverage() SearchOption {
 // WithDensity uses token-density scoring for long queries.
 func WithDensity() SearchOption {
 	return func(c *searchConfig) { c.scoreFunc = scoreDensity }
+}
+
+// CRC: crc-DB.md | R271
+// WithOverlap uses overlap scoring: matching trigram count, no normalization.
+func WithOverlap() SearchOption {
+	return func(c *searchConfig) { c.scoreFunc = ScoreOverlap }
 }
 
 // WithScoring uses a custom scoring function.
@@ -191,6 +199,12 @@ func WithRegexFilter(patterns ...string) SearchOption {
 // Multiple calls accumulate patterns. R184, R185
 func WithExceptRegex(patterns ...string) SearchOption {
 	return func(c *searchConfig) { c.exceptRegexFilters = append(c.exceptRegexFilters, patterns...) }
+}
+
+// CRC: crc-DB.md | R279
+// WithProximityRerank reranks the top-N results by query term proximity in chunk text.
+func WithProximityRerank(topN int) SearchOption {
+	return func(c *searchConfig) { c.proximityTopN = topN }
 }
 
 // FilterAll uses every query trigram. No filtering.
@@ -272,6 +286,79 @@ func scoreDensity(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkToken
 		}
 	}
 	return float64(totalStrength) / float64(chunkTokenCount)
+}
+
+// CRC: crc-DB.md | R269, R270
+// ScoreOverlap: count of matching query trigrams, no normalization (OR semantics).
+func ScoreOverlap(queryTrigrams []uint32, chunkCounts map[uint32]int, _ int) float64 {
+	matching := 0
+	for _, tri := range queryTrigrams {
+		if chunkCounts[tri] > 0 {
+			matching++
+		}
+	}
+	return float64(matching)
+}
+
+// CRC: crc-DB.md | R272, R273
+// ScoreBM25 returns a ScoreFunc closure implementing BM25 ranking.
+// idf maps trigram codes to their inverse document frequency.
+// avgTokenCount is the average chunk token count across the corpus.
+func ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc {
+	const k1 = 1.2
+	const b = 0.75
+	return func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64 {
+		dl := float64(chunkTokenCount)
+		var score float64
+		for _, tri := range queryTrigrams {
+			tf := float64(chunkCounts[tri])
+			if tf == 0 {
+				continue
+			}
+			idfVal := idf[tri]
+			score += idfVal * (tf * (k1 + 1)) / (tf + k1*(1-b+b*dl/avgTokenCount))
+		}
+		return score
+	}
+}
+
+// CRC: crc-DB.md | R274, R277, R278
+// BM25Func reads T records for per-trigram document frequencies and I record
+// counters for corpus statistics, then returns a BM25 ScoreFunc closure.
+func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error) {
+	var scoreFn ScoreFunc
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
+
+		totalChunks, err := iCounter(th, db.dbi, "totalChunks")
+		if err != nil {
+			return err
+		}
+		totalTokens, err := iCounter(th, db.dbi, "totalTokens")
+		if err != nil {
+			return err
+		}
+
+		var avgdl float64
+		if totalChunks > 0 {
+			avgdl = float64(totalTokens) / float64(totalChunks)
+		}
+
+		n := float64(totalChunks)
+		idfMap := make(map[uint32]float64, len(queryTrigrams))
+		for _, tri := range queryTrigrams {
+			var df int
+			if tVal, err := txn.Get(db.dbi, makeTKey(tri)); err == nil {
+				df = countTValue(tVal)
+			}
+			dfF := float64(df)
+			idfMap[tri] = math.Log((n-dfF+0.5)/(dfF+0.5) + 1)
+		}
+
+		scoreFn = ScoreBM25(idfMap, avgdl)
+		return nil
+	})
+	return scoreFn, err
 }
 
 // FileStatus is returned by CheckFile and StaleFiles.
@@ -630,6 +717,37 @@ func iSetCounter(th TxnHolder, dbi lmdb.DBI, name string, v uint64) error {
 	return txn.Put(dbi, makeIKey(name), buf[:], 0)
 }
 
+// CRC: crc-DB.md | R275, R276
+// iAddCounter atomically adds delta to a counter I record.
+func iAddCounter(th TxnHolder, dbi lmdb.DBI, name string, delta int64) error {
+	cur, err := iCounter(th, dbi, name)
+	if err != nil {
+		return err
+	}
+	newVal := int64(cur) + delta
+	if newVal < 0 {
+		newVal = 0
+	}
+	return iSetCounter(th, dbi, name, uint64(newVal))
+}
+
+// updateCorpusCounters increments totalChunks and totalTokens for newly created chunks.
+func updateCorpusCounters(th TxnHolder, dbi lmdb.DBI, newChunks []newChunkTW) error {
+	if len(newChunks) == 0 {
+		return nil
+	}
+	var totalNewTokens int64
+	for _, nc := range newChunks {
+		for _, te := range nc.tokens {
+			totalNewTokens += int64(te.Count)
+		}
+	}
+	if err := iAddCounter(th, dbi, "totalChunks", int64(len(newChunks))); err != nil {
+		return err
+	}
+	return iAddCounter(th, dbi, "totalTokens", totalNewTokens)
+}
+
 // writeSettings writes all settings as individual I records.
 func writeSettings(th TxnHolder, dbi lmdb.DBI, s *Settings) error {
 	ci := "false"
@@ -766,6 +884,12 @@ func Create(path string, opts Options) (*DB, error) {
 		if err := iSetCounter(th, dbi, "nextChunkID", 1); err != nil {
 			return err
 		}
+		if err := iSetCounter(th, dbi, "totalTokens", 0); err != nil {
+			return err
+		}
+		if err := iSetCounter(th, dbi, "totalChunks", 0); err != nil {
+			return err
+		}
 		return iPut(th, dbi, "version", "2")
 	})
 	if err != nil {
@@ -854,6 +978,17 @@ func (db *DB) Close() error {
 // Env returns the underlying LMDB environment for sharing with other libraries.
 func (db *DB) Env() *lmdb.Env {
 	return db.env
+}
+
+// CRC: crc-DB.md
+func (db *DB) Version() (string, error) {
+	var version string
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		var e error
+		version, e = iGet(&txnWrap{txn}, db.dbi, "version")
+		return e
+	})
+	return version, err
 }
 
 // --- AddFile ---
@@ -1191,6 +1326,11 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 		return 0, err
 	}
 
+	// R275, R276: update corpus counters for new chunks
+	if err := updateCorpusCounters(th, db.dbi, newChunks); err != nil {
+		return 0, err
+	}
+
 	// Write F record
 	frec := FRecord{
 		FileID:      fileid,
@@ -1222,6 +1362,8 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
 	}
 
 	// For each chunk: remove fileid from C record, clean up orphans
+	var removedChunks int64
+	var removedTokens int64
 	for _, fce := range frec.Chunks {
 		cKey := makeCKey(fce.ChunkID)
 		cVal, err := txn.Get(db.dbi, cKey)
@@ -1251,6 +1393,10 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
 			}
 		} else {
 			// Orphaned chunk — delete C, H, and remove from T/W records
+			removedChunks++
+			for _, te := range crec.Tokens {
+				removedTokens += int64(te.Count)
+			}
 			txn.Del(db.dbi, cKey, nil)
 			txn.Del(db.dbi, makeHKey(crec.Hash), nil)
 
@@ -1268,6 +1414,16 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
 				seen[h] = true
 				removeFromInvertedRecord(th, db.dbi, makeWKey(h), fce.ChunkID)
 			}
+		}
+	}
+
+	// R275, R276: decrement corpus counters for orphaned chunks
+	if removedChunks > 0 {
+		if err := iAddCounter(th, db.dbi, "totalChunks", -removedChunks); err != nil {
+			return err
+		}
+		if err := iAddCounter(th, db.dbi, "totalTokens", -removedTokens); err != nil {
+			return err
 		}
 	}
 
@@ -1456,6 +1612,11 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			return err
 		}
 
+		// R275, R276: update corpus counters for new chunks
+		if err := updateCorpusCounters(th, db.dbi, newChunksTW); err != nil {
+			return err
+		}
+
 		// Update F record metadata
 		if cfg.contentHash != "" {
 			hb, _ := hex.DecodeString(cfg.contentHash)
@@ -1490,6 +1651,62 @@ func adjustRange(rangeStr string, baseLine int) (string, error) {
 
 // --- Search ---
 
+// searchPrepare extracts per-term trigrams and the union set from parsed query terms.
+func (db *DB) searchPrepare(terms []string) (termTrigrams [][]uint32, queryTrigrams []uint32) {
+	termTrigrams = make([][]uint32, len(terms))
+	trigramSet := make(map[uint32]bool)
+	for i, term := range terms {
+		tris := db.trigrams.ExtractTrigrams([]byte(term))
+		termTrigrams[i] = tris
+		for _, t := range tris {
+			trigramSet[t] = true
+		}
+	}
+	queryTrigrams = make([]uint32, 0, len(trigramSet))
+	for t := range trigramSet {
+		queryTrigrams = append(queryTrigrams, t)
+	}
+	return
+}
+
+// searchCollect selects trigrams, reads T records, intersects per-term candidate sets,
+// and loads C records. Returns candidates and active trigrams.
+func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32, cfg searchConfig) ([]candidateChunk, []uint32) {
+	active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
+	if len(active) == 0 {
+		return nil, nil
+	}
+	activeSet := make(map[uint32]bool, len(active))
+	for _, t := range active {
+		activeSet[t] = true
+	}
+
+	var candidateChunkIDs map[uint64]bool
+	for _, tris := range termTrigrams {
+		var termActive []uint32
+		for _, t := range tris {
+			if activeSet[t] {
+				termActive = append(termActive, t)
+			}
+		}
+		if len(termActive) == 0 {
+			continue
+		}
+		termChunks := collectChunkIDs(th, db.dbi, termActive)
+		if candidateChunkIDs == nil {
+			candidateChunkIDs = termChunks
+		} else {
+			candidateChunkIDs = intersectChunkSets(candidateChunkIDs, termChunks)
+		}
+		if len(candidateChunkIDs) == 0 {
+			return nil, nil
+		}
+	}
+
+	cands := db.collectCandidates(th, candidateChunkIDs, cfg)
+	return cands, active
+}
+
 // Seq: seq-search.md | R178, R179, R180, R181, R182
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error) {
 	cfg := applySearchOpts(opts)
@@ -1500,62 +1717,19 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		return &SearchResults{Status: IndexStatus{Built: true}}, nil
 	}
 
-	// Extract trigrams per term; union for filter, per-term for candidate collection
-	termTrigrams := make([][]uint32, len(terms))
-	trigramSet := make(map[uint32]bool)
-	for i, term := range terms {
-		tris := db.trigrams.ExtractTrigrams([]byte(term))
-		termTrigrams[i] = tris
-		for _, t := range tris {
-			trigramSet[t] = true
-		}
-	}
-	if len(trigramSet) == 0 {
+	termTrigrams, queryTrigrams := db.searchPrepare(terms)
+	if len(queryTrigrams) == 0 {
 		return &SearchResults{Status: IndexStatus{Built: true}}, nil
-	}
-	queryTrigrams := make([]uint32, 0, len(trigramSet))
-	for t := range trigramSet {
-		queryTrigrams = append(queryTrigrams, t)
 	}
 
 	var results []SearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		th := txnWrap{txn}
-		active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
-		if len(active) == 0 {
+		cands, active := db.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams, cfg)
+		if len(cands) == 0 {
 			return nil
 		}
-		activeSet := make(map[uint32]bool, len(active))
-		for _, t := range active {
-			activeSet[t] = true
-		}
-
-		// Read T records for each term's active trigrams, intersect chunkid sets
-		var candidateChunks map[uint64]bool
-		for _, tris := range termTrigrams {
-			var termActive []uint32
-			for _, t := range tris {
-				if activeSet[t] {
-					termActive = append(termActive, t)
-				}
-			}
-			if len(termActive) == 0 {
-				continue
-			}
-			termChunks := collectChunkIDs(th, db.dbi, termActive)
-			if candidateChunks == nil {
-				candidateChunks = termChunks
-			} else {
-				candidateChunks = intersectChunkSets(candidateChunks, termChunks)
-			}
-			if len(candidateChunks) == 0 {
-				return nil
-			}
-		}
-
-		// Read C records for surviving chunkids, score, resolve to results
-		results = db.scoreAndResolve(th, candidateChunks, active, cfg)
+		results = db.scoreAndResolve(txnWrap{txn}, cands, active, cfg.scoreFunc, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1572,11 +1746,90 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		return nil, err
 	}
 
+	// R279: proximity rerank if configured
+	if cfg.proximityTopN > 0 {
+		results = proximityRerank(db, results, query, cfg.proximityTopN)
+	}
+
 	sortResults(results)
 	return &SearchResults{
 		Results: results,
 		Status:  IndexStatus{Built: true},
 	}, nil
+}
+
+// CRC: crc-DB.md | R286
+// MultiSearchResult holds one strategy's results from SearchMulti.
+type MultiSearchResult struct {
+	Strategy string
+	Results  []SearchResult
+}
+
+// CRC: crc-DB.md | Seq: seq-search-multi.md | R283, R284, R285, R287, R288, R289, R290
+func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
+	cfg := applySearchOpts(opts)
+
+	query = strings.TrimSpace(query)
+	terms := parseQueryTerms(query)
+	if len(terms) == 0 {
+		return nil, nil
+	}
+
+	termTrigrams, queryTrigrams := db.searchPrepare(terms)
+	if len(queryTrigrams) == 0 {
+		return nil, nil
+	}
+
+	var multiResults []MultiSearchResult
+
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		cands, active := db.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams, cfg)
+		if len(cands) == 0 {
+			return nil
+		}
+
+		// Score with each strategy
+		for name, scoreFn := range strategies {
+			results := db.scoreAndResolve(txnWrap{txn}, cands, active, scoreFn, cfg)
+			sortResults(results)
+			if k > 0 && len(results) > k {
+				results = results[:k]
+			}
+			multiResults = append(multiResults, MultiSearchResult{
+				Strategy: name,
+				Results:  results,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply post-filters per strategy
+	for i := range multiResults {
+		r := multiResults[i].Results
+		if cfg.verify {
+			r = verifyResults(db, r, query)
+		}
+		var ferr error
+		r, ferr = applyRegexPostFilters(db, r, cfg)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if cfg.proximityTopN > 0 {
+			r = proximityRerank(db, r, query, cfg.proximityTopN)
+		}
+		sortResults(r)
+		multiResults[i].Results = r
+	}
+
+	// Sort strategies by name for deterministic output
+	slices.SortFunc(multiResults, func(a, b MultiSearchResult) int {
+		return cmp.Compare(a.Strategy, b.Strategy)
+	})
+
+	return multiResults, nil
 }
 
 // collectChunkIDs reads T records for each trigram and returns the intersection of chunkid sets.
@@ -1632,20 +1885,20 @@ func intersectChunkSets(a, b map[uint64]bool) map[uint64]bool {
 	return result
 }
 
-// scoreAndResolve reads C records for candidate chunkids, scores them, and resolves to SearchResults.
-func (db *DB) scoreAndResolve(th TxnHolder, candidates map[uint64]bool, active []uint32, cfg searchConfig) []SearchResult {
+// candidateChunk holds pre-loaded chunk data for scoring. CRC: crc-DB.md | R284
+type candidateChunk struct {
+	chunkID     uint64
+	crec        CRecord
+	chunkCounts map[uint32]int
+	tokenCount  int
+}
+
+// collectCandidates reads C records for candidate chunkids, applies chunk filters,
+// and returns pre-loaded candidates. CRC: crc-DB.md | R284
+func (db *DB) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool, cfg searchConfig) []candidateChunk {
 	txn := th.Txn()
-	var results []SearchResult
-	activeSet := make(map[uint32]bool, len(active))
-	for _, t := range active {
-		activeSet[t] = true
-	}
-
-	// Cache F records to avoid re-reading for same file
-	frecCache := make(map[uint64]*FRecord)
-
-	for chunkid := range candidates {
-		// Read C record
+	var candidates []candidateChunk
+	for chunkid := range chunkIDs {
 		cVal, err := txn.Get(db.dbi, makeCKey(chunkid))
 		if err != nil {
 			continue
@@ -1659,34 +1912,43 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates map[uint64]bool, active [
 		crec.ChunkID = chunkid
 		crec.attach(db, txn)
 
-		// Apply ChunkFilters
 		if !applyChunkFilters(crec, cfg) {
 			continue
 		}
 
-		// Build chunkCounts map from C record trigrams (only active ones)
 		chunkCounts := make(map[uint32]int, len(crec.Trigrams))
 		for _, te := range crec.Trigrams {
 			chunkCounts[te.Trigram] = te.Count
 		}
 
-		// Token count from C record
-		tokenCount := len(crec.Tokens)
+		candidates = append(candidates, candidateChunk{
+			chunkID:     chunkid,
+			crec:        crec,
+			chunkCounts: chunkCounts,
+			tokenCount:  len(crec.Tokens),
+		})
+	}
+	return candidates
+}
 
-		// Score — when active is nil (e.g., regex search), assign 1.0
+// scoreAndResolve scores pre-loaded candidates and resolves to SearchResults.
+func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active []uint32, scoreFunc ScoreFunc, cfg searchConfig) []SearchResult {
+	txn := th.Txn()
+	var results []SearchResult
+	frecCache := make(map[uint64]*FRecord)
+
+	for _, cand := range candidates {
 		var score float64
 		if active == nil {
 			score = 1.0
 		} else {
-			score = cfg.scoreFunc(active, chunkCounts, tokenCount)
+			score = scoreFunc(active, cand.chunkCounts, cand.tokenCount)
 			if score <= 0 {
 				continue
 			}
 		}
 
-		// Resolve: for each fileid, find this chunk's location in the F record
-		for _, fid := range crec.FileIDs {
-			// File ID filter (WithOnly/WithExcept)
+		for _, fid := range cand.crec.FileIDs {
 			if cfg.onlyIDs != nil {
 				if _, ok := cfg.onlyIDs[fid]; !ok {
 					continue
@@ -1708,9 +1970,8 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates map[uint64]bool, active [
 				frecCache[fid] = frec
 			}
 
-			// Find the chunk's location in the F record
 			for _, fce := range frec.Chunks {
-				if fce.ChunkID == chunkid {
+				if fce.ChunkID == cand.chunkID {
 					path := ""
 					if len(frec.Names) > 0 {
 						path = frec.Names[0]
@@ -1878,6 +2139,139 @@ func verifyResultsRegex(db *DB, results []SearchResult, re *regexp.Regexp) []Sea
 	})
 }
 
+// CRC: crc-DB.md | R279, R280, R281, R282
+// proximityRerank reranks the top-N results by query term proximity in chunk text.
+func proximityRerank(db *DB, results []SearchResult, query string, topN int) []SearchResult {
+	if topN <= 0 || len(results) == 0 {
+		return results
+	}
+	terms := parseQueryTerms(query)
+	if len(terms) < 2 {
+		return results // proximity only meaningful for multi-term queries
+	}
+	lowerTerms := make([]string, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = strings.ToLower(t)
+	}
+
+	if topN > len(results) {
+		topN = len(results)
+	}
+	top := results[:topN]
+	rest := results[topN:]
+
+	for i := range top {
+		content := rechunkContent(db, top[i].Path, top[i].Range)
+		if content == nil {
+			continue
+		}
+		span := minTermSpan(bytes.ToLower(content), lowerTerms)
+		if span > 0 {
+			top[i].Score += 1.0 / (1.0 + float64(span))
+		}
+	}
+
+	sortResults(top)
+	return append(top, rest...)
+}
+
+// rechunkContent recovers a single chunk's content by re-chunking the file.
+func rechunkContent(db *DB, fpath, targetRange string) []byte {
+	fn := db.resolveChunkFunc(fileStrategy(db, fpath))
+	if fn == nil {
+		return nil
+	}
+	data, err := os.ReadFile(fpath)
+	if err != nil {
+		return nil
+	}
+	var result []byte
+	fn(fpath, data, func(c Chunk) bool {
+		if string(c.Range) == targetRange {
+			result = make([]byte, len(c.Content))
+			copy(result, c.Content)
+			return false
+		}
+		return true
+	})
+	return result
+}
+
+// fileStrategy looks up the chunking strategy for a file.
+func fileStrategy(db *DB, fpath string) string {
+	var strategy string
+	db.env.View(func(txn *lmdb.Txn) error {
+		_, frec, err := db.lookupFileByPath(txnWrap{txn}, fpath)
+		if err == nil {
+			strategy = frec.Strategy
+		}
+		return nil
+	})
+	return strategy
+}
+
+// minTermSpan finds the minimum window (in words) containing all terms.
+func minTermSpan(content []byte, terms []string) int {
+	// Tokenize content into word positions
+	words := bytes.Fields(content)
+	if len(words) == 0 {
+		return 0
+	}
+
+	// Find positions of each term
+	termPositions := make([][]int, len(terms))
+	allFound := true
+	for ti, term := range terms {
+		termBytes := []byte(term)
+		for wi, word := range words {
+			if bytes.Contains(word, termBytes) {
+				termPositions[ti] = append(termPositions[ti], wi)
+			}
+		}
+		if len(termPositions[ti]) == 0 {
+			allFound = false
+			break
+		}
+	}
+	if !allFound {
+		return 0
+	}
+
+	// Sliding window: find minimum span containing at least one position from each term
+	best := len(words)
+	// Use first term's positions as anchors
+	for _, anchor := range termPositions[0] {
+		lo, hi := anchor, anchor
+		for ti := 1; ti < len(terms); ti++ {
+			// Find closest position to the current window
+			closest := termPositions[ti][0]
+			for _, p := range termPositions[ti] {
+				if abs(p-anchor) < abs(closest-anchor) {
+					closest = p
+				}
+			}
+			if closest < lo {
+				lo = closest
+			}
+			if closest > hi {
+				hi = closest
+			}
+		}
+		span := hi - lo
+		if span < best {
+			best = span
+		}
+	}
+	return best
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // applyRegexPostFilters compiles regex filter and except-regex patterns from
 // the search config, then applies them as post-filters to the results.
 // R183, R184, R186, R187, R188, R191
@@ -1945,7 +2339,8 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 			candidates = allChunkIDs(th, db.dbi)
 		}
 
-		results = db.scoreAndResolve(th, candidates, nil, cfg)
+		cands := db.collectCandidates(th, candidates, cfg)
+		results = db.scoreAndResolve(th, cands, nil, cfg.scoreFunc, cfg)
 		return nil
 	})
 	if err != nil {
@@ -1958,6 +2353,10 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	results, err = applyRegexPostFilters(db, results, cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.proximityTopN > 0 {
+		results = proximityRerank(db, results, pattern, cfg.proximityTopN)
 	}
 
 	sortResults(results)

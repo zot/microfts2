@@ -31,6 +31,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-stale.md → `db.go`, `cmd/microfts/main.go`
 - [x] seq-append.md → `db.go`
 - [x] seq-chunks.md → `db.go`, `cmd/microfts/main.go`
+- [x] seq-search-multi.md → `db.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
