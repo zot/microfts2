@@ -1,6 +1,6 @@
 package microfts2
 
-// CRC: crc-DB.md | R220, R221, R222, R244, R245, R246, R247, R248, R249, R250, R251, R252, R264, R265, R266, R267
+// CRC: crc-DB.md | R220, R221, R222, R244, R245, R246, R247, R248, R249, R250, R251, R252, R264, R265, R266, R267, R295
 
 import (
 	"encoding/binary"
@@ -46,7 +46,7 @@ type CRecord struct {
 	Hash     [32]byte
 	Trigrams []TrigramEntry
 	Tokens   []TokenEntry
-	Attrs    map[string]string
+	Attrs    []Pair
 	FileIDs  []uint64
 	db       *DB
 	txn      *lmdb.Txn
@@ -122,6 +122,22 @@ func readString(buf []byte) (string, int) {
 	return s, n + int(l)
 }
 
+func putBytes(buf, b []byte) int {
+	n := binary.PutUvarint(buf, uint64(len(b)))
+	n += copy(buf[n:], b)
+	return n
+}
+
+func readBytes(buf []byte) ([]byte, int) {
+	l, n := binary.Uvarint(buf)
+	if n <= 0 || int(l) > len(buf)-n {
+		return nil, 0
+	}
+	b := make([]byte, l)
+	copy(b, buf[n:n+int(l)])
+	return b, n + int(l)
+}
+
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
@@ -135,8 +151,8 @@ func (c *CRecord) MarshalValue() []byte {
 		size += binary.MaxVarintLen64 + binary.MaxVarintLen64 + len(t.Token)
 	}
 	size += binary.MaxVarintLen64 // n-attrs
-	for k, v := range c.Attrs {
-		size += binary.MaxVarintLen64 + len(k) + binary.MaxVarintLen64 + len(v)
+	for _, p := range c.Attrs {
+		size += binary.MaxVarintLen64 + len(p.Key) + binary.MaxVarintLen64 + len(p.Value)
 	}
 	size += binary.MaxVarintLen64 // n-fileids
 	size += len(c.FileIDs) * binary.MaxVarintLen64
@@ -167,9 +183,9 @@ func (c *CRecord) MarshalValue() []byte {
 
 	// Attrs
 	off += putUvarint(buf[off:], uint64(len(c.Attrs)))
-	for k, v := range c.Attrs {
-		off += putString(buf[off:], k)
-		off += putString(buf[off:], v)
+	for _, p := range c.Attrs {
+		off += putBytes(buf[off:], p.Key)
+		off += putBytes(buf[off:], p.Value)
 	}
 
 	// FileIDs
@@ -243,20 +259,20 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 	}
 	off += n
 	if nAttr > 0 {
-		c.Attrs = make(map[string]string, nAttr)
+		c.Attrs = make([]Pair, nAttr)
 	}
 	for i := 0; i < int(nAttr); i++ {
-		k, n := readString(data[off:])
+		k, n := readBytes(data[off:])
 		if n == 0 {
 			return c, fmt.Errorf("CRecord: bad attr key")
 		}
 		off += n
-		v, n := readString(data[off:])
+		v, n := readBytes(data[off:])
 		if n == 0 {
 			return c, fmt.Errorf("CRecord: bad attr value")
 		}
 		off += n
-		c.Attrs[k] = v
+		c.Attrs[i] = Pair{Key: k, Value: v}
 	}
 
 	// FileIDs

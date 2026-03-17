@@ -26,13 +26,13 @@ CLI                                       DB
  |                              lo = max(0, targetIdx - before)
  |                              hi = min(len-1, targetIdx + after)
  |                                         |
- |                            resolve ChunkFunc for strategy
+ |                            resolve Chunker for strategy
  |                            if nil: return error
  |                                         |
  |                            read file from disk
  |                            if err: return error
  |                                         |
- |                            re-chunk file with ChunkFunc
+ |                            run Chunker.Chunks on file
  |                            collect chunks[lo..hi] with content
  |                            (copy content, match by index)
  |                                         |

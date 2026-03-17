@@ -73,6 +73,10 @@ func main() {
 		cmdChunkWordsOverlap()
 	case "chunk-markdown":
 		cmdChunkMarkdown()
+	case "chunk-bracket":
+		cmdChunkBracket()
+	case "chunk-indent":
+		cmdChunkIndent()
 	case "chunks":
 		cmdChunks()
 	default:
@@ -97,7 +101,8 @@ func extractRefreshFlag(args []string) (bool, []string) {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
 	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score, chunks,")
-	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown")
+	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown,")
+	fmt.Fprintln(os.Stderr, "          chunk-bracket, chunk-indent")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
 	os.Exit(1)
@@ -665,6 +670,63 @@ func cmdChunkMarkdown() {
 	}
 
 	microfts2.MarkdownChunkFunc(fs.Arg(0), data, func(c microfts2.Chunk) bool {
+		fmt.Printf("%s\t%s", c.Range, c.Content)
+		return true
+	})
+}
+
+// CRC: crc-BracketChunker.md | R323
+func cmdChunkBracket() {
+	fs := flag.CommandLine
+	lang := fs.String("lang", "", "language name (e.g. go, c, java, js, lisp, nginx, pascal, shell)")
+	fs.Parse(os.Args[1:])
+	if *lang == "" || fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "chunk-bracket: -lang and file required")
+		os.Exit(1)
+	}
+
+	cfg, ok := microfts2.LangByName(*lang)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "chunk-bracket: unknown language %q\n", *lang)
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fatal("chunk-bracket", err)
+	}
+
+	chunker := microfts2.BracketChunker(cfg)
+	chunker.Chunks(fs.Arg(0), data, func(c microfts2.Chunk) bool {
+		fmt.Printf("%s\t%s", c.Range, c.Content)
+		return true
+	})
+}
+
+// CRC: crc-IndentChunker.md | R334
+func cmdChunkIndent() {
+	fs := flag.CommandLine
+	lang := fs.String("lang", "", "language name (e.g. go, c — for comment/string config)")
+	tabwidth := fs.Int("tabwidth", 4, "tab width for indentation counting")
+	fs.Parse(os.Args[1:])
+	if *lang == "" || fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "chunk-indent: -lang and file required")
+		os.Exit(1)
+	}
+
+	cfg, ok := microfts2.LangByName(*lang)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "chunk-indent: unknown language %q\n", *lang)
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fatal("chunk-indent", err)
+	}
+
+	chunker := microfts2.IndentChunker(cfg, *tabwidth)
+	chunker.Chunks(fs.Arg(0), data, func(c microfts2.Chunk) bool {
 		fmt.Printf("%s\t%s", c.Range, c.Content)
 		return true
 	})

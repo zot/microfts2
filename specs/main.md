@@ -7,19 +7,27 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
 
 - add/remove chunking strategies dynamically (external commands or Go functions)
   - external: `AddStrategy(name, cmd)` — command is persisted in I record
-  - function: `AddStrategyFunc(name, fn)` — in-memory only, must re-register on Open
-  - `ChunkFunc` type: generator using Go iterator pattern
-    - `func(path string, content []byte, yield func(Chunk) bool) error`
-    - yields `Chunk{Range []byte, Content []byte}` structs
-    - both Range and Content are reusable buffers — the caller must copy before the next yield
+  - function: `AddChunker(name, c)` — in-memory only, must re-register on Open
+  - `Chunker` interface with two methods:
+    - `Chunks(path string, content []byte, yield func(Chunk) bool) error` — producer: yields chunks for indexing
+    - `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retriever: extracts a single chunk's content by its range label
+  - `Chunk` struct: `{ Range []byte, Content []byte, Attrs []Pair }`
+    - Range and Content are reusable buffers — the caller must copy before the next yield
     - Range has string semantics: opaque to microfts2, meaningful to the chunker and the user
     - Content is the text to be trigram-indexed for this chunk
-  - when AddFile/Reindex uses a func strategy, calls the function directly (no exec)
+    - Attrs is optional per-chunk metadata (e.g. timestamp, role). Opaque to microfts2 — stored in C records and exposed to ChunkFilters. nil means no attrs.
+  - `Pair` type: `{ Key []byte, Value []byte }` — opaque key-value pair. Allows duplicate keys. Mirrors the DB wire format.
+  - `ChunkFunc` type preserved for convenience: `func(path string, content []byte, yield func(Chunk) bool) error`
+  - `FuncChunker` adapter wraps a bare `ChunkFunc` into a `Chunker`:
+    - `Chunks` delegates to the wrapped function
+    - `ChunkText` re-runs the wrapped function and returns the first chunk whose Range matches the label
+  - `AddStrategyFunc(name, fn)` convenience: wraps fn in FuncChunker, calls AddChunker
+  - when AddFile/Reindex uses a func strategy, calls the Chunker directly (no exec)
   - I record stores name with empty cmd for func strategies (marks as registered)
   - built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap) register as func strategies
-- chunkers serve two purposes:
-  - indexing: produce chunks with content to trigram-index and a range label
-  - extraction: given the same file, re-chunk to retrieve a specific chunk's content by its range
+- chunkers serve two purposes via the Chunker interface:
+  - indexing (Chunks method): produce chunks with content to trigram-index, a range label, and optional attrs
+  - extraction (ChunkText method): given the same file, retrieve a specific chunk's content by its range label — may be optimized (e.g. a markdown chunker can jump to the right heading without full scan)
   - the range is an opaque string label: for text chunkers it's "startline-endline", for other formats it's whatever the chunker needs (e.g. "sheet1:A1-B20", "slides/3:para/7")
   - chunkers must be deterministic: same file produces same chunks with same ranges
 - files track their indexed chunking strategy
@@ -101,8 +109,8 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 - `H` [hash: 32] -> [chunkid: varint]
   Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
 
-- `C` [chunkid: varint] -> [hash: 32] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: str] [value: str]]... [n-fileids: varint] [fileid: varint]...
-  Per-chunk record. Contains everything known about the chunk: content hash, packed trigram+count pairs, packed token+count pairs, optional attributes (key-value pairs from chunkers implementing `HasAttrs`), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads.
+- `C` [chunkid: varint] -> [hash: 32] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [fileid: varint]...
+  Per-chunk record. Contains everything known about the chunk: content hash, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads.
 
 - `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [filecount: varint] [name: str]... [chunkcount: varint] [[chunkid: varint] [location: str]]... [tokencount: varint] [[token: str] [count: varint]]
   Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name). Multiple names handle duplicate/copied files mapping to the same fileid. Ordered chunk list with opaque location labels (range strings from chunker). Aggregated token bag (union of all chunk tokens with summed counts) for file-level scoring without reading every chunk's C record.
@@ -155,12 +163,12 @@ We add a file to the database with a chosen chunking strategy:
 - read file content, check utf8.Valid
 - check for existing F records via FinalKey — return ErrAlreadyIndexed if present
 - allocate fileid, create N records (filename key chain) and F record
-- chunk: call ChunkFunc generator, which yields {Range, Content} per chunk
-  - caller copies Range (as string) and Content before next yield
-  - for external command strategies, a wrapper ChunkFunc parses the command output
-- for each chunk: compute SHA-256 hash, extract trigrams on Content, tokenize Content
+- chunk: call Chunker.Chunks, which yields {Range, Content, Attrs} per chunk
+  - caller copies Range (as string), Content, and Attrs before next yield
+  - for external command strategies, RunChunkerFunc wraps the command as a Chunker
+- for each chunk: compute SHA-256 hash, extract trigrams on Content, tokenize Content, copy Attrs
   - look up H record by hash — if chunkid exists, add fileid to existing C record (dedup)
-  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + fileid), append chunkid to T records for each trigram, append chunkid to W records for each token
+  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + fileid), append chunkid to T records for each trigram, append chunkid to W records for each token
 - update F record: append (chunkid, location) pair, merge tokens into file-level token bag
 - batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record
 
@@ -248,7 +256,7 @@ Splits on blank lines and heading transitions:
 
 Range: `startline-endline` (1-based, inclusive). Content: the raw text of those lines (excluding boundary blank lines).
 
-Exported as `microfts2.MarkdownChunkFunc` for direct use as a `ChunkFunc`.
+Exported as `microfts2.MarkdownChunkFunc` for direct use as a `ChunkFunc` (wraps into a Chunker via FuncChunker when registered).
 
 # CLI
 
@@ -328,12 +336,23 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error
-func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error
+func (db *DB) AddChunker(name string, c Chunker) error
+func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error  // convenience: wraps fn in FuncChunker
 func (db *DB) RemoveStrategy(name string) error
 ```
 
-Chunk: `{ Range []byte, Content []byte }` — both reusable buffers, caller must copy before next yield
-ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern
+Chunker interface:
+```go
+type Chunker interface {
+    Chunks(path string, content []byte, yield func(Chunk) bool) error
+    ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)
+}
+```
+
+Chunk: `{ Range []byte, Content []byte, Attrs []Pair }` — Range and Content are reusable buffers, caller must copy before next yield. Attrs is optional per-chunk metadata, nil by default.
+Pair: `{ Key []byte, Value []byte }` — opaque key-value pair, allows duplicate keys
+ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern, convenience type
+FuncChunker: adapter that wraps a ChunkFunc into a Chunker (ChunkText re-runs and matches by range label)
 
 Options:
 - CaseInsensitive, Aliases — creation-time only
@@ -367,7 +386,7 @@ type CRecord struct {
     Hash     [32]byte
     Trigrams []TrigramEntry          // {Trigram uint32, Count int}
     Tokens   []TokenEntry            // {Token string, Count int}
-    Attrs    map[string]string       // from HasAttrs chunkers (timestamp, role, etc.)
+    Attrs    []Pair                  // opaque per-chunk metadata from chunker (timestamp, role, etc.)
     FileIDs  []uint64
     db       *DB                     // unexported: transaction context
     txn      *lmdb.Txn              // unexported: transaction context
@@ -411,8 +430,9 @@ type HRecord struct {
 }
 
 // Supporting types
-type TrigramEntry struct { Trigram uint32; Count int }
-type TokenEntry   struct { Token string; Count int }
+type Pair          struct { Key []byte; Value []byte }
+type TrigramEntry  struct { Trigram uint32; Count int }
+type TokenEntry    struct { Token string; Count int }
 type FileChunkEntry struct { ChunkID uint64; Location string }
 ```
 
@@ -443,8 +463,8 @@ WithChunkFilter(fn ChunkFilter) SearchOption
 ```
 
 Built-in chunk filters:
-- `WithAfter(t time.Time)` — keep chunks with `timestamp` attr >= t; falls back to file mod time via `chunk.FileRecord(fileid)` if no attr
-- `WithBefore(t time.Time)` — keep chunks with `timestamp` attr < t; same fallback
+- `WithAfter(t time.Time)` — keep chunks with `timestamp` attr (Pair key) >= t; falls back to file mod time via `chunk.FileRecord(fileid)` if no attr
+- `WithBefore(t time.Time)` — keep chunks with `timestamp` attr (Pair key) < t; same fallback
 
 Chunk filters compose: multiple `WithChunkFilter` calls accumulate (AND semantics). `WithAfter`/`WithBefore` are sugar that append chunk filters internally.
 
@@ -820,4 +840,147 @@ microfts chunks -db <path> [-before N] [-after N] <file> <range>
 ```
 
 Output: JSONL, one JSON object per line with `path`, `range`, `content`, `index` fields. Chunks are in positional order. `-before` and `-after` default to 0 (target only).
+
+# Per-Query Chunk Cache
+
+`ChunkCache` avoids redundant file reads and re-chunking during search result processing. Created at the start of a query, discarded when done. No LRU, no eviction — the working set of a single query is bounded.
+
+```go
+func (db *DB) NewChunkCache() *ChunkCache
+```
+
+## API
+
+```go
+// Drop-in replacement for DB.GetChunks — same signature, cached.
+func (cc *ChunkCache) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
+
+// Single chunk text by range label. Returns cached content if available.
+func (cc *ChunkCache) ChunkText(fpath, rangeLabel string) ([]byte, bool)
+```
+
+## Caching strategy
+
+- **First access to a file:** resolve path → fileid via N records (one View txn), read F record for chunk list and strategy, read file from disk into `data`, resolve Chunker.
+- **Lazy chunking (ChunkText path):** run `Chunker.Chunks()` but stop as soon as the target range is found. Each chunk encountered along the way is deep-copied and stored at its index. A `byRange` map indexes range label → position. Subsequent requests for already-seen ranges are a map lookup.
+- **Full chunking (GetChunks path):** run `Chunker.Chunks()` to completion, fill every slot. Subsequent `ChunkText` calls on any range in the file are map lookups.
+- **Copy semantics:** the cache deep-copies Range, Content, and Attrs on store. Downstream consumers get stable references.
+
+## Lifecycle
+
+- Created with `db.NewChunkCache()`.
+- No invalidation — the file state is assumed stable for the duration of a query.
+- Goes away when the caller drops the reference (normal GC).
+
+# Bracket Chunker
+
+A configurable chunker that groups program text into chunks based on bracket structure. Table-driven — adding a new language means adding a config entry, not code. Works for Go, Java, C, JavaScript, Lisp, nginx, Pascal, Julia, Bourne shell, and other bracket-delimited or word-delimited languages. Pascal and shell work because `begin`/`end` and `do`/`done` are brackets even though they don't look like traditional ones.
+
+## Token types
+
+The chunker scans content into a stream of tokens. Each token type is configurable per language:
+
+- **comment**: `//...`, `/* ... */`, `#...`, `--...`, etc. Comment syntax varies by language. Comments inside strings are not comments. Nesting rules are per-language (most don't nest).
+- **string**: `"..."`, `'...'`, `` `...` ``, `[[...]]`, etc. Escape characters are configurable. Strings inside comments are not strings.
+- **whitespace**: contiguous runs of space, newline, tab, carriage return, form feed. Always recognized, not configurable.
+- **bracket**: `(`, `)`, `{`, `}`, `<!--`, `-->`, `begin`, `end`, etc. Multi-character and word brackets are supported. Multi-bracket groups are allowed: `if`..`then`..`else`..`end`, `while`..`do`..`done`. Each group defines its opener(s), separator(s), and closer.
+- **text**: any other contiguous non-whitespace characters.
+
+## Chunk definition
+
+A chunk is a **group** or a **paragraph**:
+
+- **Group**: line-oriented. A group starts at the line containing an open bracket (not inside a comment or string) and continues line by line until all brackets are closed. Depth is tracked across all bracket types — `func f() {` is one group start because the parens open and close mid-line but the brace keeps depth above zero at end of line. Groups on a single line (e.g. `f()`) are not chunks. Leading comment/text lines immediately before the group (no blank line separating them) attach to the group.
+- **Paragraph**: a sequence of lines not inside a group, terminated by a blank line or the start of a group. Top-level text between groups.
+
+Range labels are `startline-endline` (1-based), consistent with other chunkers.
+
+## Language configuration
+
+```go
+// BracketLang defines the lexical rules for one language.
+type BracketLang struct {
+    LineComments  []string       // e.g. "//", "#", "--"
+    BlockComments [][2]string    // e.g. {{"/*", "*/"}, {"<!--", "-->"}}
+    StringDelims  []StringDelim  // e.g. {`"`, `\`}, {`'`, `\`}, {"`", ""}
+    Brackets      []BracketGroup // open/separator/close sets
+}
+
+// StringDelim defines a string delimiter and its escape character.
+type StringDelim struct {
+    Open   string // opening delimiter
+    Close  string // closing delimiter (same as Open for symmetric quotes)
+    Escape string // escape character (empty = no escaping, e.g. Go raw strings)
+}
+
+// BracketGroup defines one set of matching brackets.
+// Separators are mid-group markers (e.g. "else" between "if"/"end").
+type BracketGroup struct {
+    Open       []string // openers: e.g. ["{"], ["if","while","for"]
+    Separators []string // optional: e.g. ["else","elif","then"]
+    Close      []string // closers: e.g. ["}"], ["end","done","fi"]
+}
+```
+
+Built-in language configs are provided as package-level variables (e.g. `LangGo`, `LangC`, `LangPython`). Users can construct custom `BracketLang` values.
+
+## Library API
+
+```go
+// BracketChunker returns a Chunker for the given language config.
+func BracketChunker(lang BracketLang) Chunker
+```
+
+Returns a full `Chunker` (both `Chunks` and `ChunkText`).
+
+## CLI
+
+```
+microfts chunk-bracket -lang <name> <file>
+```
+
+Output: one chunk per stdout line as `range\tcontent` (tab-separated), matching the external chunker protocol. Available language names come from the built-in configs.
+
+# Indent Chunker
+
+A chunker for languages where indentation defines scope. Similar to the bracket chunker — groups and paragraphs — but scope is determined by indentation level rather than bracket characters.
+
+## Languages
+
+Python, YAML, and potentially other indentation-scoped formats (Haskell, CoffeeScript, Nim, Makefiles).
+
+## Token types
+
+Same as bracket chunker (comment, string, whitespace, text) minus brackets. Comment and string syntax is still configurable per language, using the same `BracketLang` structure (with empty `Brackets`).
+
+## Scope detection
+
+- **Indent increase**: a line indented further than the previous non-blank line opens a new scope.
+- **Dedent**: a line at a lower indentation level than the current scope closes the scope.
+- **Tabs vs spaces**: configurable per language (tab width for column counting). Mixed indentation uses the configured tab width.
+
+## Chunk definition
+
+- **Group**: a line that introduces a deeper indentation level (the "header" line), plus all following lines at that deeper level or deeper, until dedent. Leading comment lines attach to the group (same rule as bracket chunker).
+- **Paragraph**: consecutive lines at the same indentation level (the top level or between groups), terminated by a blank line or the start of a group.
+
+Range labels are `startline-endline` (1-based).
+
+## Library API
+
+```go
+// IndentChunker returns a Chunker for indentation-scoped languages.
+// tabWidth controls how tabs are counted for indentation level (0 = tabs are one column).
+func IndentChunker(lang BracketLang, tabWidth int) Chunker
+```
+
+Reuses `BracketLang` for comment/string config (Brackets field ignored).
+
+## CLI
+
+```
+microfts chunk-indent -lang <name> [-tabwidth N] <file>
+```
+
+Output: same `range\tcontent` format.
 

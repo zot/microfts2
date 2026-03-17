@@ -1595,3 +1595,85 @@ func TestProximityRerank(t *testing.T) {
 		t.Errorf("expected close.txt first, got %s", sr.Results[0].Path)
 	}
 }
+
+// timestampChunkFunc wraps LineChunkFunc and attaches a timestamp attr to each chunk.
+func timestampChunkFunc(nanos int64) ChunkFunc {
+	return func(path string, content []byte, yield func(Chunk) bool) error {
+		return LineChunkFunc(path, content, func(c Chunk) bool {
+			c.Attrs = []Pair{{Key: []byte("timestamp"), Value: []byte(fmt.Sprintf("%d", nanos))}}
+			return yield(c)
+		})
+	}
+}
+
+func TestWithAfterBefore(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Register a chunker that stamps chunks at t=1000 nanos.
+	db.AddStrategyFunc("ts1000", timestampChunkFunc(1000))
+
+	f := writeTestFile(t, dir, "test.txt", "alpha bravo charlie\n")
+	db.AddFile(f, "ts1000")
+
+	// WithAfter(t=500) — chunk at 1000 should pass.
+	sr, err := db.Search("alpha", WithAfter(time.Unix(0, 500)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Fatalf("WithAfter(500): expected 1 result, got %d", len(sr.Results))
+	}
+
+	// WithAfter(t=2000) — chunk at 1000 should be filtered out.
+	sr, err = db.Search("alpha", WithAfter(time.Unix(0, 2000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 0 {
+		t.Fatalf("WithAfter(2000): expected 0 results, got %d", len(sr.Results))
+	}
+
+	// WithBefore(t=2000) — chunk at 1000 should pass.
+	sr, err = db.Search("alpha", WithBefore(time.Unix(0, 2000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Fatalf("WithBefore(2000): expected 1 result, got %d", len(sr.Results))
+	}
+
+	// WithBefore(t=500) — chunk at 1000 should be filtered out.
+	sr, err = db.Search("alpha", WithBefore(time.Unix(0, 500)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 0 {
+		t.Fatalf("WithBefore(500): expected 0 results, got %d", len(sr.Results))
+	}
+}
+
+func TestWithAfterFallsBackToModTime(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Use plain line chunker — no timestamp attr. Falls back to file mod time.
+	f := writeTestFile(t, dir, "test.txt", "delta echo foxtrot\n")
+	db.AddFile(f, "line")
+
+	// File mod time is recent — WithAfter(epoch) should pass.
+	sr, err := db.Search("delta", WithAfter(time.Unix(0, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Fatalf("WithAfter(epoch): expected 1 result, got %d", len(sr.Results))
+	}
+
+	// WithAfter(far future) should filter out.
+	sr, err = db.Search("delta", WithAfter(time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 0 {
+		t.Fatalf("WithAfter(future): expected 0 results, got %d", len(sr.Results))
+	}
+}

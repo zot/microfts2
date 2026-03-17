@@ -18,21 +18,21 @@ DB                      Chunker       Trigrams      KeyChain
  | <-- N key/value pairs --------------------------------|
  |  store N records (filename key chain) |            |
  |                                       |            |
- |  resolve ChunkFunc for strategy:      |            |
- |    if funcStrategy[name] exists:      |            |
- |      fn = funcStrategy[name]          |            |
+ |  resolve Chunker for strategy:        |            |
+ |    if chunkers[name] exists:          |            |
+ |      c = chunkers[name]              |            |
  |    else:                              |            |
- |-- RunChunkerFunc(cmd) -> fn --------> |            |
+ |-- RunChunkerFunc(cmd) -> c ---------> |            |
  |                                       |            |
- |  call fn(path, content, yield):       |            |
- |    for each yielded Chunk{Range, Content}:         |
+ |  call c.Chunks(path, content, yield): |            |
+ |    for each yielded Chunk{Range, Content, Attrs}:  |
  |      copy Range as string             |            |
  |      validate UTF-8 on Content        |            |
  |      compute SHA-256 of Content       |            |
  |-- TrigramCounts(Content) -------->    |            |
  | <-- map[uint32]int ---------------    |            |
  |      tokenize Content, count tokens   |            |
- |      extract attrs (if HasAttrs)      |            |
+ |      copy Attrs ([]Pair)              |            |
  |                                       |            |
  |      check H[hash] for dedup:         |            |
  |        if exists -> chunkid (dedup hit):           |

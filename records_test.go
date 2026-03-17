@@ -15,9 +15,9 @@ func TestCRecordRoundtrip(t *testing.T) {
 			{Token: "hello", Count: 5},
 			{Token: "world", Count: 2},
 		},
-		Attrs: map[string]string{
-			"timestamp": "1709900000",
-			"role":      "user",
+		Attrs: []Pair{
+			{Key: []byte("timestamp"), Value: []byte("1709900000")},
+			{Key: []byte("role"), Value: []byte("user")},
 		},
 		FileIDs: []uint64{1, 7, 42},
 	}
@@ -51,9 +51,9 @@ func TestCRecordRoundtrip(t *testing.T) {
 	if len(got.Attrs) != len(orig.Attrs) {
 		t.Fatalf("Attrs len: got %d, want %d", len(got.Attrs), len(orig.Attrs))
 	}
-	for k, v := range orig.Attrs {
-		if got.Attrs[k] != v {
-			t.Errorf("Attr[%s]: got %q, want %q", k, got.Attrs[k], v)
+	for i, p := range orig.Attrs {
+		if string(got.Attrs[i].Key) != string(p.Key) || string(got.Attrs[i].Value) != string(p.Value) {
+			t.Errorf("Attr[%d]: got %q=%q, want %q=%q", i, got.Attrs[i].Key, got.Attrs[i].Value, p.Key, p.Value)
 		}
 	}
 	if len(got.FileIDs) != len(orig.FileIDs) {

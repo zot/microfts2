@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"regexp/syntax"
@@ -39,20 +40,8 @@ type collectedChunk struct {
 	hash      [32]byte
 	triCounts map[uint32]int
 	tokens    []TokenEntry
+	attrs     []Pair
 }
-
-// Chunk is a single chunk yielded by a ChunkFunc generator.
-// Range is an opaque label (e.g. "1-10" for lines); Content is the chunk text.
-// Both slices may be reused between yields — caller must copy if retaining.
-type Chunk struct {
-	Range   []byte
-	Content []byte
-}
-
-// ChunkFunc is a generator that yields chunks for a file.
-// It receives the file path and raw content, and calls yield for each chunk.
-// If yield returns false, the generator should stop early.
-type ChunkFunc func(path string, content []byte, yield func(Chunk) bool) error
 
 type DB struct {
 	env            *lmdb.Env
@@ -60,7 +49,7 @@ type DB struct {
 	dbName         string
 	settings       Settings
 	trigrams       *Trigrams
-	funcStrategies map[string]ChunkFunc // in-memory Go function strategies
+	chunkers map[string]Chunker // in-memory Go chunker strategies
 }
 
 // Settings holds the in-memory representation of I records.
@@ -143,6 +132,42 @@ type ChunkFilter func(chunk CRecord) bool
 // WithChunkFilter adds a chunk filter. Multiple calls accumulate (AND semantics).
 func WithChunkFilter(fn ChunkFilter) SearchOption {
 	return func(c *searchConfig) { c.chunkFilters = append(c.chunkFilters, fn) }
+}
+
+// WithAfter keeps chunks with timestamp >= t. Checks "timestamp" attr first
+// (parsed as Unix nanos); falls back to file mod time from F record.
+// CRC: crc-DB.md | R258
+func WithAfter(t time.Time) SearchOption {
+	nanos := t.UnixNano()
+	return WithChunkFilter(func(chunk CRecord) bool {
+		return chunkTimestamp(chunk) >= nanos
+	})
+}
+
+// WithBefore keeps chunks with timestamp < t. Same fallback as WithAfter.
+// CRC: crc-DB.md | R259
+func WithBefore(t time.Time) SearchOption {
+	nanos := t.UnixNano()
+	return WithChunkFilter(func(chunk CRecord) bool {
+		return chunkTimestamp(chunk) < nanos
+	})
+}
+
+// chunkTimestamp extracts a timestamp from a chunk's attrs or falls back to file mod time.
+// Returns Unix nanoseconds.
+func chunkTimestamp(chunk CRecord) int64 {
+	if v, ok := PairGet(chunk.Attrs, "timestamp"); ok {
+		if n, err := strconv.ParseInt(string(v), 10, 64); err == nil {
+			return n
+		}
+	}
+	// Fall back to file mod time from first associated file.
+	if len(chunk.FileIDs) > 0 {
+		if frec, err := chunk.FileRecord(chunk.FileIDs[0]); err == nil {
+			return frec.ModTime
+		}
+	}
+	return 0
 }
 
 // WithCoverage uses coverage scoring (default): matching / total active query trigrams.
@@ -863,7 +888,7 @@ func Create(path string, opts Options) (*DB, error) {
 		dbName:         dbName,
 		trigrams:       NewTrigrams(opts.CaseInsensitive, opts.Aliases),
 		settings:       settings,
-		funcStrategies: make(map[string]ChunkFunc),
+		chunkers: make(map[string]Chunker),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
@@ -921,7 +946,7 @@ func Open(path string, opts Options) (*DB, error) {
 	db := &DB{
 		env:            env,
 		dbName:         dbName,
-		funcStrategies: make(map[string]ChunkFunc),
+		chunkers: make(map[string]Chunker),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
@@ -1020,25 +1045,27 @@ func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, i
 		return nil, nil, 0, [32]byte{}, err
 	}
 
-	chunkFn := db.resolveChunkFunc(strategy)
-	if chunkFn == nil {
-		return nil, nil, 0, [32]byte{}, fmt.Errorf("func strategy %q not registered (re-register with AddStrategyFunc after Open)", strategy)
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
+		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
 	}
 
 	var chunks []collectedChunk
 	var utf8Err error
-	if err := chunkFn(fpath, data, func(c Chunk) bool {
+	if err := chunker.Chunks(fpath, data, func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
 		}
 		h := sha256.Sum256(c.Content)
-		chunks = append(chunks, collectedChunk{
+		cc := collectedChunk{
 			rangeStr:  string(c.Range),
 			hash:      h,
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
-		})
+		}
+		cc.attrs = copyPairs(c.Attrs)
+		chunks = append(chunks, cc)
 		return true
 	}); err != nil {
 		return nil, nil, 0, [32]byte{}, err
@@ -1069,16 +1096,16 @@ func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
 	return fileid, data, err
 }
 
-// resolveChunkFunc returns the ChunkFunc for a strategy, or nil if not available.
-func (db *DB) resolveChunkFunc(strategy string) ChunkFunc {
-	if fn, ok := db.funcStrategies[strategy]; ok {
-		return fn
+// resolveChunker returns the Chunker for a strategy, or nil if not available.
+func (db *DB) resolveChunker(strategy string) Chunker {
+	if c, ok := db.chunkers[strategy]; ok {
+		return c
 	}
 	cmd := db.settings.ChunkingStrategies[strategy]
 	if cmd == "" {
 		return nil
 	}
-	return RunChunkerFunc(cmd)
+	return FuncChunker{Fn: RunChunkerFunc(cmd)}
 }
 
 // newChunkTW holds T/W batch data for a newly created chunk.
@@ -1142,6 +1169,7 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		Hash:     ch.hash,
 		Trigrams: triEntries,
 		Tokens:   ch.tokens,
+		Attrs:    ch.attrs,
 		FileIDs:  []uint64{fileid},
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
@@ -1215,6 +1243,7 @@ func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid
 		Hash:     ch.hash,
 		Trigrams: triEntries,
 		Tokens:   ch.tokens,
+		Attrs:    ch.attrs,
 		FileIDs:  []uint64{fileid},
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
@@ -1519,9 +1548,9 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	}
 
 	// Resolve chunk function
-	chunkFn := db.resolveChunkFunc(strategy)
-	if chunkFn == nil {
-		return fmt.Errorf("func strategy %q not registered", strategy)
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
+		return fmt.Errorf("chunker strategy %q not registered", strategy)
 	}
 
 	// Read existing F record
@@ -1543,18 +1572,20 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	// Chunk the appended content
 	var newChunks []collectedChunk
 	var utf8Err error
-	if err := chunkFn(filename, content, func(c Chunk) bool {
+	if err := chunker.Chunks(filename, content, func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
 			return false
 		}
 		h := sha256.Sum256(c.Content)
-		newChunks = append(newChunks, collectedChunk{
+		cc := collectedChunk{
 			rangeStr:  string(c.Range),
 			hash:      h,
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
-		})
+		}
+		cc.attrs = copyPairs(c.Attrs)
+		newChunks = append(newChunks, cc)
 		return true
 	}); err != nil {
 		return err
@@ -2088,8 +2119,8 @@ func rechunkForVerify(db *DB, fpath string) map[string][]byte {
 		return nil
 	}
 
-	chunkFn := db.resolveChunkFunc(strategy)
-	if chunkFn == nil {
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
 		return nil
 	}
 
@@ -2099,7 +2130,7 @@ func rechunkForVerify(db *DB, fpath string) map[string][]byte {
 	}
 
 	chunks := make(map[string][]byte)
-	chunkFn(fpath, data, func(c Chunk) bool {
+	chunker.Chunks(fpath, data, func(c Chunk) bool {
 		content := make([]byte, len(c.Content))
 		copy(content, c.Content)
 		chunks[string(c.Range)] = content
@@ -2175,26 +2206,21 @@ func proximityRerank(db *DB, results []SearchResult, query string, topN int) []S
 	return append(top, rest...)
 }
 
-// rechunkContent recovers a single chunk's content by re-chunking the file.
+// rechunkContent recovers a single chunk's content using ChunkText.
 func rechunkContent(db *DB, fpath, targetRange string) []byte {
-	fn := db.resolveChunkFunc(fileStrategy(db, fpath))
-	if fn == nil {
+	chunker := db.resolveChunker(fileStrategy(db, fpath))
+	if chunker == nil {
 		return nil
 	}
 	data, err := os.ReadFile(fpath)
 	if err != nil {
 		return nil
 	}
-	var result []byte
-	fn(fpath, data, func(c Chunk) bool {
-		if string(c.Range) == targetRange {
-			result = make([]byte, len(c.Content))
-			copy(result, c.Content)
-			return false
-		}
-		return true
-	})
-	return result
+	content, ok := chunker.ChunkText(fpath, data, targetRange)
+	if !ok {
+		return nil
+	}
+	return content
 }
 
 // fileStrategy looks up the chunking strategy for a file.
@@ -2504,8 +2530,8 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	hi := min(len(frec.Chunks)-1, targetIdx+after)
 
 	// Re-chunk the file to recover content.
-	chunkFn := db.resolveChunkFunc(frec.Strategy)
-	if chunkFn == nil {
+	chunker := db.resolveChunker(frec.Strategy)
+	if chunker == nil {
 		return nil, fmt.Errorf("chunking strategy %q not registered", frec.Strategy)
 	}
 
@@ -2516,7 +2542,7 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 
 	var results []ChunkResult
 	idx := 0
-	chunkFn(fpath, data, func(c Chunk) bool {
+	chunker.Chunks(fpath, data, func(c Chunk) bool {
 		if idx >= lo && idx <= hi {
 			results = append(results, ChunkResult{
 				Path:    fpath,
@@ -2621,18 +2647,23 @@ func (db *DB) AddStrategy(name, cmd string) error {
 	})
 }
 
-// CRC: crc-DB.md | R116, R117
-func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
-	db.funcStrategies[name] = fn
-	db.settings.ChunkingStrategies[name] = "" // empty cmd marks func strategy
+// CRC: crc-DB.md | R293
+func (db *DB) AddChunker(name string, c Chunker) error {
+	db.chunkers[name] = c
+	db.settings.ChunkingStrategies[name] = "" // empty cmd marks chunker strategy
 	return db.env.Update(func(txn *lmdb.Txn) error {
 		return iPut(txnWrap{txn}, db.dbi, "strategy:"+name, "")
 	})
 }
 
+// CRC: crc-DB.md | R294
+func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
+	return db.AddChunker(name, FuncChunker{Fn: fn})
+}
+
 func (db *DB) RemoveStrategy(name string) error {
 	delete(db.settings.ChunkingStrategies, name)
-	delete(db.funcStrategies, name)
+	delete(db.chunkers, name)
 	return db.env.Update(func(txn *lmdb.Txn) error {
 		return iDel(txnWrap{txn}, db.dbi, "strategy:"+name)
 	})

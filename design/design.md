@@ -22,6 +22,10 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] crc-Chunker.md → `chunker.go`
 - [x] crc-KeyChain.md → `keychain.go`
 - [x] crc-CLI.md → `cmd/microfts/main.go`
+- [x] crc-ChunkCache.md → `cache.go`
+
+- [x] crc-BracketChunker.md → `bracket_chunker.go`
+- [x] crc-IndentChunker.md → `indent_chunker.go`
 
 ### Sequences
 - [x] seq-init.md → `db.go`
@@ -32,6 +36,9 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-append.md → `db.go`
 - [x] seq-chunks.md → `db.go`, `cmd/microfts/main.go`
 - [x] seq-search-multi.md → `db.go`
+- [x] seq-cache.md → `cache.go`
+- [x] seq-bracket-chunk.md → `bracket_chunker.go`
+- [x] seq-indent-chunk.md → `indent_chunker.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
@@ -53,5 +60,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O8: Packed trigram functions removed (A record eliminated)
 - [ ] A3: Removed requirements uncovered: R7, R8, R14, R15, R16, R19, R21, R28, R30, R36, R48, R54, R75, R76, R83, R95, R102, R109, R123, R138, R145, R148, R149, R154, R155 — old two-tree layout, forward/reverse index, per-trigram C records, N record JSON
 - [ ] O9: No test for WRecord encode/decode roundtrip
-- [ ] O10: No test for WithAfter/WithBefore date filtering (needs HasAttrs chunker)
+- [x] O10: No test for WithAfter/WithBefore date filtering (needs chunker producing Attrs with timestamp)
 - [x] O11: Implementation: db.go needs full rewrite for new record layout (single subdatabase, chunk dedup, record structs, T/W records, ChunkFilter)

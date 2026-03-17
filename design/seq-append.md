@@ -11,9 +11,9 @@ DB                                    Trigrams
  |    -> existingChunkCount             |
  |    -> error if fileid not found      |
  |                                      |
- |  resolve ChunkFunc for strategy      |
+ |  resolve Chunker for strategy        |
  |                                      |
- |  call fn(path, content, yield):      |
+ |  call c.Chunks(path, content, yield):|
  |    for each yielded Chunk:           |
  |      copy Range as string            |
  |      validate UTF-8 on Content       |
@@ -21,7 +21,7 @@ DB                                    Trigrams
  |-- TrigramCounts(Content) ----------> |
  | <-- map[uint32]int ----------------- |
  |      tokenize Content, count tokens  |
- |      extract attrs (if HasAttrs)     |
+ |      copy Attrs ([]Pair)             |
  |                                      |
  |  if baseLine > 0:                    |
  |    for each new chunk range:         |
