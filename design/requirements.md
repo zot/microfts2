@@ -543,3 +543,17 @@
 - **R333:** `IndentChunker(lang BracketLang, tabWidth int) Chunker` — returns a full Chunker
 - **R334:** CLI subcommand: `microfts chunk-indent -lang <name> [-tabwidth N] <file>` — outputs `range\tcontent` lines
 - **R335:** (inferred) Comment and string handling required to avoid false scope detection inside literals
+
+## Feature: Fuzzy Search
+**Source:** specs/main.md
+
+- **R336:** `WithFuzzy() SearchOption` — enables OR semantics at the term level for candidate collection
+- **R337:** Fuzzy candidate set is the union of all terms' trigram candidate sets (a chunk matches if it contains any term's trigrams)
+- **R338:** Within each term, trigram intersection is still AND (all trigrams of the term must match the chunk)
+- **R339:** Default fuzzy scoring: score = (terms matched) / (total query terms), range [0.0, 1.0]
+- **R340:** A term matches a chunk if its trigram set intersects the chunk's trigram counts (all trigram counts > 0)
+- **R341:** Results sorted by score descending; custom `ScoreFunc` via `WithScoring` overrides the default fuzzy scoring
+- **R342:** Composable with all existing search options: `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`
+- **R343:** Works with `SearchMulti` — fuzzy candidate collection shared, per-strategy scoring independent
+- **R344:** CLI flag: `microfts search -db <path> -fuzzy <query>` — composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`
+- **R345:** (inferred) When `WithFuzzy` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default fuzzy term-match scoring is bypassed

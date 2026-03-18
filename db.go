@@ -122,6 +122,7 @@ type searchConfig struct {
 	exceptRegexFilters []string            // subtract: any match rejects chunk R184
 	chunkFilters       []ChunkFilter       // AND: all must pass for chunk to be included R255-R257
 	proximityTopN      int                 // if > 0, rerank top-N by proximity R279
+	fuzzy              bool                // R336: OR semantics at term level
 }
 
 // ChunkFilter receives a CRecord during candidate evaluation.
@@ -201,6 +202,13 @@ func WithExcept(ids map[uint64]struct{}) SearchOption {
 	return func(c *searchConfig) { c.exceptIDs = ids }
 }
 
+// CRC: crc-DB.md | Seq: seq-fuzzy-search.md | R336
+// WithFuzzy enables OR semantics at the term level: a chunk matches if it
+// contains any query term's trigrams. Default scoring: terms matched / total terms.
+func WithFuzzy() SearchOption {
+	return func(c *searchConfig) { c.fuzzy = true }
+}
+
 // WithVerify enables post-filter verification: after trigram intersection,
 // read chunk text from disk and verify each query term appears as a
 // case-insensitive substring. Eliminates trigram false positives.
@@ -268,7 +276,7 @@ func FilterBestN(n int) TrigramFilter {
 }
 
 func defaultSearchConfig() searchConfig {
-	return searchConfig{scoreFunc: scoreCoverage}
+	return searchConfig{} // scoreFunc nil = use default (coverage, or fuzzy term score)
 }
 
 func applySearchOpts(opts []SearchOption) searchConfig {
@@ -311,6 +319,34 @@ func scoreDensity(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkToken
 		}
 	}
 	return float64(totalStrength) / float64(chunkTokenCount)
+}
+
+// CRC: crc-DB.md | Seq: seq-fuzzy-search.md | R339, R340
+// fuzzyTermScore returns a ScoreFunc that scores by term-level matching.
+// Score = (terms whose trigrams all match) / (total terms). Range [0.0, 1.0].
+func fuzzyTermScore(termTrigrams [][]uint32) ScoreFunc {
+	return func(_ []uint32, chunkCounts map[uint32]int, _ int) float64 {
+		if len(termTrigrams) == 0 {
+			return 0
+		}
+		matched := 0
+		for _, tris := range termTrigrams {
+			if len(tris) == 0 {
+				continue
+			}
+			allMatch := true
+			for _, t := range tris {
+				if chunkCounts[t] <= 0 {
+					allMatch = false
+					break
+				}
+			}
+			if allMatch {
+				matched++
+			}
+		}
+		return float64(matched) / float64(len(termTrigrams))
+	}
 }
 
 // CRC: crc-DB.md | R269, R270
@@ -1700,8 +1736,8 @@ func (db *DB) searchPrepare(terms []string) (termTrigrams [][]uint32, queryTrigr
 	return
 }
 
-// searchCollect selects trigrams, reads T records, intersects per-term candidate sets,
-// and loads C records. Returns candidates and active trigrams.
+// searchCollect selects trigrams, reads T records, combines per-term candidate sets
+// (intersect for AND, union for fuzzy OR), and loads C records. Returns candidates and active trigrams.
 func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32, cfg searchConfig) ([]candidateChunk, []uint32) {
 	active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
 	if len(active) == 0 {
@@ -1726,10 +1762,15 @@ func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams
 		termChunks := collectChunkIDs(th, db.dbi, termActive)
 		if candidateChunkIDs == nil {
 			candidateChunkIDs = termChunks
+		} else if cfg.fuzzy {
+			// R337: union across terms for fuzzy search
+			for id := range termChunks {
+				candidateChunkIDs[id] = true
+			}
 		} else {
 			candidateChunkIDs = intersectChunkSets(candidateChunkIDs, termChunks)
 		}
-		if len(candidateChunkIDs) == 0 {
+		if !cfg.fuzzy && len(candidateChunkIDs) == 0 {
 			return nil, nil
 		}
 	}
@@ -1751,6 +1792,15 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	termTrigrams, queryTrigrams := db.searchPrepare(terms)
 	if len(queryTrigrams) == 0 {
 		return &SearchResults{Status: IndexStatus{Built: true}}, nil
+	}
+
+	// R339, R345: default fuzzy scoring when no custom ScoreFunc
+	if cfg.scoreFunc == nil {
+		if cfg.fuzzy {
+			cfg.scoreFunc = fuzzyTermScore(termTrigrams)
+		} else {
+			cfg.scoreFunc = scoreCoverage
+		}
 	}
 
 	var results []SearchResult
@@ -2343,6 +2393,9 @@ func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]
 // SearchRegex searches using a regex pattern against the full trigram index.
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error) {
 	cfg := applySearchOpts(opts)
+	if cfg.scoreFunc == nil {
+		cfg.scoreFunc = scoreCoverage
+	}
 
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {

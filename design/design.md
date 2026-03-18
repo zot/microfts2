@@ -39,6 +39,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-cache.md → `cache.go`
 - [x] seq-bracket-chunk.md → `bracket_chunker.go`
 - [x] seq-indent-chunk.md → `indent_chunker.go`
+- [x] seq-fuzzy-search.md → `db.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`

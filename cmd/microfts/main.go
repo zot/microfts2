@@ -188,6 +188,7 @@ func cmdSearch() {
 	contains := fs.String("contains", "", "FTS text query (composes with --regex)")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	verify := fs.Bool("verify", false, "post-filter: verify query terms in chunk text")
+	fuzzy := fs.Bool("fuzzy", false, "OR semantics: match any query term, rank by term coverage")
 	var filterRegex, exceptRegex stringSlice
 	fs.Var(&filterRegex, "filter-regex", "AND post-filter regex (repeatable)")
 	fs.Var(&exceptRegex, "except-regex", "subtract post-filter regex (repeatable)")
@@ -232,6 +233,9 @@ func cmdSearch() {
 	}
 	if len(exceptRegex) > 0 {
 		opts = append(opts, microfts2.WithExceptRegex(exceptRegex...))
+	}
+	if *fuzzy {
+		opts = append(opts, microfts2.WithFuzzy())
 	}
 
 	var sr *microfts2.SearchResults

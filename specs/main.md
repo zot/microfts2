@@ -984,3 +984,47 @@ microfts chunk-indent -lang <name> [-tabwidth N] <file>
 
 Output: same `range\tcontent` format.
 
+# Fuzzy Search
+
+OR-semantics search mode for exploratory queries. When the user isn't sure of exact phrasing, fuzzy search returns chunks matching *any* query term, ranked by how many terms match.
+
+## Semantics
+
+- **AND mode (default):** candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms.
+- **Fuzzy mode:** candidate set is the union of all terms' trigram candidate sets — a chunk matches if it contains any query term's trigrams.
+
+Within each term, trigram intersection is still AND (all trigrams of that term must match). The OR is at the term level, not the trigram level.
+
+## Scoring
+
+Score = (terms matched) / (total query terms). Range [0.0, 1.0]. A term matches if its trigram set intersects the chunk's trigrams. Results sorted by score descending.
+
+This is the default fuzzy scoring. Custom `ScoreFunc` can be used instead via `WithScoring`.
+
+## Library API
+
+```go
+func WithFuzzy() SearchOption
+```
+
+Composable with all existing search options — `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`. Also works with `SearchMulti` (fuzzy candidate collection, per-strategy scoring).
+
+## CLI
+
+```
+microfts search -db <path> -fuzzy <query>
+```
+
+The `-fuzzy` flag enables OR semantics. Composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`.
+
+## Use case: search escalation
+
+```go
+results, _ := db.Search(query)
+if len(results.Results) == 0 {
+    results, _ = db.Search(query, microfts2.WithFuzzy())
+}
+```
+
+Exact search first for precision. If no results, fall back to fuzzy for recall.
+

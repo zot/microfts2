@@ -1,5 +1,5 @@
 # CLI
-**Requirements:** R1, R34, R39, R41, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74, R89, R100, R108, R126, R132, R133, R175, R192, R193, R194, R195, R204, R205, R207, R208, R209, R210, R211, R212, R219
+**Requirements:** R1, R34, R39, R41, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74, R89, R100, R108, R126, R132, R133, R175, R192, R193, R194, R195, R204, R205, R207, R208, R209, R210, R211, R212, R219, R344
 
 Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB, formats output.
 

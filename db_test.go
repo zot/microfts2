@@ -1652,6 +1652,112 @@ func TestWithAfterBefore(t *testing.T) {
 	}
 }
 
+// --- Fuzzy Search tests --- R336, R337, R339, R340, R341, R342
+
+func TestFuzzySearchOR(t *testing.T) {
+	db, dir := testDB(t)
+	// Three files: one with "alpha" only, one with "beta" only, one with both
+	writeTestFile(t, dir, "alpha.txt", "alpha content here\n")
+	writeTestFile(t, dir, "beta.txt", "beta content here\n")
+	writeTestFile(t, dir, "both.txt", "alpha and beta together\n")
+	db.AddFile(dir+"/alpha.txt", "line")
+	db.AddFile(dir+"/beta.txt", "line")
+	db.AddFile(dir+"/both.txt", "line")
+
+	// AND search: only "both" should match
+	sr, err := db.Search("alpha beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	andCount := len(sr.Results)
+
+	// Fuzzy search: all three should match
+	sr, err = db.Search("alpha beta", WithFuzzy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) < andCount {
+		t.Errorf("fuzzy returned fewer results (%d) than AND (%d)", len(sr.Results), andCount)
+	}
+	if len(sr.Results) < 3 {
+		t.Errorf("expected at least 3 fuzzy results, got %d", len(sr.Results))
+	}
+}
+
+func TestFuzzySearchScoring(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "one.txt", "alpha alone here\n")
+	writeTestFile(t, dir, "two.txt", "alpha beta together\n")
+	db.AddFile(dir+"/one.txt", "line")
+	db.AddFile(dir+"/two.txt", "line")
+
+	sr, err := db.Search("alpha beta", WithFuzzy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(sr.Results))
+	}
+
+	// The chunk with both terms should score higher (1.0) than the one with only one (0.5)
+	var bothScore, oneScore float64
+	for _, r := range sr.Results {
+		if strings.HasSuffix(r.Path, "two.txt") {
+			bothScore = r.Score
+		}
+		if strings.HasSuffix(r.Path, "one.txt") {
+			oneScore = r.Score
+		}
+	}
+	if bothScore <= oneScore {
+		t.Errorf("expected both-term score (%.2f) > one-term score (%.2f)", bothScore, oneScore)
+	}
+	if bothScore != 1.0 {
+		t.Errorf("expected both-term score = 1.0, got %.2f", bothScore)
+	}
+	if oneScore != 0.5 {
+		t.Errorf("expected one-term score = 0.5, got %.2f", oneScore)
+	}
+}
+
+func TestFuzzySearchWithCustomScoreFunc(t *testing.T) {
+	// R345: custom ScoreFunc overrides default fuzzy scoring
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "alpha content\n")
+	writeTestFile(t, dir, "b.txt", "beta content\n")
+	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+
+	sr, err := db.Search("alpha beta", WithFuzzy(), WithOverlap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// WithOverlap uses raw trigram count, not term ratio
+	if len(sr.Results) < 2 {
+		t.Fatalf("expected at least 2 fuzzy+overlap results, got %d", len(sr.Results))
+	}
+	// Scores should be raw counts, not [0,1] ratios
+	for _, r := range sr.Results {
+		if r.Score < 1.0 {
+			t.Errorf("overlap score %.2f too low for a matching chunk", r.Score)
+		}
+	}
+}
+
+func TestFuzzySearchNoResults(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "completely unrelated content\n")
+	db.AddFile(dir+"/a.txt", "line")
+
+	sr, err := db.Search("xyzzy plugh", WithFuzzy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 0 {
+		t.Errorf("expected 0 results for non-matching fuzzy, got %d", len(sr.Results))
+	}
+}
+
 func TestWithAfterFallsBackToModTime(t *testing.T) {
 	db, dir := testDB(t)
 
