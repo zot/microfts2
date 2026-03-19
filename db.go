@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -49,7 +50,9 @@ type DB struct {
 	dbName         string
 	settings       Settings
 	trigrams       *Trigrams
-	chunkers map[string]Chunker // in-memory Go chunker strategies
+	chunkers    map[string]Chunker // in-memory Go chunker strategies
+	overlay     *overlay           // R349: in-memory tmp:// documents
+	overlayOnce sync.Once          // guards lazy overlay creation
 }
 
 // Settings holds the in-memory representation of I records.
@@ -123,6 +126,7 @@ type searchConfig struct {
 	chunkFilters       []ChunkFilter       // AND: all must pass for chunk to be included R255-R257
 	proximityTopN      int                 // if > 0, rerank top-N by proximity R279
 	fuzzy              bool                // R336: OR semantics at term level
+	noTmp              bool                // skip overlay (tmp://) documents
 }
 
 // ChunkFilter receives a CRecord during candidate evaluation.
@@ -207,6 +211,12 @@ func WithExcept(ids map[uint64]struct{}) SearchOption {
 // contains any query term's trigrams. Default scoring: terms matched / total terms.
 func WithFuzzy() SearchOption {
 	return func(c *searchConfig) { c.fuzzy = true }
+}
+
+// CRC: crc-DB.md | R376
+// WithNoTmp excludes tmp:// overlay documents from search results.
+func WithNoTmp() SearchOption {
+	return func(c *searchConfig) { c.noTmp = true }
 }
 
 // WithVerify enables post-filter verification: after trigram intersection,
@@ -400,17 +410,32 @@ func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error) {
 			return err
 		}
 
+		// R374: sum LMDB and overlay counters for true corpus size
+		if db.overlay != nil {
+			oc, ot := db.overlay.counters()
+			totalChunks += uint64(oc)
+			totalTokens += uint64(ot)
+		}
+
 		var avgdl float64
 		if totalChunks > 0 {
 			avgdl = float64(totalTokens) / float64(totalChunks)
 		}
 
 		n := float64(totalChunks)
+		// R374: batch overlay DF lookup (one lock acquisition)
+		var overlayDFs []int
+		if db.overlay != nil {
+			overlayDFs = db.overlay.trigramDFs(queryTrigrams)
+		}
 		idfMap := make(map[uint32]float64, len(queryTrigrams))
-		for _, tri := range queryTrigrams {
+		for i, tri := range queryTrigrams {
 			var df int
 			if tVal, err := txn.Get(db.dbi, makeTKey(tri)); err == nil {
 				df = countTValue(tVal)
+			}
+			if overlayDFs != nil {
+				df += overlayDFs[i]
 			}
 			dfF := float64(df)
 			idfMap[tri] = math.Log((n-dfF+0.5)/(dfF+0.5) + 1)
@@ -1033,7 +1058,65 @@ func (db *DB) Close() error {
 		db.env.Close()
 		db.env = nil
 	}
+	db.overlay = nil // R356: overlay destroyed on Close
 	return nil
+}
+
+// ensureOverlay lazily creates the overlay on first use (thread-safe). R356
+func (db *DB) ensureOverlay() *overlay {
+	db.overlayOnce.Do(func() {
+		db.overlay = newOverlay()
+	})
+	return db.overlay
+}
+
+// CRC: crc-DB.md | Seq: seq-tmp-add.md | R358, R359, R360
+// AddTmpFile indexes a tmp:// document in the in-memory overlay.
+func (db *DB) AddTmpFile(path, strategy string, content []byte) (uint64, error) {
+	return db.ensureOverlay().addFile(path, strategy, content, db)
+}
+
+// CRC: crc-DB.md | Seq: seq-tmp-add.md | R361, R362, R363
+// UpdateTmpFile replaces the content of an existing tmp:// document.
+func (db *DB) UpdateTmpFile(path, strategy string, content []byte) error {
+	return db.ensureOverlay().updateFile(path, strategy, content, db)
+}
+
+// CRC: crc-DB.md | Seq: seq-tmp-add.md | R364, R365
+// RemoveTmpFile removes a tmp:// document from the overlay.
+func (db *DB) RemoveTmpFile(path string) error {
+	if db.overlay == nil {
+		return fmt.Errorf("tmp file not found: %s", path)
+	}
+	return db.overlay.removeFile(path)
+}
+
+// CRC: crc-DB.md | R369
+// TmpFileIDs returns the set of all current tmp:// fileids.
+func (db *DB) TmpFileIDs() map[uint64]struct{} {
+	if db.overlay == nil {
+		return nil
+	}
+	return db.overlay.tmpFileIDs()
+}
+
+// CRC: crc-DB.md | R377
+// HasTmp reports whether any tmp:// documents exist in the overlay.
+func (db *DB) HasTmp() bool {
+	return db.overlay != nil && !db.overlay.empty()
+}
+
+// CRC: crc-DB.md | R378
+// TmpContent returns a reader over the raw stored content of a tmp:// document.
+func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
+	if db.overlay == nil {
+		return nil, fmt.Errorf("tmp file not found: %s", path)
+	}
+	f := db.overlay.lookupFileByPath(path)
+	if f == nil {
+		return nil, fmt.Errorf("tmp file not found: %s", path)
+	}
+	return bytes.NewReader(f.content), nil
 }
 
 // Env returns the underlying LMDB environment for sharing with other libraries.
@@ -1817,6 +1900,11 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		return nil, err
 	}
 
+	// R366, R376: merge overlay candidates unless noTmp
+	if db.overlay != nil && !cfg.noTmp {
+		results = append(results, db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.fuzzy, cfg.scoreFunc, cfg)...)
+	}
+
 	if cfg.verify {
 		results = verifyResults(db, results, query)
 	}
@@ -1887,6 +1975,15 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 		return nil, err
 	}
 
+	// R366, R376: merge overlay results per strategy unless noTmp
+	if db.overlay != nil && !cfg.noTmp {
+		for i := range multiResults {
+			scoreFn := strategies[multiResults[i].Strategy]
+			overlayResults := db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.fuzzy, scoreFn, cfg)
+			multiResults[i].Results = append(multiResults[i].Results, overlayResults...)
+		}
+	}
+
 	// Apply post-filters per strategy
 	for i := range multiResults {
 		r := multiResults[i].Results
@@ -1902,6 +1999,9 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 			r = proximityRerank(db, r, query, cfg.proximityTopN)
 		}
 		sortResults(r)
+		if k > 0 && len(r) > k {
+			r = r[:k]
+		}
 		multiResults[i].Results = r
 	}
 
@@ -2156,6 +2256,11 @@ func filterResults(db *DB, results []SearchResult, matchFn func(chunkContent []b
 // rechunkForVerify looks up a file's strategy, re-chunks it, and returns
 // a map from range string to chunk content.
 func rechunkForVerify(db *DB, fpath string) map[string][]byte {
+	// R370: handle tmp:// paths via overlay
+	if isTmpPath(fpath) && db.overlay != nil {
+		return rechunkForVerifyTmp(db, fpath)
+	}
+
 	var strategy string
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		_, frec, err := db.lookupFileByPath(txnWrap{txn}, fpath)
@@ -2181,6 +2286,26 @@ func rechunkForVerify(db *DB, fpath string) map[string][]byte {
 
 	chunks := make(map[string][]byte)
 	chunker.Chunks(fpath, data, func(c Chunk) bool {
+		content := make([]byte, len(c.Content))
+		copy(content, c.Content)
+		chunks[string(c.Range)] = content
+		return true
+	})
+	return chunks
+}
+
+// rechunkForVerifyTmp handles rechunking for tmp:// paths using stored content.
+func rechunkForVerifyTmp(db *DB, fpath string) map[string][]byte {
+	ofile := db.overlay.lookupFileByPath(fpath)
+	if ofile == nil {
+		return nil
+	}
+	chunker := db.resolveChunker(ofile.strategy)
+	if chunker == nil {
+		return nil
+	}
+	chunks := make(map[string][]byte)
+	chunker.Chunks(fpath, ofile.content, func(c Chunk) bool {
 		content := make([]byte, len(c.Content))
 		copy(content, c.Content)
 		chunks[string(c.Range)] = content
@@ -2258,6 +2383,23 @@ func proximityRerank(db *DB, results []SearchResult, query string, topN int) []S
 
 // rechunkContent recovers a single chunk's content using ChunkText.
 func rechunkContent(db *DB, fpath, targetRange string) []byte {
+	// R370: handle tmp:// paths via overlay
+	if isTmpPath(fpath) && db.overlay != nil {
+		ofile := db.overlay.lookupFileByPath(fpath)
+		if ofile == nil {
+			return nil
+		}
+		chunker := db.resolveChunker(ofile.strategy)
+		if chunker == nil {
+			return nil
+		}
+		content, ok := chunker.ChunkText(fpath, ofile.content, targetRange)
+		if !ok {
+			return nil
+		}
+		return content
+	}
+
 	chunker := db.resolveChunker(fileStrategy(db, fpath))
 	if chunker == nil {
 		return nil
@@ -2275,6 +2417,13 @@ func rechunkContent(db *DB, fpath, targetRange string) []byte {
 
 // fileStrategy looks up the chunking strategy for a file.
 func fileStrategy(db *DB, fpath string) string {
+	if isTmpPath(fpath) && db.overlay != nil {
+		ofile := db.overlay.lookupFileByPath(fpath)
+		if ofile != nil {
+			return ofile.strategy
+		}
+		return ""
+	}
 	var strategy string
 	db.env.View(func(txn *lmdb.Txn) error {
 		_, frec, err := db.lookupFileByPath(txnWrap{txn}, fpath)
@@ -2426,6 +2575,11 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 		return nil, err
 	}
 
+	// R366, R376: merge overlay candidates for regex search unless noTmp
+	if db.overlay != nil && !cfg.noTmp {
+		results = append(results, db.overlay.searchOverlayAll(cfg.scoreFunc, cfg)...)
+	}
+
 	results = verifyResultsRegex(db, results, compiled)
 
 	// R188, R189, R190: apply regex post-filters after verify, before sort
@@ -2556,6 +2710,11 @@ func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
 // GetChunks retrieves the target chunk (identified by range label) and
 // up to before/after positional neighbors. Returns chunks in positional order.
 func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error) {
+	// R370: handle tmp:// paths via overlay
+	if isTmpPath(fpath) && db.overlay != nil {
+		return db.getChunksTmp(fpath, targetRange, before, after)
+	}
+
 	var frec FRecord
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
@@ -2606,6 +2765,50 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 		}
 		idx++
 		return idx <= hi // stop early once past window
+	})
+
+	return results, nil
+}
+
+// getChunksTmp handles GetChunks for tmp:// paths using overlay's stored content. R370
+func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]ChunkResult, error) {
+	ofile := db.overlay.lookupFileByPath(fpath)
+	if ofile == nil {
+		return nil, fmt.Errorf("tmp file not found: %s", fpath)
+	}
+
+	targetIdx := -1
+	for i, fce := range ofile.chunks {
+		if fce.Location == targetRange {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return nil, fmt.Errorf("range %q not found in %s", targetRange, fpath)
+	}
+
+	lo := max(0, targetIdx-before)
+	hi := min(len(ofile.chunks)-1, targetIdx+after)
+
+	chunker := db.resolveChunker(ofile.strategy)
+	if chunker == nil {
+		return nil, fmt.Errorf("chunking strategy %q not registered", ofile.strategy)
+	}
+
+	var results []ChunkResult
+	idx := 0
+	chunker.Chunks(fpath, ofile.content, func(c Chunk) bool {
+		if idx >= lo && idx <= hi {
+			results = append(results, ChunkResult{
+				Path:    fpath,
+				Range:   string(c.Range),
+				Content: string(c.Content),
+				Index:   idx,
+			})
+		}
+		idx++
+		return idx <= hi
 	})
 
 	return results, nil

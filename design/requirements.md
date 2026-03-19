@@ -557,3 +557,44 @@
 - **R343:** Works with `SearchMulti` — fuzzy candidate collection shared, per-strategy scoring independent
 - **R344:** CLI flag: `microfts search -db <path> -fuzzy <query>` — composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`
 - **R345:** (inferred) When `WithFuzzy` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default fuzzy term-match scoring is bypassed
+
+## Feature: Fileid Filtering
+**Source:** specs/main.md
+
+- **R346:** `WithOnly(ids map[uint64]struct{}) SearchOption` — keep candidate chunks only if at least one of their fileids is in the set
+- **R347:** `WithExcept(ids map[uint64]struct{}) SearchOption` — discard candidate chunks if any of their fileids is in the set
+- **R348:** Both apply during candidate evaluation (same phase as ChunkFilter)
+
+## Feature: Temporary Documents (tmp:// Overlay)
+**Source:** specs/main.md
+
+- **R349:** In-memory overlay on `*DB` holds tmp:// documents alongside the LMDB index — never touches LMDB
+- **R350:** Temporary document paths use `tmp://` URI scheme (e.g. `tmp://abc123/scoring-notes`); path is opaque to microfts2
+- **R351:** Temporary fileids count down from `math.MaxUint64` — structural guarantee against collision with LMDB fileids (which count up from 1)
+- **R352:** Temporary chunkids count down from a separate counter starting at `math.MaxUint64` — same structural separation
+- **R353:** Overlay holds equivalent of C, F, T, W, H records in Go maps — per-chunk data, per-file data, trigram index, token index, hash-to-chunkid lookup
+- **R354:** Chunk deduplication within the overlay using SHA-256 hash — same mechanism as LMDB
+- **R355:** No cross-deduplication between overlay and LMDB (separate chunkid spaces)
+- **R356:** Overlay lifecycle tied to `*DB` handle — created on first use, destroyed on `Close()` or process exit
+- **R357:** Individual tmp:// documents can be removed explicitly
+- **R358:** `AddTmpFile(path, strategy string, content []byte) (uint64, error)` — chunks content, stores in overlay, returns fileid (counting down)
+- **R359:** `AddTmpFile` requires registered chunking strategy; content must be valid UTF-8
+- **R360:** `AddTmpFile` returns `ErrAlreadyIndexed` if path is already in the overlay
+- **R361:** `UpdateTmpFile(path, strategy string, content []byte) error` — replaces content of existing tmp:// document; removes old chunks, adds new ones
+- **R362:** `UpdateTmpFile` is atomic from caller's perspective — document is never absent from search during update
+- **R363:** `UpdateTmpFile` returns error if path not found in overlay
+- **R364:** `RemoveTmpFile(path string) error` — removes document and all orphaned chunks from overlay
+- **R365:** `RemoveTmpFile` returns error if path not found
+- **R366:** Search always includes overlay — candidates collected from both LMDB and overlay, merged and sorted by score
+- **R367:** Overlay participates in all search modes: `Search`, `SearchRegex`, `SearchMulti`, `ScoreFile`
+- **R368:** All `SearchOption`s apply uniformly to overlay candidates — `WithChunkFilter`, `WithVerify`, `WithTrigramFilter`, etc.
+- **R369:** `TmpFileIDs() map[uint64]struct{}` — returns set of all current tmp:// fileids for use with `WithExcept`
+- **R370:** `GetChunks` and `ChunkCache` work with tmp:// documents — retrieval reads from overlay's stored content rather than disk
+- **R371:** Overlay stores original content bytes for each document (needed for chunk retrieval and verify)
+- **R372:** Thread safety: concurrent reads allowed, writes (add/update/remove) serialized — `sync.RWMutex`
+- **R373:** Overlay maintains its own `totalChunks` and `totalTokens` counters
+- **R374:** BM25 and corpus-level computations sum LMDB counters and overlay counters for true corpus size
+- **R375:** No CLI changes — tmp:// is library-only; ark CLI handles exposure
+- **R376:** `WithNoTmp() SearchOption` — skips overlay entirely during search; no overlay lock acquired, no allocation
+- **R377:** `HasTmp() bool` — returns true if the overlay has any tmp:// documents; no allocation
+- **R378:** `TmpContent(path string) (*bytes.Reader, error)` — returns a reader over the raw stored content of a tmp:// document; no copy; error if not found

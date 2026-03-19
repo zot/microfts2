@@ -1,5 +1,5 @@
 # ChunkCache
-**Requirements:** R297, R298, R299, R300, R301, R302, R303, R304, R305, R306
+**Requirements:** R297, R298, R299, R300, R301, R302, R303, R304, R305, R306, R370
 
 Per-query cache for file content and chunked data. Avoids redundant file reads and re-chunking when processing search results. Lazily chunks files on first access, caches all encountered chunks for subsequent lookups.
 

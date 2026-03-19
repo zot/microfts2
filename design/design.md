@@ -26,6 +26,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 
 - [x] crc-BracketChunker.md → `bracket_chunker.go`
 - [x] crc-IndentChunker.md → `indent_chunker.go`
+- [x] crc-Overlay.md → `overlay.go`
 
 ### Sequences
 - [x] seq-init.md → `db.go`
@@ -40,12 +41,15 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-bracket-chunk.md → `bracket_chunker.go`
 - [x] seq-indent-chunk.md → `indent_chunker.go`
 - [x] seq-fuzzy-search.md → `db.go`
+- [x] seq-tmp-add.md → `overlay.go`, `db.go`
+- [x] seq-tmp-search.md → `overlay.go`, `db.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
 - [x] test-Bitset.md → `bitset_test.go`
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
+- [x] test-Overlay.md → `overlay_test.go`
 
 ## Gaps
 
@@ -63,3 +67,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [ ] O9: No test for WRecord encode/decode roundtrip
 - [x] O10: No test for WithAfter/WithBefore date filtering (needs chunker producing Attrs with timestamp)
 - [x] O11: Implementation: db.go needs full rewrite for new record layout (single subdatabase, chunk dedup, record structs, T/W records, ChunkFilter)
+- [ ] O12: SearchOption enumeration not fully anchored in requirements — WithOnly and WithExcept exist in code without spec/requirement coverage; audit all SearchOptions against requirements
+- [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks

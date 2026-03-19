@@ -99,8 +99,8 @@
 
 ## Test: except-regex subtract
 **Purpose:** WithExceptRegex rejects chunks matching any pattern
-**Input:** add files with chunks "@status: open task", "@status: done task". Search "task" with WithExceptRegex("@status:.*done")
-**Expected:** only "@status: open task" survives — "done" chunk is subtracted
+**Input:** add files with chunks "@status: open task", "@status: completed task". Search "task" with WithExceptRegex("@status:.*completed")
+**Expected:** only "@status: open task" survives — "completed" chunk is subtracted
 **Refs:** crc-DB.md, seq-search.md, R184, R188, R189
 
 ## Test: regex filter with SearchRegex
