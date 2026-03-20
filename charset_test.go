@@ -258,3 +258,98 @@ func TestValidateAliases(t *testing.T) {
 		t.Errorf("nil aliases should pass: %v", err)
 	}
 }
+
+// --- Bigram tests ---
+
+func TestBigramCountsBasic(t *testing.T) {
+	tg := NewTrigrams(false, nil)
+	counts := tg.BigramCounts([]byte("cat"))
+	// "cat" → padded "_cat_" → bigrams: _c, ca, at, t_
+	want := map[uint16]int{
+		BigramValue('_', 'c'): 1,
+		BigramValue('c', 'a'): 1,
+		BigramValue('a', 't'): 1,
+		BigramValue('t', '_'): 1,
+	}
+	if len(counts) != len(want) {
+		t.Fatalf("BigramCounts(\"cat\"): got %d bigrams, want %d", len(counts), len(want))
+	}
+	for bi, wantCnt := range want {
+		if counts[bi] != wantCnt {
+			t.Errorf("bigram 0x%04X: got %d, want %d", bi, counts[bi], wantCnt)
+		}
+	}
+}
+
+func TestBigramCountsMultiWord(t *testing.T) {
+	tg := NewTrigrams(false, nil)
+	counts := tg.BigramCounts([]byte("hi lo"))
+	// "hi" → "_hi_" → _h, hi, i_
+	// "lo" → "_lo_" → _l, lo, o_
+	if len(counts) != 6 {
+		t.Fatalf("BigramCounts(\"hi lo\"): got %d bigrams, want 6", len(counts))
+	}
+	if counts[BigramValue('_', 'h')] != 1 {
+		t.Error("missing _h bigram")
+	}
+	if counts[BigramValue('o', '_')] != 1 {
+		t.Error("missing o_ bigram")
+	}
+}
+
+func TestBigramCountsCaseInsensitive(t *testing.T) {
+	tg := NewTrigrams(true, nil)
+	upper := tg.BigramCounts([]byte("Cat"))
+	lower := tg.BigramCounts([]byte("cat"))
+	if len(upper) != len(lower) {
+		t.Fatalf("case insensitive: got %d vs %d bigrams", len(upper), len(lower))
+	}
+	for bi, cnt := range lower {
+		if upper[bi] != cnt {
+			t.Errorf("bigram 0x%04X: upper=%d lower=%d", bi, upper[bi], cnt)
+		}
+	}
+}
+
+func TestBigramCountsSkipInternal(t *testing.T) {
+	tg := NewTrigrams(false, nil)
+	// CJK character 中 = 3 bytes: e4 b8 ad
+	// Padded: _ e4 b8 ad _
+	// bigrams: (_,e4), (e4,b8) SKIP (both continuation? no e4 is lead), (b8,ad) SKIP (both continuation), (ad,_)
+	counts := tg.BigramCounts([]byte("中"))
+	// Should have: (_,e4), (e4,b8), (ad,_) — b8,ad are both continuation bytes so skipped
+	if counts[BigramValue(0xb8, 0xad)] != 0 {
+		t.Error("character-internal bigram (b8,ad) should be skipped")
+	}
+	if counts[BigramValue('_', 0xe4)] != 1 {
+		t.Error("boundary bigram (_,e4) should be present")
+	}
+}
+
+func TestBigramValue(t *testing.T) {
+	v := BigramValue('a', 'b')
+	if v != 0x6162 {
+		t.Errorf("BigramValue('a','b') = 0x%04X, want 0x6162", v)
+	}
+}
+
+func TestExtractBigrams(t *testing.T) {
+	tg := NewTrigrams(false, nil)
+	bigrams := tg.ExtractBigrams([]byte("ab"))
+	// "ab" → padded "_ab_" → _a, ab, b_
+	if len(bigrams) != 3 {
+		t.Fatalf("ExtractBigrams(\"ab\"): got %d, want 3", len(bigrams))
+	}
+}
+
+func TestBigramCountsEmpty(t *testing.T) {
+	tg := NewTrigrams(false, nil)
+	counts := tg.BigramCounts([]byte(""))
+	if counts != nil {
+		t.Errorf("BigramCounts(\"\"): expected nil, got %v", counts)
+	}
+	counts = tg.BigramCounts([]byte("   "))
+	if counts != nil {
+		t.Errorf("BigramCounts(whitespace): expected nil, got %v", counts)
+	}
+}

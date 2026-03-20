@@ -209,3 +209,87 @@ func toLowerByte(b byte) byte {
 	}
 	return b
 }
+
+// CRC: crc-Bigram.md | R382, R383, R384, R385, R405, R406
+
+// BigramValue computes the 16-bit bigram from two byte values.
+func BigramValue(a, b byte) uint16 {
+	return uint16(a)<<8 | uint16(b)
+}
+
+// isInternalBigram returns true if both bytes fall inside a single multibyte
+// UTF-8 character. For valid UTF-8, this means both are continuation bytes
+// and part of the same character (3+ byte characters).
+func isInternalBigram(a, b byte) bool {
+	return isContinuation(a) && isContinuation(b)
+}
+
+// BigramCounts extracts bigrams with occurrence counts from data.
+// Each whitespace-delimited token is padded with '_' before and after,
+// then 2-byte windows are slid over the padded token. Character-internal
+// bigrams (both bytes inside one multibyte character) are skipped.
+func (t *Trigrams) BigramCounts(data []byte) map[uint16]int {
+	src := t.prepare(data)
+	tokens := splitOnWhitespace(src)
+	if len(tokens) == 0 {
+		return nil
+	}
+	counts := make(map[uint16]int)
+	var padded []byte // reusable buffer across tokens
+	for _, tok := range tokens {
+		if len(tok) == 0 {
+			continue
+		}
+		// Pad with '_' on both sides, reusing buffer
+		need := len(tok) + 2
+		if cap(padded) < need {
+			padded = make([]byte, need)
+		} else {
+			padded = padded[:need]
+		}
+		padded[0] = '_'
+		copy(padded[1:], tok)
+		padded[need-1] = '_'
+
+		for i := 0; i <= need-2; i++ {
+			if isInternalBigram(padded[i], padded[i+1]) {
+				continue
+			}
+			counts[BigramValue(padded[i], padded[i+1])]++
+		}
+	}
+	return counts
+}
+
+// ExtractBigrams extracts deduplicated bigrams from data.
+func (t *Trigrams) ExtractBigrams(data []byte) []uint16 {
+	counts := t.BigramCounts(data)
+	if len(counts) == 0 {
+		return nil
+	}
+	result := make([]uint16, 0, len(counts))
+	for bi := range counts {
+		result = append(result, bi)
+	}
+	return result
+}
+
+// splitOnWhitespace splits data into tokens delimited by whitespace bytes.
+func splitOnWhitespace(data []byte) [][]byte {
+	var tokens [][]byte
+	start := -1
+	for i, b := range data {
+		if isWhitespace(b) {
+			if start >= 0 {
+				tokens = append(tokens, data[start:i])
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		tokens = append(tokens, data[start:])
+	}
+	return tokens
+}

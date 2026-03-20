@@ -598,3 +598,41 @@
 - **R376:** `WithNoTmp() SearchOption` — skips overlay entirely during search; no overlay lock acquired, no allocation
 - **R377:** `HasTmp() bool` — returns true if the overlay has any tmp:// documents; no allocation
 - **R378:** `TmpContent(path string) (*bytes.Reader, error)` — returns a reader over the raw stored content of a tmp:// document; no copy; error if not found
+
+## Feature: Bigram Index
+**Source:** specs/bigram.md
+
+- **R379:** Bigram indexing is on by default; `--no-bigrams` flag at `init` disables it
+- **R380:** Bigram enabled/disabled setting stored in an I record; checked at index time to gate B record writes and C record bigram section
+- **R381:** DB format version bumped from v2 to v3 for C record bigram extension
+- **R382:** Bigram extraction uses the same byte-level approach as trigrams: raw bytes, whitespace boundaries collapsed, case-insensitive when DB is case-insensitive
+- **R383:** Character-internal bigrams (both bytes inside a single multibyte character) are skipped — same principle as trigram character-internal skipping
+- **R384:** Word-boundary padding: each token gets a leading `_` and trailing `_` before bigram extraction (e.g. "cat" -> `_c`, `ca`, `at`, `t_`)
+- **R385:** Byte aliases apply before bigram extraction, same as trigrams
+- **R386:** `B` records: `B[bigram:2] → [chunkid:varint]...` — packed list of chunkids per bigram, same format as T records but 2-byte key
+- **R387:** One B record per distinct bigram; document frequency derived from B record value length (same as T records)
+- **R388:** C record bigram section (when enabled): `[n-bigrams:varint] [[bigram:2] [count:varint]]...` — appended after existing trigram counts
+- **R389:** I record bigram flag determines whether C record marshal/unmarshal includes the bigram section
+- **R390:** Bigram B record updates coalesced alongside T/W updates during AddFile — one read-modify-write per unique bigram across all chunks
+- **R391:** Bigrams are a scoring signal, not a candidate filter — candidates still come from trigram intersection
+- **R392:** `ScoreBigramOverlap` score function: matching query bigrams / total query bigrams per chunk; fits `ScoreFunc` signature
+- **R393:** `WithBigramOverlap() SearchOption` — sugar for `WithScoring(ScoreBigramOverlap)`
+- **R394:** Score function extracts bigrams from the query at call time using the same extraction as indexing
+- **R395:** B records exist for DF lookups (future BM25-style bigram scoring)
+- **R396:** CLI `init -db <path> --no-bigrams` — create DB without bigram index
+- **R397:** CLI `search -db <path> -score bigram <query>` — search using bigram overlap scoring
+- **R398:** Overlay (tmp://) includes bigram data when DB has bigrams enabled: chunks store bigram counts, overlay maintains B-record equivalent maps
+- **R399:** `searchOverlay` includes bigram data in overlay candidates when bigrams enabled
+- **R400:** RemoveFile updates B records alongside T/W records — same orphan-cleanup logic for B record chunkid removal
+- **R401:** Reindex updates B records alongside T/W records
+- **R402:** AppendChunks includes bigram extraction and B record updates when bigrams enabled
+- **R403:** (inferred) `BRecord` struct: `Bigram uint16, ChunkIDs []uint64` — marshal/unmarshal same pattern as TRecord
+- **R404:** (inferred) `CRecord` gains `Bigrams []BigramEntry` field; `BigramEntry` struct: `Bigram uint16, Count int`
+- **R405:** (inferred) `extractBigrams` function: takes normalized byte slice, returns `map[uint16]int` of bigram counts with word-boundary padding
+- **R406:** (inferred) Bigram extraction reuses `CharSet.normalize` for case folding and alias application before extracting 2-byte windows
+- **R407:** `SearchStrategy` struct: `{Score ScoreFunc, UseBigrams bool}` — wraps a ScoreFunc with metadata about what candidate data it needs
+- **R408:** `SearchMulti` accepts `map[string]SearchStrategy` instead of `map[string]ScoreFunc`
+- **R409:** When any strategy in the map has `UseBigrams = true`, `collectCandidates` populates bigram counts for all candidates
+- **R410:** `scoreAndResolve` passes bigram counts (instead of trigram counts) to strategies with `UseBigrams = true`
+- **R411:** `StrategyFunc(fn ScoreFunc) SearchStrategy` — wraps a plain ScoreFunc with `UseBigrams = false`
+- **R412:** `StrategyBigramOverlap(queryBigrams map[uint16]int) SearchStrategy` — returns `SearchStrategy{Score: ScoreBigramOverlap(queryBigrams), UseBigrams: true}`

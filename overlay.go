@@ -20,6 +20,7 @@ type overlay struct {
 	filesByID   map[uint64]*overlayFile
 	chunks      map[uint64]*overlayChunk
 	trigrams    map[uint32]map[uint64]struct{} // trigram → chunkid set
+	bigrams     map[uint16]map[uint64]struct{} // bigram → chunkid set, R398
 	tokens      map[uint32]map[uint64]struct{} // token hash → chunkid set
 	hashes      map[[32]byte]uint64            // content hash → chunkid, R354
 	totalChunks int                            // R373
@@ -41,6 +42,7 @@ type overlayChunk struct {
 	chunkID  uint64
 	hash     [32]byte
 	trigrams []TrigramEntry
+	bigrams  []BigramEntry // R398: when bigrams enabled
 	tokens   []TokenEntry
 	attrs    []Pair
 	fileIDs  []uint64
@@ -54,6 +56,7 @@ func newOverlay() *overlay {
 		filesByID:   make(map[uint64]*overlayFile),
 		chunks:      make(map[uint64]*overlayChunk),
 		trigrams:    make(map[uint32]map[uint64]struct{}),
+		bigrams:     make(map[uint16]map[uint64]struct{}),
 		tokens:      make(map[uint32]map[uint64]struct{}),
 		hashes:      make(map[[32]byte]uint64),
 	}
@@ -208,6 +211,15 @@ func (o *overlay) removeFileChunksLocked(ofile *overlayFile) {
 					}
 				}
 			}
+			// R398: clean up bigram index for orphaned chunk
+			for _, be := range oc.bigrams {
+				if set, ok := o.bigrams[be.Bigram]; ok {
+					delete(set, fce.ChunkID)
+					if len(set) == 0 {
+						delete(o.bigrams, be.Bigram)
+					}
+				}
+			}
 			delete(o.hashes, oc.hash)
 			delete(o.chunks, fce.ChunkID)
 			o.totalChunks--
@@ -252,10 +264,26 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 		set[chunkID] = struct{}{}
 	}
 
+	// R398: build bigram entries and populate bigram index
+	var bigramEntries []BigramEntry
+	if cc.biCounts != nil {
+		bigramEntries = make([]BigramEntry, 0, len(cc.biCounts))
+		for bi, cnt := range cc.biCounts {
+			bigramEntries = append(bigramEntries, BigramEntry{Bigram: bi, Count: cnt})
+			set, ok := o.bigrams[bi]
+			if !ok {
+				set = make(map[uint64]struct{})
+				o.bigrams[bi] = set
+			}
+			set[chunkID] = struct{}{}
+		}
+	}
+
 	oc := &overlayChunk{
 		chunkID:  chunkID,
 		hash:     cc.hash,
 		trigrams: trigEntries,
+		bigrams:  bigramEntries,
 		tokens:   append([]TokenEntry(nil), cc.tokens...),
 		attrs:    copyPairs(cc.attrs),
 		fileIDs:  []uint64{fileID},
@@ -283,6 +311,9 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 			hash:      h,
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
+		}
+		if db.settings.BigramsEnabled { // R398
+			cc.biCounts = db.trigrams.BigramCounts(c.Content)
 		}
 		cc.attrs = copyPairs(c.Attrs)
 		chunks = append(chunks, cc)
@@ -356,16 +387,27 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, fuzzy 
 			continue
 		}
 
-		chunkCounts := make(map[uint32]int, len(oc.trigrams))
-		for _, te := range oc.trigrams {
-			chunkCounts[te.Trigram] = te.Count
+		var counts map[uint32]int
+		if cfg.bigramScore {
+			if len(oc.bigrams) > 0 {
+				counts = make(map[uint32]int, len(oc.bigrams))
+				for _, be := range oc.bigrams {
+					counts[uint32(be.Bigram)] = be.Count
+				}
+			}
+			// nil counts when no bigram data → score 0
+		} else {
+			counts = make(map[uint32]int, len(oc.trigrams))
+			for _, te := range oc.trigrams {
+				counts[te.Trigram] = te.Count
+			}
 		}
 
 		var score float64
 		if active == nil {
 			score = 1.0
 		} else {
-			score = scoreFunc(active, chunkCounts, len(oc.tokens))
+			score = scoreFunc(active, counts, len(oc.tokens))
 			if score <= 0 {
 				continue
 			}

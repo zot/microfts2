@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"microfts2"
+	"github.com/zot/microfts2"
 )
 
 // CRC: crc-CLI.md
@@ -133,6 +133,7 @@ func cmdInit() {
 	fs := flag.CommandLine
 	dbPath, dbName := dbFlags(fs)
 	caseInsensitive := fs.Bool("case-insensitive", false, "case insensitive indexing")
+	noBigrams := fs.Bool("no-bigrams", false, "disable bigram indexing") // R396
 	aliasStr := fs.String("aliases", "", "byte aliases as from=to pairs, comma-separated (e.g. '\\n=^')")
 	fs.Parse(os.Args[1:])
 
@@ -145,6 +146,7 @@ func cmdInit() {
 
 	db, err := microfts2.Create(*dbPath, microfts2.Options{
 		CaseInsensitive: *caseInsensitive,
+		NoBigrams:       *noBigrams,
 		Aliases:         aliases,
 		DBName:          *dbName,
 	})
@@ -211,6 +213,8 @@ func cmdSearch() {
 		opt = microfts2.WithCoverage()
 	case "density":
 		opt = microfts2.WithDensity()
+	case "bigram": // R397
+		opt = microfts2.WithBigramOverlap()
 	default:
 		fmt.Fprintf(os.Stderr, "search: unknown score mode: %s\n", *scoreMode)
 		os.Exit(1)

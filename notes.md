@@ -1,3 +1,5 @@
+- see PERFORMANCE.md
+
 - reorganization
   - Note: strings are length-prefixed (varint), except the final field in a key can use remaining bytes
   - Single subdatabase (prefix-distinguished records, no content/index split)

@@ -212,4 +212,98 @@ func TestKeyConstruction(t *testing.T) {
 	if len(wk) != 5 {
 		t.Errorf("W key len: got %d, want 5", len(wk))
 	}
+
+	// B key
+	bk := makeBKey(0x6162)
+	if bk[0] != prefixB {
+		t.Errorf("B key prefix: got %c, want %c", bk[0], prefixB)
+	}
+	if len(bk) != 3 {
+		t.Errorf("B key len: got %d, want 3", len(bk))
+	}
+}
+
+func TestBRecordRoundtrip(t *testing.T) {
+	orig := BRecord{
+		Bigram:   0x6361,
+		ChunkIDs: []uint64{1, 5, 42},
+	}
+	data := orig.MarshalValue()
+	got, err := UnmarshalBValue(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(orig.ChunkIDs) {
+		t.Fatalf("ChunkIDs len: got %d, want %d", len(got), len(orig.ChunkIDs))
+	}
+	for i := range orig.ChunkIDs {
+		if got[i] != orig.ChunkIDs[i] {
+			t.Errorf("ChunkID[%d]: got %d, want %d", i, got[i], orig.ChunkIDs[i])
+		}
+	}
+}
+
+func TestCRecordWithBigramsRoundtrip(t *testing.T) {
+	orig := CRecord{
+		ChunkID: 42,
+		Trigrams: []TrigramEntry{
+			{Trigram: 0x616263, Count: 3},
+		},
+		Bigrams: []BigramEntry{
+			{Bigram: 0x6162, Count: 2},
+			{Bigram: 0x6263, Count: 1},
+		},
+		Tokens: []TokenEntry{
+			{Token: "hello", Count: 5},
+		},
+		FileIDs: []uint64{1},
+	}
+	copy(orig.Hash[:], "abcdefghijklmnopqrstuvwxyz012345")
+
+	data := orig.MarshalValue()
+	got, err := UnmarshalCValue(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Bigrams) != len(orig.Bigrams) {
+		t.Fatalf("Bigrams len: got %d, want %d", len(got.Bigrams), len(orig.Bigrams))
+	}
+	for i := range orig.Bigrams {
+		if got.Bigrams[i] != orig.Bigrams[i] {
+			t.Errorf("Bigram[%d]: got %+v, want %+v", i, got.Bigrams[i], orig.Bigrams[i])
+		}
+	}
+	// Verify other fields still correct
+	if len(got.Trigrams) != 1 || len(got.Tokens) != 1 || len(got.FileIDs) != 1 {
+		t.Errorf("other fields corrupted: tri=%d tok=%d fid=%d",
+			len(got.Trigrams), len(got.Tokens), len(got.FileIDs))
+	}
+}
+
+func TestCRecordNoBigramsRoundtrip(t *testing.T) {
+	// CRecord with no bigrams (bigrams disabled)
+	orig := CRecord{
+		ChunkID: 42,
+		Trigrams: []TrigramEntry{
+			{Trigram: 0x616263, Count: 3},
+		},
+		// Bigrams nil — will be marshaled as count 0
+		Tokens: []TokenEntry{
+			{Token: "hello", Count: 5},
+		},
+		FileIDs: []uint64{1},
+	}
+	copy(orig.Hash[:], "abcdefghijklmnopqrstuvwxyz012345")
+
+	data := orig.MarshalValue()
+	got, err := UnmarshalCValue(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Bigrams) != 0 {
+		t.Errorf("Bigrams: got %d, want 0", len(got.Bigrams))
+	}
+	if len(got.Trigrams) != 1 || len(got.Tokens) != 1 || len(got.FileIDs) != 1 {
+		t.Errorf("other fields corrupted")
+	}
 }

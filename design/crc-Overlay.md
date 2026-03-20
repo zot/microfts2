@@ -1,5 +1,5 @@
 # Overlay
-**Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373
+**Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373, R398, R399
 
 In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the LMDB record structure (C, F, T, W, H equivalents) in Go maps. Fileids and chunkids count down from MaxUint64 to structurally avoid collision with LMDB ids. Thread-safe: concurrent reads, serialized writes.
 
@@ -12,6 +12,7 @@ In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the
 - chunks: map[uint64]*overlayChunk — keyed by chunkid, equivalent to C records
 - trigrams: map[uint32]map[uint64]struct{} — trigram → chunkid set, equivalent to T records
 - tokens: map[uint32]map[uint64]struct{} — token hash → chunkid set, equivalent to W records
+- bigrams: map[uint16]map[uint64]struct{} — bigram → chunkid set, equivalent to B records (when bigramsEnabled)
 - hashes: map[[32]byte]uint64 — content hash → chunkid, equivalent to H records
 - totalChunks: int — overlay chunk count
 - totalTokens: int — sum of overlay chunk token counts
@@ -28,14 +29,15 @@ In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the
 - chunkID: uint64
 - hash: [32]byte
 - trigrams: []TrigramEntry
+- bigrams: []BigramEntry — when bigramsEnabled
 - tokens: []TokenEntry
 - attrs: []Pair
 - fileIDs: []uint64
 
 ## Does
-- addFile(path, strategy, content, db): validate UTF-8, check for duplicate path (ErrAlreadyIndexed), allocate fileid (decrement), chunk content via db's chunker registry, for each chunk: hash, check overlay hashes for dedup, allocate chunkid if new (decrement), build overlayChunk, update trigram/token maps. Build overlayFile with chunk list and token bag. Update counters. Returns fileid
+- addFile(path, strategy, content, db): validate UTF-8, check for duplicate path (ErrAlreadyIndexed), allocate fileid (decrement), chunk content via db's chunker registry, for each chunk: hash, check overlay hashes for dedup, allocate chunkid if new (decrement), build overlayChunk (including bigram counts/map if bigramsEnabled), update trigram/token/bigram maps. Build overlayFile with chunk list and token bag. Update counters. Returns fileid
 - updateFile(path, strategy, content, db): find existing file by path (error if missing), remove old file data, add new — no moment where path is absent from the overlay (hold write lock across both operations)
-- removeFile(path): find by path (error if missing), for each chunkid: remove fileid from overlayChunk, if no fileids remain delete chunk and clean trigram/token/hash maps. Delete file records. Update counters
+- removeFile(path): find by path (error if missing), for each chunkid: remove fileid from overlayChunk, if no fileids remain delete chunk and clean trigram/token/bigram/hash maps. Delete file records. Update counters
 - searchCandidates(queryTrigrams): RLock, intersect trigram maps to produce candidate chunkid set, return overlayChunks for candidates. Mirrors DB's T record intersection
 - lookupChunk(chunkid): RLock, return overlayChunk by id
 - lookupFile(fileid): RLock, return overlayFile by id

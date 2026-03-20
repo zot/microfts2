@@ -38,6 +38,12 @@ type FileChunkEntry struct {
 	Location string
 }
 
+// BigramEntry pairs a bigram code with its per-chunk occurrence count. R404
+type BigramEntry struct {
+	Bigram uint16
+	Count  int
+}
+
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
 // Carries unexported db/txn — the chunk is tied to the transaction that read it.
@@ -45,6 +51,7 @@ type CRecord struct {
 	ChunkID  uint64
 	Hash     [32]byte
 	Trigrams []TrigramEntry
+	Bigrams  []BigramEntry // R404: present when bigrams enabled
 	Tokens   []TokenEntry
 	Attrs    []Pair
 	FileIDs  []uint64
@@ -99,6 +106,23 @@ type HRecord struct {
 	ChunkID uint64
 }
 
+// BRecord is the bigram inverted index entry. R403
+// Same format as TRecord but with a 2-byte key (bigram).
+type BRecord struct {
+	Bigram   uint16
+	ChunkIDs []uint64
+}
+
+// MarshalValue encodes the BRecord value (packed chunkid list, same as TRecord).
+func (b *BRecord) MarshalValue() []byte {
+	return marshalChunkIDs(b.ChunkIDs)
+}
+
+// UnmarshalBValue decodes a BRecord value. Same format as TRecord.
+func UnmarshalBValue(data []byte) ([]uint64, error) {
+	return UnmarshalTValue(data)
+}
+
 // --- Encoding helpers ---
 
 func putUvarint(buf []byte, v uint64) int { return binary.PutUvarint(buf, v) }
@@ -141,11 +165,14 @@ func readBytes(buf []byte) ([]byte, int) {
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
+// v3 format: hash + trigrams + bigrams + tokens + attrs + fileids
 func (c *CRecord) MarshalValue() []byte {
-	// Estimate size: hash(32) + trigrams + tokens + attrs + fileids
+	// Estimate size: hash(32) + trigrams + bigrams + tokens + attrs + fileids
 	size := 32 // hash
 	size += binary.MaxVarintLen64 // n-trigrams
 	size += len(c.Trigrams) * (3 + binary.MaxVarintLen64)
+	size += binary.MaxVarintLen64 // n-bigrams R388
+	size += len(c.Bigrams) * (2 + binary.MaxVarintLen64)
 	size += binary.MaxVarintLen64 // n-tokens
 	for _, t := range c.Tokens {
 		size += binary.MaxVarintLen64 + binary.MaxVarintLen64 + len(t.Token)
@@ -174,6 +201,15 @@ func (c *CRecord) MarshalValue() []byte {
 		off += putUvarint(buf[off:], uint64(te.Count))
 	}
 
+	// Bigrams R388
+	off += putUvarint(buf[off:], uint64(len(c.Bigrams)))
+	for _, be := range c.Bigrams {
+		buf[off] = byte(be.Bigram >> 8)
+		buf[off+1] = byte(be.Bigram)
+		off += 2
+		off += putUvarint(buf[off:], uint64(be.Count))
+	}
+
 	// Tokens
 	off += putUvarint(buf[off:], uint64(len(c.Tokens)))
 	for _, te := range c.Tokens {
@@ -198,6 +234,7 @@ func (c *CRecord) MarshalValue() []byte {
 }
 
 // UnmarshalCValue decodes a CRecord value. ChunkID must be set separately (from key).
+// v3 format: hash + trigrams + bigrams + tokens + attrs + fileids
 func UnmarshalCValue(data []byte) (CRecord, error) {
 	var c CRecord
 	if len(data) < 32 {
@@ -228,6 +265,29 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 		}
 		c.Trigrams[i].Count = int(cnt)
 		off += n
+	}
+
+	// Bigrams R388
+	nBi, n := readUvarint(data[off:])
+	if n <= 0 {
+		return c, fmt.Errorf("CRecord: bad n-bigrams")
+	}
+	off += n
+	if nBi > 0 {
+		c.Bigrams = make([]BigramEntry, nBi)
+		for i := range c.Bigrams {
+			if off+2 > len(data) {
+				return c, fmt.Errorf("CRecord: bigram truncated")
+			}
+			c.Bigrams[i].Bigram = uint16(data[off])<<8 | uint16(data[off+1])
+			off += 2
+			cnt, n := readUvarint(data[off:])
+			if n <= 0 {
+				return c, fmt.Errorf("CRecord: bad bigram count")
+			}
+			c.Bigrams[i].Count = int(cnt)
+			off += n
+		}
 	}
 
 	// Tokens
@@ -514,6 +574,7 @@ func UnmarshalWValue(data []byte) ([]uint64, error) {
 
 // Record prefix bytes for the single subdatabase.
 const (
+	prefixB byte = 'B' // bigram inverted index R386
 	prefixC byte = 'C' // per-chunk record
 	prefixF byte = 'F' // per-file record
 	prefixH byte = 'H' // hash -> chunkid
@@ -557,4 +618,9 @@ func makeTKey(trigram uint32) []byte {
 
 func makeWKey(tokenHash uint32) []byte {
 	return []byte{prefixW, byte(tokenHash >> 24), byte(tokenHash >> 16), byte(tokenHash >> 8), byte(tokenHash)}
+}
+
+// makeBKey builds a B record key: prefix + 2-byte bigram. R386
+func makeBKey(bigram uint16) []byte {
+	return []byte{prefixB, byte(bigram >> 8), byte(bigram)}
 }

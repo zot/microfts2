@@ -27,6 +27,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] crc-BracketChunker.md → `bracket_chunker.go`
 - [x] crc-IndentChunker.md → `indent_chunker.go`
 - [x] crc-Overlay.md → `overlay.go`
+- [x] crc-Bigram.md → `charset.go`, `records.go`, `db.go`
 
 ### Sequences
 - [x] seq-init.md → `db.go`
@@ -43,6 +44,8 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-fuzzy-search.md → `db.go`
 - [x] seq-tmp-add.md → `overlay.go`, `db.go`
 - [x] seq-tmp-search.md → `overlay.go`, `db.go`
+- [x] seq-bigram-add.md → `db.go`, `charset.go`, `records.go`
+- [x] seq-bigram-search.md → `db.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
@@ -50,6 +53,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
+- [x] test-Bigram.md → `charset_test.go`, `records_test.go`, `db_test.go`, `overlay_test.go`
 
 ## Gaps
 
