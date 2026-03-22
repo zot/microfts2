@@ -1,3 +1,5 @@
+- see bigram search ark note
+
 - see PERFORMANCE.md
 
 - reorganization

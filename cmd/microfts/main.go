@@ -133,7 +133,6 @@ func cmdInit() {
 	fs := flag.CommandLine
 	dbPath, dbName := dbFlags(fs)
 	caseInsensitive := fs.Bool("case-insensitive", false, "case insensitive indexing")
-	noBigrams := fs.Bool("no-bigrams", false, "disable bigram indexing") // R396
 	aliasStr := fs.String("aliases", "", "byte aliases as from=to pairs, comma-separated (e.g. '\\n=^')")
 	fs.Parse(os.Args[1:])
 
@@ -146,7 +145,6 @@ func cmdInit() {
 
 	db, err := microfts2.Create(*dbPath, microfts2.Options{
 		CaseInsensitive: *caseInsensitive,
-		NoBigrams:       *noBigrams,
 		Aliases:         aliases,
 		DBName:          *dbName,
 	})
@@ -190,7 +188,8 @@ func cmdSearch() {
 	contains := fs.String("contains", "", "FTS text query (composes with --regex)")
 	scoreMode := fs.String("score", "coverage", "scoring strategy: coverage or density")
 	verify := fs.Bool("verify", false, "post-filter: verify query terms in chunk text")
-	fuzzy := fs.Bool("fuzzy", false, "OR semantics: match any query term, rank by term coverage")
+	loose := fs.Bool("loose", false, "OR semantics: match any query term, rank by term coverage")
+	fuzzy := fs.Bool("fuzzy", false, "typo-tolerant trigram OR-union search (fast, top-20)")
 	var filterRegex, exceptRegex stringSlice
 	fs.Var(&filterRegex, "filter-regex", "AND post-filter regex (repeatable)")
 	fs.Var(&exceptRegex, "except-regex", "subtract post-filter regex (repeatable)")
@@ -213,8 +212,6 @@ func cmdSearch() {
 		opt = microfts2.WithCoverage()
 	case "density":
 		opt = microfts2.WithDensity()
-	case "bigram": // R397
-		opt = microfts2.WithBigramOverlap()
 	default:
 		fmt.Fprintf(os.Stderr, "search: unknown score mode: %s\n", *scoreMode)
 		os.Exit(1)
@@ -238,12 +235,18 @@ func cmdSearch() {
 	if len(exceptRegex) > 0 {
 		opts = append(opts, microfts2.WithExceptRegex(exceptRegex...))
 	}
-	if *fuzzy {
-		opts = append(opts, microfts2.WithFuzzy())
+	if *loose {
+		opts = append(opts, microfts2.WithLoose())
 	}
 
 	var sr *microfts2.SearchResults
 	switch {
+	case *fuzzy: // R426: -fuzzy calls SearchFuzzy
+		q := positional
+		if *contains != "" {
+			q = *contains
+		}
+		sr, err = db.SearchFuzzy(q, 20, opts...)
 	case *contains != "" && *useRegex:
 		// FTS narrows candidates, regex post-filters
 		if positional != "" {

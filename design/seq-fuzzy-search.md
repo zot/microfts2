@@ -1,8 +1,8 @@
-# Sequence: Fuzzy Search
+# Sequence: Loose Search
 
 **Requirements:** R336, R337, R338, R339, R340, R341, R342, R343, R345
 
-Shows how Search with WithFuzzy() collects candidates via union instead of intersection.
+Shows how Search with WithLoose() collects candidates via union instead of intersection.
 
 ## Participants
 - Caller
@@ -13,7 +13,7 @@ Shows how Search with WithFuzzy() collects candidates via union instead of inter
 ```
 Caller                              DB
   |                                  |
-  |--- Search(query, WithFuzzy()) -->|
+  |--- Search(query, WithLoose()) -->|
   |                                  |
   |                    parseQueryTerms(query) → terms[]
   |                    for each term:
@@ -30,7 +30,7 @@ Caller                              DB
   |                                  |
   |                    score each candidate:
   |                      if custom ScoreFunc → use it (R345)
-  |                      else default fuzzy scoring:
+  |                      else default loose scoring:
   |                        for each term, check if all term trigrams have count > 0
   |                        score = matchingTerms / totalTerms
   |                                  |

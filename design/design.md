@@ -27,7 +27,6 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] crc-BracketChunker.md → `bracket_chunker.go`
 - [x] crc-IndentChunker.md → `indent_chunker.go`
 - [x] crc-Overlay.md → `overlay.go`
-- [x] crc-Bigram.md → `charset.go`, `records.go`, `db.go`
 
 ### Sequences
 - [x] seq-init.md → `db.go`
@@ -44,8 +43,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-fuzzy-search.md → `db.go`
 - [x] seq-tmp-add.md → `overlay.go`, `db.go`
 - [x] seq-tmp-search.md → `overlay.go`, `db.go`
-- [x] seq-bigram-add.md → `db.go`, `charset.go`, `records.go`
-- [x] seq-bigram-search.md → `db.go`
+- [x] seq-fuzzy-trigram.md → `db.go`, `cmd/microfts/main.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
@@ -53,7 +51,6 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
-- [x] test-Bigram.md → `charset_test.go`, `records_test.go`, `db_test.go`, `overlay_test.go`
 
 ## Gaps
 
@@ -68,8 +65,10 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O7: ~~sparse C record encode/decode — old C records removed in LMDB reorganization~~
 - [x] O8: Packed trigram functions removed (A record eliminated)
 - [ ] A3: Removed requirements uncovered: R7, R8, R14, R15, R16, R19, R21, R28, R30, R36, R48, R54, R75, R76, R83, R95, R102, R109, R123, R138, R145, R148, R149, R154, R155 — old two-tree layout, forward/reverse index, per-trigram C records, N record JSON
+- [ ] A4: Bigram index removed — R379-R412 no longer implemented. SearchFuzzy (trigram OR-union) handles typo-tolerant search. Bigrams were slow (2.5s on 74K chunks) and fat (1.7x index size). Version reverted to "2"
 - [ ] O9: No test for WRecord encode/decode roundtrip
 - [x] O10: No test for WithAfter/WithBefore date filtering (needs chunker producing Attrs with timestamp)
 - [x] O11: Implementation: db.go needs full rewrite for new record layout (single subdatabase, chunk dedup, record structs, T/W records, ChunkFilter)
 - [ ] O12: SearchOption enumeration not fully anchored in requirements — WithOnly and WithExcept exist in code without spec/requirement coverage; audit all SearchOptions against requirements
 - [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks
+- [x] O14: R417: Bigram OR-union candidate set size unbounded — monitor performance on large corpora, add filtering if needed

@@ -457,8 +457,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "3" {
-		t.Fatalf("Version() = %q, want %q", v, "3")
+	if v != "2" {
+		t.Fatalf("Version() = %q, want %q", v, "2")
 	}
 }
 
@@ -1454,9 +1454,9 @@ func TestSearchMulti(t *testing.T) {
 	db.AddFile(dir+"/a.txt", "line")
 	db.AddFile(dir+"/b.txt", "line")
 
-	strategies := map[string]SearchStrategy{
-		"coverage": StrategyFunc(scoreCoverage),
-		"overlap":  StrategyFunc(ScoreOverlap),
+	strategies := map[string]ScoreFunc{
+		"coverage": scoreCoverage,
+		"overlap":  ScoreOverlap,
 	}
 	results, err := db.SearchMulti("alpha beta", strategies, 2)
 	if err != nil {
@@ -1495,9 +1495,9 @@ func TestSearchMultiSharedFilters(t *testing.T) {
 		return true
 	}
 
-	strategies := map[string]SearchStrategy{
-		"coverage": StrategyFunc(scoreCoverage),
-		"overlap":  StrategyFunc(ScoreOverlap),
+	strategies := map[string]ScoreFunc{
+		"coverage": scoreCoverage,
+		"overlap":  ScoreOverlap,
 	}
 	results, err := db.SearchMulti("alpha", strategies, 10, WithChunkFilter(filter))
 	if err != nil {
@@ -1512,36 +1512,53 @@ func TestSearchMultiSharedFilters(t *testing.T) {
 	}
 }
 
-func TestSearchMultiWithBigrams(t *testing.T) {
-	db, dir := testDBWithBigrams(t)
-	writeTestFile(t, dir, "a.txt", "the cat sat on the mat\n")
+// R418, R419, R420: SearchFuzzy finds typo queries via trigram OR-union
+func TestSearchFuzzy(t *testing.T) {
+	db, dir := testDB(t)
+	writeTestFile(t, dir, "a.txt", "humble master of the forge\n")
+	writeTestFile(t, dir, "b.txt", "unrelated document about nothing\n")
+	writeTestFile(t, dir, "c.txt", "the master builder\n")
 	db.AddFile(dir+"/a.txt", "line")
+	db.AddFile(dir+"/b.txt", "line")
+	db.AddFile(dir+"/c.txt", "line")
 
-	queryBigrams := db.trigrams.BigramCounts([]byte("cat"))
-	strategies := map[string]SearchStrategy{
-		"coverage": StrategyFunc(scoreCoverage),
-		"bigram":   StrategyBigramOverlap(queryBigrams),
-	}
-	results, err := db.SearchMulti("cat", strategies, 10)
+	// "humle mster" is a typo — trigram AND-intersection finds nothing
+	sr, err := db.Search("humle mster")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("expected 2 strategy results, got %d", len(results))
+	if len(sr.Results) != 0 {
+		t.Fatalf("exact search should find nothing for typo, got %d", len(sr.Results))
 	}
-	// Both strategies should find the file
-	for _, mr := range results {
-		if len(mr.Results) == 0 {
-			t.Errorf("strategy %s has no results", mr.Strategy)
-		}
+
+	// SearchFuzzy should find results via trigram OR-union
+	sr, err = db.SearchFuzzy("humle mster", 10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Find bigram strategy results and verify positive score
-	for _, mr := range results {
-		if mr.Strategy == "bigram" {
-			if mr.Results[0].Score <= 0 {
-				t.Errorf("bigram strategy score should be positive, got %f", mr.Results[0].Score)
-			}
-		}
+	if len(sr.Results) == 0 {
+		t.Fatal("SearchFuzzy should find results for typo query")
+	}
+	// "humble master" should rank highest (most trigram overlap)
+	if !strings.Contains(sr.Results[0].Path, "a.txt") {
+		t.Errorf("expected a.txt as top result, got %s", sr.Results[0].Path)
+	}
+}
+
+func TestSearchFuzzyKLimit(t *testing.T) {
+	db, dir := testDB(t)
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("f%d.txt", i)
+		writeTestFile(t, dir, name, fmt.Sprintf("hello world document number %d\n", i))
+		db.AddFile(dir+"/"+name, "line")
+	}
+
+	sr, err := db.SearchFuzzy("hello world", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) > 5 {
+		t.Errorf("expected at most 5 results, got %d", len(sr.Results))
 	}
 }
 
@@ -1705,7 +1722,7 @@ func TestFuzzySearchOR(t *testing.T) {
 	andCount := len(sr.Results)
 
 	// Fuzzy search: all three should match
-	sr, err = db.Search("alpha beta", WithFuzzy())
+	sr, err = db.Search("alpha beta", WithLoose())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1724,7 +1741,7 @@ func TestFuzzySearchScoring(t *testing.T) {
 	db.AddFile(dir+"/one.txt", "line")
 	db.AddFile(dir+"/two.txt", "line")
 
-	sr, err := db.Search("alpha beta", WithFuzzy())
+	sr, err := db.Search("alpha beta", WithLoose())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1761,7 +1778,7 @@ func TestFuzzySearchWithCustomScoreFunc(t *testing.T) {
 	db.AddFile(dir+"/a.txt", "line")
 	db.AddFile(dir+"/b.txt", "line")
 
-	sr, err := db.Search("alpha beta", WithFuzzy(), WithOverlap())
+	sr, err := db.Search("alpha beta", WithLoose(), WithOverlap())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1782,7 +1799,7 @@ func TestFuzzySearchNoResults(t *testing.T) {
 	writeTestFile(t, dir, "a.txt", "completely unrelated content\n")
 	db.AddFile(dir+"/a.txt", "line")
 
-	sr, err := db.Search("xyzzy plugh", WithFuzzy())
+	sr, err := db.Search("xyzzy plugh", WithLoose())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1817,213 +1834,3 @@ func TestWithAfterFallsBackToModTime(t *testing.T) {
 	}
 }
 
-// --- Bigram tests ---
-
-func testDBWithBigrams(t *testing.T) (*DB, string) {
-	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "testdb")
-	db, err := Create(dbPath, Options{}) // bigrams enabled by default
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.AddStrategyFunc("line", LineChunkFunc)
-	t.Cleanup(func() { db.Close() })
-	return db, dir
-}
-
-func testDBNoBigrams(t *testing.T) (*DB, string) {
-	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "testdb")
-	db, err := Create(dbPath, Options{NoBigrams: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.AddStrategyFunc("line", LineChunkFunc)
-	t.Cleanup(func() { db.Close() })
-	return db, dir
-}
-
-func TestAddFileWithBigrams(t *testing.T) {
-	db, dir := testDBWithBigrams(t)
-	fpath := filepath.Join(dir, "test.txt")
-	os.WriteFile(fpath, []byte("the cat sat on the mat"), 0644)
-	_, err := db.AddFile(fpath, "line")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify B records exist by searching with bigram scoring
-	sr, err := db.Search("cat", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sr.Results) == 0 {
-		t.Fatal("expected results with bigram scoring")
-	}
-	if sr.Results[0].Score <= 0 {
-		t.Errorf("expected positive bigram score, got %f", sr.Results[0].Score)
-	}
-}
-
-func TestAddFileNoBigrams(t *testing.T) {
-	db, dir := testDBNoBigrams(t)
-	fpath := filepath.Join(dir, "test.txt")
-	os.WriteFile(fpath, []byte("the cat sat on the mat"), 0644)
-	_, err := db.AddFile(fpath, "line")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if db.settings.BigramsEnabled {
-		t.Fatal("expected bigrams disabled")
-	}
-
-	// Search still works (trigram candidates still found), but bigram score
-	// should be 0 because no bigram data in C records
-	sr, err := db.Search("cat", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// With no bigram data, bigramCounts is nil → score uses empty map → 0 matches → filtered out
-	if len(sr.Results) != 0 {
-		t.Errorf("expected 0 results with bigram scoring on no-bigram DB, got %d", len(sr.Results))
-	}
-}
-
-func TestBigramScoringVsCoverage(t *testing.T) {
-	db, dir := testDBWithBigrams(t)
-	// Add file with content containing the query word
-	fpath := filepath.Join(dir, "test.txt")
-	os.WriteFile(fpath, []byte("the cat sat on a mat"), 0644)
-	db.AddFile(fpath, "line")
-
-	// Search with coverage scoring
-	srCov, err := db.Search("cat", WithCoverage())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(srCov.Results) == 0 {
-		t.Fatal("expected coverage results")
-	}
-
-	// Search with bigram scoring
-	srBi, err := db.Search("cat", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(srBi.Results) == 0 {
-		t.Fatal("expected bigram results")
-	}
-
-	// Both should find the same file, but scores differ
-	if srCov.Results[0].Path != srBi.Results[0].Path {
-		t.Errorf("different paths: coverage=%s bigram=%s", srCov.Results[0].Path, srBi.Results[0].Path)
-	}
-
-	// Bigram score should be > 0 — "cat" shares all query bigrams with the chunk
-	if srBi.Results[0].Score <= 0 {
-		t.Errorf("expected positive bigram score, got %f", srBi.Results[0].Score)
-	}
-}
-
-func TestRemoveFileCleansBRecords(t *testing.T) {
-	db, dir := testDBWithBigrams(t)
-	fpath := filepath.Join(dir, "test.txt")
-	os.WriteFile(fpath, []byte("unique bigram content here"), 0644)
-	_, err := db.AddFile(fpath, "line")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify search finds it
-	sr, err := db.Search("unique bigram", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sr.Results) == 0 {
-		t.Fatal("expected results before remove")
-	}
-
-	// Remove and search again
-	err = db.RemoveFile(fpath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sr, err = db.Search("unique bigram", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sr.Results) != 0 {
-		t.Errorf("expected 0 results after remove, got %d", len(sr.Results))
-	}
-}
-
-func TestBigramsEnabledSetting(t *testing.T) {
-	// Test that the setting persists via Open
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "testdb")
-
-	db, err := Create(dbPath, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !db.settings.BigramsEnabled {
-		t.Fatal("expected bigrams enabled by default")
-	}
-	db.Close()
-
-	db, err = Open(dbPath, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if !db.settings.BigramsEnabled {
-		t.Fatal("expected bigrams enabled after reopen")
-	}
-}
-
-func TestBigramsDisabledSetting(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "testdb")
-
-	db, err := Create(dbPath, Options{NoBigrams: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if db.settings.BigramsEnabled {
-		t.Fatal("expected bigrams disabled")
-	}
-	db.Close()
-
-	db, err = Open(dbPath, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if db.settings.BigramsEnabled {
-		t.Fatal("expected bigrams disabled after reopen")
-	}
-}
-
-func TestOverlayWithBigrams(t *testing.T) {
-	db, _ := testDBWithBigrams(t)
-
-	_, err := db.AddTmpFile("tmp://test", "line", []byte("the cat sat"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sr, err := db.Search("cat", WithBigramOverlap())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sr.Results) == 0 {
-		t.Fatal("expected overlay results with bigram scoring")
-	}
-	if sr.Results[0].Path != "tmp://test" {
-		t.Errorf("expected tmp://test, got %s", sr.Results[0].Path)
-	}
-}

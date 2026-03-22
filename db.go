@@ -40,7 +40,6 @@ type collectedChunk struct {
 	rangeStr  string
 	hash      [32]byte
 	triCounts map[uint32]int
-	biCounts  map[uint16]int // R405: bigram counts (nil when bigrams disabled)
 	tokens    []TokenEntry
 	attrs     []Pair
 }
@@ -60,7 +59,6 @@ type DB struct {
 type Settings struct {
 	CaseInsensitive    bool
 	Aliases            map[byte]byte     // byte→byte alias mapping
-	BigramsEnabled     bool              // R380: bigram indexing enabled
 	ChunkingStrategies map[string]string // name→cmd (empty cmd = func strategy)
 }
 
@@ -127,9 +125,8 @@ type searchConfig struct {
 	exceptRegexFilters []string            // subtract: any match rejects chunk R184
 	chunkFilters       []ChunkFilter       // AND: all must pass for chunk to be included R255-R257
 	proximityTopN      int                 // if > 0, rerank top-N by proximity R279
-	fuzzy              bool                // R336: OR semantics at term level
+	loose              bool                // R336: OR semantics at term level
 	noTmp              bool                // skip overlay (tmp://) documents
-	bigramScore        bool                // R393: score using bigram overlap instead of trigrams
 }
 
 // ChunkFilter receives a CRecord during candidate evaluation.
@@ -199,30 +196,6 @@ func WithScoring(fn ScoreFunc) SearchOption {
 	return func(c *searchConfig) { c.scoreFunc = fn }
 }
 
-// CRC: crc-DB.md | R393
-// WithBigramOverlap scores candidates by bigram overlap ratio instead of trigrams.
-// Candidates are still collected via trigram intersection (unchanged).
-// The scoring reads bigram counts from C records.
-func WithBigramOverlap() SearchOption {
-	return func(c *searchConfig) { c.bigramScore = true }
-}
-
-// SearchStrategy wraps a ScoreFunc with metadata about what candidate data it needs. R407
-type SearchStrategy struct {
-	Score      ScoreFunc
-	UseBigrams bool // when true, scoring receives bigram counts instead of trigram counts
-}
-
-// StrategyFunc wraps a plain ScoreFunc into a SearchStrategy. R411
-func StrategyFunc(fn ScoreFunc) SearchStrategy {
-	return SearchStrategy{Score: fn}
-}
-
-// StrategyBigramOverlap returns a SearchStrategy for bigram overlap scoring. R412
-func StrategyBigramOverlap(queryBigrams map[uint16]int) SearchStrategy {
-	return SearchStrategy{Score: ScoreBigramOverlap(queryBigrams), UseBigrams: true}
-}
-
 // WithOnly restricts search to chunks from the given file IDs.
 func WithOnly(ids map[uint64]struct{}) SearchOption {
 	return func(c *searchConfig) { c.onlyIDs = ids }
@@ -234,10 +207,10 @@ func WithExcept(ids map[uint64]struct{}) SearchOption {
 }
 
 // CRC: crc-DB.md | Seq: seq-fuzzy-search.md | R336
-// WithFuzzy enables OR semantics at the term level: a chunk matches if it
+// WithLoose enables OR semantics at the term level: a chunk matches if it
 // contains any query term's trigrams. Default scoring: terms matched / total terms.
-func WithFuzzy() SearchOption {
-	return func(c *searchConfig) { c.fuzzy = true }
+func WithLoose() SearchOption {
+	return func(c *searchConfig) { c.loose = true }
 }
 
 // CRC: crc-DB.md | R376
@@ -386,27 +359,6 @@ func fuzzyTermScore(termTrigrams [][]uint32) ScoreFunc {
 	}
 }
 
-// CRC: crc-DB.md | R269, R270
-// ScoreBigramOverlap returns a ScoreFunc that scores by bigram overlap ratio.
-// queryBigrams is extracted from the query; the returned closure uses the standard
-// ScoreFunc signature but ignores the trigram args — instead it matches query bigrams
-// against the chunkBigrams map passed as chunkCounts (uint16 widened to uint32).
-// R392, R394
-func ScoreBigramOverlap(queryBigrams map[uint16]int) ScoreFunc {
-	return func(_ []uint32, chunkCounts map[uint32]int, _ int) float64 {
-		if len(queryBigrams) == 0 {
-			return 0
-		}
-		matches := 0
-		for bi := range queryBigrams {
-			if chunkCounts[uint32(bi)] > 0 {
-				matches++
-			}
-		}
-		return float64(matches) / float64(len(queryBigrams))
-	}
-}
-
 // ScoreOverlap: count of matching query trigrams, no normalization (OR semantics).
 func ScoreOverlap(queryTrigrams []uint32, chunkCounts map[uint32]int, _ int) float64 {
 	matching := 0
@@ -506,7 +458,6 @@ type FileStatus struct {
 type Options struct {
 	CaseInsensitive bool
 	Aliases         map[byte]byte // maps input bytes to replacement bytes before trigram extraction
-	NoBigrams       bool          // R379: disable bigram indexing (default: enabled)
 	DBName          string        // subdatabase name, default "fts"
 	MaxDBs          int           // LMDB max named databases, default 2
 	MapSize         int64         // bytes, default 1GB
@@ -891,14 +842,6 @@ func writeSettings(th TxnHolder, dbi lmdb.DBI, s *Settings) error {
 	if err := iPut(th, dbi, "caseInsensitive", ci); err != nil {
 		return err
 	}
-	// R380: bigrams I record
-	bi := "true"
-	if !s.BigramsEnabled {
-		bi = "false"
-	}
-	if err := iPut(th, dbi, "bigrams", bi); err != nil {
-		return err
-	}
 	for from, to := range s.Aliases {
 		key := fmt.Sprintf("alias:%c", from)
 		if err := iPut(th, dbi, key, string([]byte{to})); err != nil {
@@ -940,8 +883,6 @@ func loadSettings(th TxnHolder, dbi lmdb.DBI) (Settings, error) {
 		value := string(v)
 
 		switch {
-		case name == "bigrams":
-			s.BigramsEnabled = (value == "true")
 		case name == "caseInsensitive":
 			s.CaseInsensitive = (value == "true")
 		case strings.HasPrefix(name, "alias:") && len(name) > 6:
@@ -998,7 +939,6 @@ func Create(path string, opts Options) (*DB, error) {
 	settings := Settings{
 		CaseInsensitive:    opts.CaseInsensitive,
 		Aliases:            opts.Aliases,
-		BigramsEnabled:     !opts.NoBigrams, // R379, R380
 		ChunkingStrategies: make(map[string]string),
 	}
 
@@ -1035,7 +975,7 @@ func Create(path string, opts Options) (*DB, error) {
 		if err := iSetCounter(th, dbi, "totalChunks", 0); err != nil {
 			return err
 		}
-		return iPut(th, dbi, "version", "3") // R381
+		return iPut(th, dbi, "version", "2")
 	})
 	if err != nil {
 		env.Close()
@@ -1110,16 +1050,6 @@ func (db *DB) QueryTrigramCounts(query string) ([]TrigramCount, error) {
 		return nil
 	})
 	return result, err
-}
-
-// QueryBigramCounts extracts bigrams from a query string using the DB's
-// normalization settings (case folding, aliases). Returns nil if bigrams
-// are disabled or the query produces no bigrams.
-func (db *DB) QueryBigramCounts(query string) map[uint16]int {
-	if !db.settings.BigramsEnabled {
-		return nil
-	}
-	return db.trigrams.BigramCounts([]byte(query))
 }
 
 func (db *DB) Close() error {
@@ -1252,9 +1182,6 @@ func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, i
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
 		}
-		if db.settings.BigramsEnabled { // R390
-			cc.biCounts = db.trigrams.BigramCounts(c.Content)
-		}
 		cc.attrs = copyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
@@ -1299,26 +1226,11 @@ func (db *DB) resolveChunker(strategy string) Chunker {
 	return FuncChunker{Fn: RunChunkerFunc(cmd)}
 }
 
-// newChunkTW holds T/W/B batch data for a newly created chunk.
+// newChunkTW holds T/W batch data for a newly created chunk.
 type newChunkTW struct {
 	chunkid  uint64
 	trigrams []uint32
-	bigrams  []uint16 // R390: bigrams for B record batch (nil when disabled)
 	tokens   []TokenEntry
-}
-
-// buildBigramData converts biCounts into entries and a list for B record batching.
-func buildBigramData(biCounts map[uint16]int) ([]BigramEntry, []uint16) {
-	if biCounts == nil {
-		return nil, nil
-	}
-	entries := make([]BigramEntry, 0, len(biCounts))
-	list := make([]uint16, 0, len(biCounts))
-	for bi, cnt := range biCounts {
-		entries = append(entries, BigramEntry{Bigram: bi, Count: cnt})
-		list = append(list, bi)
-	}
-	return entries, list
 }
 
 // dedupOrCreateChunk checks H record for dedup. On hit, adds fileid to existing C record.
@@ -1370,13 +1282,10 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		triList = append(triList, tri)
 	}
 
-	biEntries, biList := buildBigramData(ch.biCounts)
-
 	crec := CRecord{
 		ChunkID:  chunkid,
 		Hash:     ch.hash,
 		Trigrams: triEntries,
-		Bigrams:  biEntries,
 		Tokens:   ch.tokens,
 		Attrs:    ch.attrs,
 		FileIDs:  []uint64{fileid},
@@ -1385,7 +1294,7 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		return 0, nil, err
 	}
 
-	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, bigrams: biList, tokens: ch.tokens}, nil
+	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, nil
 }
 
 // dedupOrCreateChunkIfAbsent is like dedupOrCreateChunk but only adds fileid
@@ -1440,13 +1349,10 @@ func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid
 		triList = append(triList, tri)
 	}
 
-	biEntries, biList := buildBigramData(ch.biCounts)
-
 	crec := CRecord{
 		ChunkID:  chunkid,
 		Hash:     ch.hash,
 		Trigrams: triEntries,
-		Bigrams:  biEntries,
 		Tokens:   ch.tokens,
 		Attrs:    ch.attrs,
 		FileIDs:  []uint64{fileid},
@@ -1455,7 +1361,7 @@ func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid
 		return 0, nil, err
 	}
 
-	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, bigrams: biList, tokens: ch.tokens}, nil
+	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, nil
 }
 
 // coalescedAppendT coalesces trigram→chunkids across all new chunks and does
@@ -1498,37 +1404,12 @@ func coalescedAppendW(th TxnHolder, dbi lmdb.DBI, newChunks []newChunkTW) error 
 	return nil
 }
 
-// coalescedAppendB coalesces bigram→chunkids across all new chunks and does
-// one read-modify-write per unique bigram. R390
-func coalescedAppendB(th TxnHolder, dbi lmdb.DBI, newChunks []newChunkTW) error {
-	biMap := make(map[uint16][]uint64)
-	for _, nc := range newChunks {
-		for _, bi := range nc.bigrams {
-			biMap[bi] = append(biMap[bi], nc.chunkid)
-		}
-	}
-	for bi, cids := range biMap {
-		if err := appendChunkIDsToInvertedRecord(th, dbi, makeBKey(bi), cids); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// coalescedAppendAll writes coalesced T, W, and (if enabled) B records.
+// coalescedAppendAll writes coalesced T and W records.
 func (db *DB) coalescedAppendAll(th TxnHolder, newChunks []newChunkTW) error {
 	if err := coalescedAppendT(th, db.dbi, newChunks); err != nil {
 		return err
 	}
-	if err := coalescedAppendW(th, db.dbi, newChunks); err != nil {
-		return err
-	}
-	if db.settings.BigramsEnabled {
-		if err := coalescedAppendB(th, db.dbi, newChunks); err != nil {
-			return err
-		}
-	}
-	return nil
+	return coalescedAppendW(th, db.dbi, newChunks)
 }
 
 // Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
@@ -1585,7 +1466,7 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 		mergeTokenBag(fileBag, ch.tokens)
 	}
 
-	// Coalesced T/W/B record updates — one read-modify-write per unique trigram/token hash/bigram
+	// Coalesced T/W record updates — one read-modify-write per unique trigram/token hash
 	if err := db.coalescedAppendAll(th, newChunks); err != nil {
 		return 0, err
 	}
@@ -1677,10 +1558,6 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
 				}
 				seen[h] = true
 				removeFromInvertedRecord(th, db.dbi, makeWKey(h), fce.ChunkID)
-			}
-			// R400: Remove chunkid from B records
-			for _, be := range crec.Bigrams {
-				removeFromInvertedRecord(th, db.dbi, makeBKey(be.Bigram), fce.ChunkID)
 			}
 		}
 	}
@@ -1823,9 +1700,6 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
 		}
-		if db.settings.BigramsEnabled { // R402
-			cc.biCounts = db.trigrams.BigramCounts(c.Content)
-		}
 		cc.attrs = copyPairs(c.Attrs)
 		newChunks = append(newChunks, cc)
 		return true
@@ -1965,7 +1839,7 @@ func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams
 		termChunks := collectChunkIDs(th, db.dbi, termActive)
 		if candidateChunkIDs == nil {
 			candidateChunkIDs = termChunks
-		} else if cfg.fuzzy {
+		} else if cfg.loose {
 			// R337: union across terms for fuzzy search
 			for id := range termChunks {
 				candidateChunkIDs[id] = true
@@ -1973,7 +1847,7 @@ func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams
 		} else {
 			candidateChunkIDs = intersectChunkSets(candidateChunkIDs, termChunks)
 		}
-		if !cfg.fuzzy && len(candidateChunkIDs) == 0 {
+		if !cfg.loose && len(candidateChunkIDs) == 0 {
 			return nil, nil
 		}
 	}
@@ -1999,9 +1873,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 
 	// R339, R345: default fuzzy scoring when no custom ScoreFunc
 	if cfg.scoreFunc == nil {
-		if cfg.bigramScore { // R392, R393
-			cfg.scoreFunc = ScoreBigramOverlap(db.trigrams.BigramCounts([]byte(query)))
-		} else if cfg.fuzzy {
+		if cfg.loose {
 			cfg.scoreFunc = fuzzyTermScore(termTrigrams)
 		} else {
 			cfg.scoreFunc = scoreCoverage
@@ -2024,7 +1896,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 
 	// R366, R376: merge overlay candidates unless noTmp
 	if db.overlay != nil && !cfg.noTmp {
-		results = append(results, db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.fuzzy, cfg.scoreFunc, cfg)...)
+		results = append(results, db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.loose, cfg.scoreFunc, cfg)...)
 	}
 
 	if cfg.verify {
@@ -2049,6 +1921,115 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	}, nil
 }
 
+// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R420, R421, R422, R423, R425, R427
+// SearchFuzzy performs fast typo-tolerant search using two phases:
+// Phase 1: trigram OR-union tally from T record posting lists (select top-k)
+// Phase 2: C record re-score with ScoreCoverage for the top-k winners
+func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchResults, error) {
+	cfg := applySearchOpts(opts)
+
+	query = strings.TrimSpace(query)
+	terms := parseQueryTerms(query)
+	if len(terms) == 0 {
+		return &SearchResults{Status: IndexStatus{Built: true}}, nil
+	}
+
+	_, queryTrigrams := db.searchPrepare(terms)
+	if len(queryTrigrams) == 0 {
+		return &SearchResults{Status: IndexStatus{Built: true}}, nil
+	}
+
+	if k <= 0 {
+		k = 20
+	}
+
+	var results []SearchResult
+
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
+
+		// Phase 1: tally chunkID appearances across T record posting lists (R419)
+		tally := make(map[uint64]int)
+		for _, tri := range queryTrigrams {
+			val, err := txn.Get(db.dbi, makeTKey(tri))
+			if err != nil {
+				continue
+			}
+			ids, _ := UnmarshalTValue(val)
+			for _, id := range ids {
+				tally[id]++
+			}
+		}
+
+		// R425: overlay tally
+		if db.overlay != nil && !cfg.noTmp {
+			db.overlay.mu.RLock()
+			for _, tri := range queryTrigrams {
+				if set, ok := db.overlay.trigrams[tri]; ok {
+					for id := range set {
+						tally[id]++
+					}
+				}
+			}
+			db.overlay.mu.RUnlock()
+		}
+
+		if len(tally) == 0 {
+			return nil
+		}
+
+		// Select top-k by tally count (R421)
+		type tallyEntry struct {
+			chunkID uint64
+			count   int
+		}
+		entries := make([]tallyEntry, 0, len(tally))
+		for id, count := range tally {
+			entries = append(entries, tallyEntry{id, count})
+		}
+		slices.SortFunc(entries, func(a, b tallyEntry) int {
+			return cmp.Compare(b.count, a.count) // descending
+		})
+		if len(entries) > k {
+			entries = entries[:k]
+		}
+
+		// Phase 2: read C records for top-k, re-score with ScoreCoverage (R420)
+		topIDs := make(map[uint64]bool, len(entries))
+		for _, e := range entries {
+			topIDs[e.chunkID] = true
+		}
+		cands := db.collectCandidates(th, topIDs, cfg)
+		results = db.scoreAndResolve(th, cands, queryTrigrams, scoreCoverage, cfg)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// R423: post-filters
+	if cfg.verify {
+		results = verifyResults(db, results, query)
+	}
+	var ferr error
+	results, ferr = applyRegexPostFilters(db, results, cfg)
+	if ferr != nil {
+		return nil, ferr
+	}
+	if cfg.proximityTopN > 0 {
+		results = proximityRerank(db, results, query, cfg.proximityTopN)
+	}
+
+	sortResults(results)
+	if len(results) > k {
+		results = results[:k]
+	}
+	return &SearchResults{
+		Results: results,
+		Status:  IndexStatus{Built: true},
+	}, nil
+}
+
 // CRC: crc-DB.md | R286
 // MultiSearchResult holds one strategy's results from SearchMulti.
 type MultiSearchResult struct {
@@ -2056,8 +2037,8 @@ type MultiSearchResult struct {
 	Results  []SearchResult
 }
 
-// CRC: crc-DB.md | Seq: seq-search-multi.md | R283, R284, R285, R287, R288, R289, R290, R407, R408, R409, R410
-func (db *DB) SearchMulti(query string, strategies map[string]SearchStrategy, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
+// CRC: crc-DB.md | Seq: seq-search-multi.md | R283, R284, R285, R287, R288, R289, R290
+func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
 	cfg := applySearchOpts(opts)
 
 	query = strings.TrimSpace(query)
@@ -2071,26 +2052,18 @@ func (db *DB) SearchMulti(query string, strategies map[string]SearchStrategy, k 
 		return nil, nil
 	}
 
-	// R409: if any strategy uses bigrams, enable bigram count population
-	for _, strat := range strategies {
-		if strat.UseBigrams {
-			cfg.bigramScore = true
-			break
-		}
-	}
-
 	var multiResults []MultiSearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		cands, active := db.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams, cfg)
+
 		if len(cands) == 0 {
 			return nil
 		}
 
-		// Score with each strategy — R410: swap bigramScore per strategy
-		for name, strat := range strategies {
-			cfg.bigramScore = strat.UseBigrams
-			results := db.scoreAndResolve(txnWrap{txn}, cands, active, strat.Score, cfg)
+		// Score with each strategy
+		for name, scoreFunc := range strategies {
+			results := db.scoreAndResolve(txnWrap{txn}, cands, active, scoreFunc, cfg)
 			sortResults(results)
 			if k > 0 && len(results) > k {
 				results = results[:k]
@@ -2109,9 +2082,8 @@ func (db *DB) SearchMulti(query string, strategies map[string]SearchStrategy, k 
 	// R366, R376: merge overlay results per strategy unless noTmp
 	if db.overlay != nil && !cfg.noTmp {
 		for i := range multiResults {
-			strat := strategies[multiResults[i].Strategy]
-			cfg.bigramScore = strat.UseBigrams
-			overlayResults := db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.fuzzy, strat.Score, cfg)
+			scoreFunc := strategies[multiResults[i].Strategy]
+			overlayResults := db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.loose, scoreFunc, cfg)
 			multiResults[i].Results = append(multiResults[i].Results, overlayResults...)
 		}
 	}
@@ -2200,11 +2172,10 @@ func intersectChunkSets(a, b map[uint64]bool) map[uint64]bool {
 
 // candidateChunk holds pre-loaded chunk data for scoring. CRC: crc-DB.md | R284
 type candidateChunk struct {
-	chunkID      uint64
-	crec         CRecord
-	chunkCounts  map[uint32]int
-	bigramCounts map[uint32]int // bigram counts (uint16 widened to uint32) for bigram scoring
-	tokenCount   int
+	chunkID     uint64
+	crec        CRecord
+	chunkCounts map[uint32]int
+	tokenCount  int
 }
 
 // collectCandidates reads C records for candidate chunkids, applies chunk filters,
@@ -2235,20 +2206,11 @@ func (db *DB) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool, cfg sear
 			chunkCounts[te.Trigram] = te.Count
 		}
 
-		var biCounts map[uint32]int
-		if cfg.bigramScore && len(crec.Bigrams) > 0 {
-			biCounts = make(map[uint32]int, len(crec.Bigrams))
-			for _, be := range crec.Bigrams {
-				biCounts[uint32(be.Bigram)] = be.Count
-			}
-		}
-
 		candidates = append(candidates, candidateChunk{
-			chunkID:      chunkid,
-			crec:         crec,
-			chunkCounts:  chunkCounts,
-			bigramCounts: biCounts,
-			tokenCount:   len(crec.Tokens),
+			chunkID:     chunkid,
+			crec:        crec,
+			chunkCounts: chunkCounts,
+			tokenCount:  len(crec.Tokens),
 		})
 	}
 	return candidates
@@ -2265,15 +2227,7 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active 
 		if active == nil {
 			score = 1.0
 		} else {
-			counts := cand.chunkCounts
-			if cfg.bigramScore {
-				if cand.bigramCounts != nil {
-					counts = cand.bigramCounts
-				} else {
-					counts = nil // no bigram data → score 0
-				}
-			}
-			score = scoreFunc(active, counts, cand.tokenCount)
+			score = scoreFunc(active, cand.chunkCounts, cand.tokenCount)
 			if score <= 0 {
 				continue
 			}

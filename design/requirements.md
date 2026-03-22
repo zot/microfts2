@@ -547,7 +547,7 @@
 ## Feature: Fuzzy Search
 **Source:** specs/main.md
 
-- **R336:** `WithFuzzy() SearchOption` — enables OR semantics at the term level for candidate collection
+- **R336:** `WithLoose() SearchOption` — enables OR semantics at the term level for candidate collection
 - **R337:** Fuzzy candidate set is the union of all terms' trigram candidate sets (a chunk matches if it contains any term's trigrams)
 - **R338:** Within each term, trigram intersection is still AND (all trigrams of the term must match the chunk)
 - **R339:** Default fuzzy scoring: score = (terms matched) / (total query terms), range [0.0, 1.0]
@@ -556,7 +556,7 @@
 - **R342:** Composable with all existing search options: `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`
 - **R343:** Works with `SearchMulti` — fuzzy candidate collection shared, per-strategy scoring independent
 - **R344:** CLI flag: `microfts search -db <path> -fuzzy <query>` — composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`
-- **R345:** (inferred) When `WithFuzzy` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default fuzzy term-match scoring is bypassed
+- **R345:** (inferred) When `WithLoose` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default loose term-match scoring is bypassed
 
 ## Feature: Fileid Filtering
 **Source:** specs/main.md
@@ -614,7 +614,7 @@
 - **R388:** C record bigram section (when enabled): `[n-bigrams:varint] [[bigram:2] [count:varint]]...` — appended after existing trigram counts
 - **R389:** I record bigram flag determines whether C record marshal/unmarshal includes the bigram section
 - **R390:** Bigram B record updates coalesced alongside T/W updates during AddFile — one read-modify-write per unique bigram across all chunks
-- **R391:** Bigrams are a scoring signal, not a candidate filter — candidates still come from trigram intersection
+- **R391:** For single-strategy `Search`, bigrams are scoring-only — candidates come from trigram intersection
 - **R392:** `ScoreBigramOverlap` score function: matching query bigrams / total query bigrams per chunk; fits `ScoreFunc` signature
 - **R393:** `WithBigramOverlap() SearchOption` — sugar for `WithScoring(ScoreBigramOverlap)`
 - **R394:** Score function extracts bigrams from the query at call time using the same extraction as indexing
@@ -636,3 +636,22 @@
 - **R410:** `scoreAndResolve` passes bigram counts (instead of trigram counts) to strategies with `UseBigrams = true`
 - **R411:** `StrategyFunc(fn ScoreFunc) SearchStrategy` — wraps a plain ScoreFunc with `UseBigrams = false`
 - **R412:** `StrategyBigramOverlap(queryBigrams map[uint16]int) SearchStrategy` — returns `SearchStrategy{Score: ScoreBigramOverlap(queryBigrams), UseBigrams: true}`
+- **R413:** `SearchMulti` candidate expansion: when any strategy has `UseBigrams`, collect additional candidates via trigram OR-union (union of T record posting lists for query trigrams) — surviving trigrams catch typo queries that AND-intersection misses
+- **R414:** OR-union candidate chunkIDs merged into trigram-intersection candidate set before `collectCandidates` — all strategies see the merged set
+- **R415:** `collectTrigramUnion` helper: reads T records for query trigrams, returns union of posting lists (OR semantics). Called from `SearchMulti` only
+- **R416:** Overlay candidate expansion: when `expandCandidates` is true, overlay `searchOverlay` unions its trigram index entries for all active trigrams into the candidate set
+- ~~**R417:** (inferred) Bigram OR-union may produce a larger candidate set than trigram intersection — no cap initially, measure and add filtering if needed~~
+
+## Feature: Fuzzy Trigram Search
+**Source:** specs/fuzzy-trigram.md
+
+- **R418:** `SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchResults, error)` — fast typo-tolerant search method on DB
+- **R419:** Phase 1: extract trigrams from query, read T record posting lists, count how many posting lists each chunkID appears in — select top-k by count
+- **R420:** Phase 2: read C records for top-k candidates only, re-score using ScoreCoverage (actual trigram counts), re-sort by accurate score
+- **R421:** `k` parameter required — no unbounded fuzzy search
+- **R422:** Returns `*SearchResults` (same type as Search) for API compatibility
+- **R423:** Post-filter options apply to top-k: WithChunkFilter, WithRegexFilter, WithExceptRegex, WithProximityRerank
+- **R424:** WithVerify, WithScoring, WithTrigramFilter, WithLoose are ignored (not applicable to posting-list scoring)
+- **R425:** Overlay (tmp://) documents participate: overlay trigram maps OR-unioned into the tally alongside LMDB T records
+- **R426:** CLI `-fuzzy` flag on search command calls `SearchFuzzy`. CLI `-loose` flag calls `Search` with `WithLoose()`. Default k = 20 for fuzzy
+- **R427:** (inferred) `collectTrigramUnion` reused from SearchMulti candidate expansion for T record OR-union
