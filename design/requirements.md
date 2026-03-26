@@ -599,6 +599,24 @@
 - **R377:** `HasTmp() bool` — returns true if the overlay has any tmp:// documents; no allocation
 - **R378:** `TmpContent(path string) (*bytes.Reader, error)` — returns a reader over the raw stored content of a tmp:// document; no copy; error if not found
 
+### AppendTmpFile (overlay append)
+
+- **R428:** `AppendTmpFile(path, strategy string, content []byte, opts ...AppendOption) (uint64, error)` — shell `>>` semantics for tmp:// documents
+- **R429:** Content must be valid UTF-8; error if not
+- **R430:** `content` is only the appended bytes, not the full document
+- **R431:** If path not found in overlay: auto-create via `addFile` (create-if-absent), return new fileid
+- **R432:** If path found: strategy must match stored strategy; error on mismatch
+- **R433:** Chunks appended content using the named strategy; adds resulting chunks to the file's chunk list
+- **R434:** Existing chunks untouched — append only extends the chunk list
+- **R435:** Chunk deduplication within the overlay applies to new chunks (via `dedupOrCreateChunk`)
+- **R436:** File-level token bag merged with tokens from new chunks
+- **R437:** Stored content bytes extended: `ofile.content = append(ofile.content, content...)`
+- **R438:** (inferred) `adjustRange(rangeStr string, baseLine int) (string, error)` — shifts line range strings by baseLine offset
+- **R439:** `WithBaseLine(n int)` option: 1-based line offset applied to chunk ranges via `adjustRange` so line numbers are absolute
+- **R440:** Chunking happens outside the write lock — RLock to read file state, chunk outside lock, Lock to mutate
+- **R441:** Double-check after acquiring write lock: if file was removed between RLock and Lock, return error
+- **R442:** Empty chunk result from chunking is a no-op — returns fileid, nil
+
 ## Feature: Bigram Index
 **Source:** specs/bigram.md
 

@@ -1088,6 +1088,30 @@ func (db *DB) UpdateTmpFile(path, strategy string, content []byte) error
 
 This is the mutable document operation. Sessions can edit tmp:// documents: update content, re-chunk, re-tag (via attrs), all in memory.
 
+## Appending to Documents
+
+```go
+func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...AppendOption) (uint64, error)
+```
+
+Shell `>>` semantics: append new content to an existing tmp:// document, or create it if not found.
+
+- `content` is only the appended bytes, not the full document
+- Content must be valid UTF-8
+- If path not found in overlay: auto-create via `AddTmpFile` (create-if-absent)
+- If path found: strategy must match stored strategy (error on mismatch)
+- Chunks the appended content using the named strategy, adds resulting chunks to the existing file's chunk list
+- Existing chunks are untouched — append only extends
+- Chunk deduplication within the overlay applies to new chunks
+- F record equivalent updated: chunk entries appended, token bag merged, content extended
+- Returns the file's fileid (same fileid whether created or appended)
+- `WithBaseLine(n int)` option: 1-based line offset applied to chunk ranges so line numbers are absolute, not relative to the appended slice. Uses `adjustRange` to shift range strings.
+- Chunking happens outside the write lock (RLock to read file state, then chunk, then Lock to mutate)
+- Double-check after acquiring write lock — if the file was removed between RLock and Lock, return error rather than silently re-creating
+- Empty chunk result from chunking is a no-op (returns fileid, nil)
+
+This is the incremental-growth operation. For append-only content like conversation logs, it avoids the cost of re-chunking the entire document on each addition.
+
 ## Removing Documents
 
 ```go

@@ -158,6 +158,83 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 	}
 }
 
+// appendFile appends chunks to a tmp:// document, creating it if not found (>> semantics).
+// R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R439, R440, R441, R442
+func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts []AppendOption) (uint64, error) {
+	if !utf8.Valid(content) {
+		return 0, fmt.Errorf("tmp content is not valid UTF-8: %s", path)
+	}
+
+	// R440: chunking outside write lock.
+	o.mu.RLock()
+	ofile, exists := o.files[path]
+	if !exists {
+		o.mu.RUnlock()
+		// R431: auto-create via addFile.
+		return o.addFile(path, strategy, content, db)
+	}
+	if ofile.strategy != strategy {
+		o.mu.RUnlock()
+		return 0, fmt.Errorf("strategy mismatch for %s: stored %q, got %q", path, ofile.strategy, strategy)
+	}
+	fileID := ofile.fileID
+	o.mu.RUnlock()
+
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
+		return 0, fmt.Errorf("chunking strategy %q not registered", strategy)
+	}
+
+	collected, err := collectChunksFromContent(path, content, chunker, db)
+	if err != nil {
+		return 0, err
+	}
+	if len(collected) == 0 {
+		return fileID, nil
+	}
+
+	var cfg appendConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.baseLine > 0 {
+		for i := range collected {
+			adjusted, err := adjustRange(collected[i].rangeStr, cfg.baseLine)
+			if err != nil {
+				return 0, fmt.Errorf("adjust range %q: %w", collected[i].rangeStr, err)
+			}
+			collected[i].rangeStr = adjusted
+		}
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Re-check: file could have been removed between RUnlock and Lock.
+	ofile, exists = o.files[path]
+	if !exists {
+		// Removed between checks — treat as not found, but we already chunked.
+		// Rare race: fall through to addFile would need re-chunking. Return error.
+		return 0, fmt.Errorf("tmp file removed during append: %s", path)
+	}
+
+	fileTokMap := make(map[string]int, len(ofile.tokens))
+	mergeTokenBag(fileTokMap, ofile.tokens)
+
+	for _, cc := range collected {
+		chunkID := o.dedupOrCreateChunk(cc, ofile.fileID)
+		ofile.chunks = append(ofile.chunks, FileChunkEntry{
+			ChunkID:  chunkID,
+			Location: cc.rangeStr,
+		})
+		mergeTokenBag(fileTokMap, cc.tokens)
+	}
+
+	ofile.tokens = tokenBagToEntries(fileTokMap)
+	ofile.content = append(ofile.content, content...)
+	return ofile.fileID, nil
+}
+
 // removeFile removes a tmp:// document. R364, R365
 func (o *overlay) removeFile(path string) error {
 	o.mu.Lock()

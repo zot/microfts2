@@ -1081,6 +1081,14 @@ func (db *DB) UpdateTmpFile(path, strategy string, content []byte) error {
 	return db.ensureOverlay().updateFile(path, strategy, content, db)
 }
 
+// CRC: crc-DB.md | R428-R442
+// AppendTmpFile appends content to an existing tmp:// document, creating it if
+// it doesn't exist. New chunks are indexed from the appended content without
+// touching existing chunks.
+func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...AppendOption) (uint64, error) {
+	return db.ensureOverlay().appendFile(path, strategy, content, db, opts)
+}
+
 // CRC: crc-DB.md | Seq: seq-tmp-add.md | R364, R365
 // RemoveTmpFile removes a tmp:// document from the overlay.
 func (db *DB) RemoveTmpFile(path string) error {

@@ -274,3 +274,163 @@ func TestWithNoTmp(t *testing.T) {
 	}
 }
 
+func TestAppendTmpFile(t *testing.T) {
+	db, _ := testDB(t)
+
+	_, err := db.AddTmpFile("tmp://sess/log", "line", []byte("alpha bravo charlie\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.AppendTmpFile("tmp://sess/log", "line", []byte("delta echo foxtrot\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both original and appended content searchable.
+	r, _ := db.Search("alpha bravo")
+	if len(r.Results) == 0 {
+		t.Fatal("expected results for original content")
+	}
+	r, _ = db.Search("delta echo")
+	if len(r.Results) == 0 {
+		t.Fatal("expected results for appended content")
+	}
+
+	// File should have 2 chunk entries.
+	o := db.overlay
+	o.mu.RLock()
+	ofile := o.files["tmp://sess/log"]
+	nChunks := len(ofile.chunks)
+	o.mu.RUnlock()
+	if nChunks != 2 {
+		t.Fatalf("expected 2 chunks, got %d", nChunks)
+	}
+}
+
+func TestAppendTmpFileWithBaseLine(t *testing.T) {
+	db, _ := testDB(t)
+
+	_, err := db.AddTmpFile("tmp://sess/log", "line", []byte("line1\nline2\nline3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.AppendTmpFile("tmp://sess/log", "line", []byte("line4\nline5\n"), WithBaseLine(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	o := db.overlay
+	o.mu.RLock()
+	ofile := o.files["tmp://sess/log"]
+	n := len(ofile.chunks)
+	loc4 := ofile.chunks[n-2].Location
+	loc5 := ofile.chunks[n-1].Location
+	o.mu.RUnlock()
+
+	if loc4 != "4-4" {
+		t.Fatalf("expected range '4-4', got %q", loc4)
+	}
+	if loc5 != "5-5" {
+		t.Fatalf("expected range '5-5', got %q", loc5)
+	}
+}
+
+func TestAppendTmpFileAutoCreates(t *testing.T) {
+	db, _ := testDB(t)
+
+	fid, err := db.AppendTmpFile("tmp://sess/new", "line", []byte("auto created content\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fid != math.MaxUint64 {
+		t.Fatalf("expected fileid %d, got %d", uint64(math.MaxUint64), fid)
+	}
+
+	r, _ := db.Search("auto created")
+	if len(r.Results) == 0 {
+		t.Fatal("expected results for auto-created content")
+	}
+}
+
+func TestAppendTmpFileStrategyMismatch(t *testing.T) {
+	db, _ := testDB(t)
+	db.AddStrategyFunc("markdown", MarkdownChunkFunc)
+
+	_, err := db.AddTmpFile("tmp://sess/doc", "line", []byte("some content\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.AppendTmpFile("tmp://sess/doc", "markdown", []byte("more content\n"))
+	if err == nil {
+		t.Fatal("expected error for strategy mismatch")
+	}
+}
+
+func TestAppendTmpFileExtendsContent(t *testing.T) {
+	db, _ := testDB(t)
+
+	_, err := db.AddTmpFile("tmp://sess/doc", "line", []byte("hello\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.AppendTmpFile("tmp://sess/doc", "line", []byte("world\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	o := db.overlay
+	o.mu.RLock()
+	content := string(o.files["tmp://sess/doc"].content)
+	o.mu.RUnlock()
+
+	if content != "hello\nworld\n" {
+		t.Fatalf("expected 'hello\\nworld\\n', got %q", content)
+	}
+}
+
+func TestAppendTmpFileUpdatesCounters(t *testing.T) {
+	db, _ := testDB(t)
+
+	_, err := db.AddTmpFile("tmp://sess/doc", "line", []byte("alpha bravo\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c1, t1 := db.overlay.counters()
+
+	_, err = db.AppendTmpFile("tmp://sess/doc", "line", []byte("charlie delta\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c2, t2 := db.overlay.counters()
+	if c2 <= c1 {
+		t.Fatalf("expected totalChunks to increase: was %d, now %d", c1, c2)
+	}
+	if t2 <= t1 {
+		t.Fatalf("expected totalTokens to increase: was %d, now %d", t1, t2)
+	}
+}
+
+func TestAppendTmpFileReturnsFileid(t *testing.T) {
+	db, _ := testDB(t)
+
+	addFid, err := db.AddTmpFile("tmp://sess/doc", "line", []byte("initial\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appendFid, err := db.AppendTmpFile("tmp://sess/doc", "line", []byte("appended\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if appendFid != addFid {
+		t.Fatalf("expected append to return same fileid %d, got %d", addFid, appendFid)
+	}
+}
+
