@@ -723,6 +723,7 @@ type TrigramFilter func(trigrams []TrigramCount, totalChunks int) []TrigramCount
 `WithTrigramFilter(fn TrigramFilter)` search option supplies a filter function.
 
 - The search path looks up each query trigram's C record count, calls the filter, and uses the returned subset.
+- `totalChunks` comes from the I counter (maintained by add/remove), not from scanning F records. Include overlay chunk count when overlay is present.
 - When no filter is supplied, `FilterAll` is used (all query trigrams searched).
 - `WithTrigramFilter` applies to both `Search` and `ScoreFile`.
 
@@ -1195,4 +1196,38 @@ The overlay maintains its own `totalChunks` and `totalTokens` counters. BM25 and
 ## CLI
 
 No CLI changes for tmp:// — these are library-only operations. The CLI works with files on disk. Ark's CLI may expose tmp:// through its own commands.
+
+# Record Counts
+
+## Introspection
+
+```go
+// RecordStats holds aggregate statistics for one record prefix.
+type RecordStats struct {
+    Count     int64
+    KeyBytes  int64
+    ValueBytes int64
+}
+
+// RecordCounts returns per-prefix-byte statistics for all records.
+func (db *DB) RecordCounts() (map[byte]RecordStats, error)
+```
+
+Opens a read transaction, iterates every key in the subdatabase, and accumulates per-prefix statistics: record count, total key bytes, and total value bytes. Keyed by the first byte of each key (the prefix that distinguishes record types: 'I', 'H', 'C', 'F', 'N', 'T', 'W'). Useful for diagnostics and testing — callers can verify index health and size distribution without knowing the internal record layout.
+
+# FileID–Path Mapping
+
+## FileIDPaths
+
+```go
+// FileIDPaths returns a map of fileid → path for all indexed files.
+// Scans N records only — much cheaper than StaleFiles which deserializes full F records.
+func (db *DB) FileIDPaths() (map[uint64]string, error)
+```
+
+Lazily loaded, incrementally maintained cache. First call scans F records using `UnmarshalFHeader` to populate the cache. Subsequent calls return the cached map directly. AddFile, RemoveFile, and Reindex update the cache after their LMDB writes succeed. Since microfts2 owns its subdatabase (dbi is unexported), no external writes can invalidate the cache.
+
+## Partial F Record Unmarshal
+
+`UnmarshalFHeader(data)` decodes only the fixed-offset header fields of an F record value: ModTime, ContentHash, FileLength, Strategy, and Names. Stops before Chunks and Tokens — those are the bulk of the value and are not needed by StaleFiles or any staleness check. `StaleFiles` uses this instead of `UnmarshalFValue` to avoid deserializing chunk and token arrays.
 

@@ -53,6 +53,7 @@ type DB struct {
 	chunkers    map[string]Chunker // in-memory Go chunker strategies
 	overlay     *overlay           // R349: in-memory tmp:// documents
 	overlayOnce sync.Once          // guards lazy overlay creation
+	pathCache   map[uint64]string  // R454: cached fileid→path, lazily loaded
 }
 
 // Settings holds the in-memory representation of I records.
@@ -533,34 +534,11 @@ func lookupTrigramCounts(th TxnHolder, dbi lmdb.DBI, queryTrigrams []uint32) []T
 	return result
 }
 
-// countTotalChunks scans F records and sums up the chunk count across all files.
-func countTotalChunks(th TxnHolder, dbi lmdb.DBI) int {
-	txn := th.Txn()
-	total := 0
-	cursor, err := txn.OpenCursor(dbi)
-	if err != nil {
-		return 0
-	}
-	defer cursor.Close()
-	key, val, err := cursor.Get([]byte{prefixF}, nil, lmdb.SetRange)
-	for err == nil && len(key) > 0 && key[0] == prefixF {
-		data := make([]byte, len(val))
-		copy(data, val)
-		frec, fErr := UnmarshalFValue(data)
-		if fErr == nil {
-			total += len(frec.Chunks)
-		}
-		key, val, err = cursor.Get(nil, nil, lmdb.Next)
-	}
-	return total
-}
-
-// applyTrigramFilter uses the caller-supplied filter to select query trigrams.
-// Returns the selected trigram codes as a []uint32.
-func applyTrigramFilter(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, filter TrigramFilter) []uint32 {
+// R446: applyTrigramFilter uses the caller-supplied filter to select query trigrams.
+// totalChunks is pre-computed by the caller from the I counter + overlay.
+func applyTrigramFilter(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, totalChunks int, filter TrigramFilter) []uint32 {
 	counts := lookupTrigramCounts(th, contentDBI, queryTrigrams)
-	total := countTotalChunks(th, contentDBI)
-	selected := filter(counts, total)
+	selected := filter(counts, totalChunks)
 	result := make([]uint32, len(selected))
 	for i, tc := range selected {
 		result[i] = tc.Trigram
@@ -569,12 +547,13 @@ func applyTrigramFilter(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint3
 }
 
 // selectQueryTrigrams uses the caller-supplied filter (or FilterAll) to select query trigrams.
-func selectQueryTrigrams(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, cfg searchConfig) []uint32 {
+// totalChunks is pre-computed by the caller from the I counter + overlay.
+func selectQueryTrigrams(th TxnHolder, contentDBI lmdb.DBI, queryTrigrams []uint32, totalChunks int, cfg searchConfig) []uint32 {
 	filter := cfg.trigramFilter
 	if filter == nil {
 		filter = FilterAll
 	}
-	return applyTrigramFilter(th, contentDBI, queryTrigrams, filter)
+	return applyTrigramFilter(th, contentDBI, queryTrigrams, totalChunks, filter)
 }
 
 // countTokens counts space-separated tokens in data.
@@ -1142,6 +1121,77 @@ func (db *DB) Version() (string, error) {
 	return version, err
 }
 
+// CRC: crc-DB.md | R445
+type RecordStats struct {
+	Count      int64
+	KeyBytes   int64
+	ValueBytes int64
+}
+
+// CRC: crc-DB.md | R443, R444, R445
+func (db *DB) RecordCounts() (map[byte]RecordStats, error) {
+	counts := make(map[byte]RecordStats)
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		cursor, err := txn.OpenCursor(db.dbi)
+		if err != nil {
+			return err
+		}
+		defer cursor.Close()
+		k, v, err := cursor.Get(nil, nil, lmdb.First)
+		for err == nil {
+			if len(k) > 0 {
+				s := counts[k[0]]
+				s.Count++
+				s.KeyBytes += int64(len(k))
+				s.ValueBytes += int64(len(v))
+				counts[k[0]] = s
+			}
+			k, v, err = cursor.Get(nil, nil, lmdb.Next)
+		}
+		if lmdb.IsNotFound(err) {
+			return nil
+		}
+		return err
+	})
+	return counts, err
+}
+
+// CRC: crc-DB.md | R448, R449, R450, R454
+func (db *DB) FileIDPaths() (map[uint64]string, error) {
+	if db.pathCache != nil {
+		return db.pathCache, nil
+	}
+	return db.loadPathCache()
+}
+
+func (db *DB) loadPathCache() (map[uint64]string, error) {
+	result := make(map[uint64]string)
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		cursor, err := txn.OpenCursor(db.dbi)
+		if err != nil {
+			return err
+		}
+		defer cursor.Close()
+		k, v, err := cursor.Get([]byte{prefixF}, nil, lmdb.SetRange)
+		for err == nil && len(k) > 0 && k[0] == prefixF {
+			fileid, _ := readUvarint(k[1:])
+			frec, fErr := UnmarshalFHeader(v)
+			if fErr == nil && len(frec.Names) > 0 {
+				result[fileid] = frec.Names[0]
+			}
+			k, v, err = cursor.Get(nil, nil, lmdb.Next)
+		}
+		if lmdb.IsNotFound(err) {
+			return nil
+		}
+		return err
+	})
+	if err == nil {
+		db.pathCache = result
+	}
+	return result, err
+}
+
 // --- AddFile ---
 
 // Seq: seq-add.md
@@ -1219,6 +1269,9 @@ func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
 		fileid, txnErr = db.addFileInTxn(txnWrap{txn}, fpath, strategy, chunks, modTime, hash, int64(len(data)))
 		return txnErr
 	})
+	if err == nil && db.pathCache != nil {
+		db.pathCache[fileid] = fpath
+	}
 	return fileid, data, err
 }
 
@@ -1501,9 +1554,18 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 // --- RemoveFile ---
 
 func (db *DB) RemoveFile(fpath string) error {
-	return db.env.Update(func(txn *lmdb.Txn) error {
+	err := db.env.Update(func(txn *lmdb.Txn) error {
 		return db.removeFileInTxn(txnWrap{txn}, fpath)
 	})
+	if err == nil && db.pathCache != nil {
+		for id, p := range db.pathCache {
+			if p == fpath {
+				delete(db.pathCache, id)
+				break
+			}
+		}
+	}
+	return err
 }
 
 // R254: Remove via F record → C records → T/W cleanup for orphaned chunks
@@ -1619,6 +1681,16 @@ func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
 		fileid, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)))
 		return txnErr
 	})
+	if err == nil && db.pathCache != nil {
+		// Remove old fileid entry (path may have had a different fileid)
+		for id, p := range db.pathCache {
+			if p == fpath {
+				delete(db.pathCache, id)
+				break
+			}
+		}
+		db.pathCache[fileid] = fpath
+	}
 	return fileid, data, err
 }
 
@@ -1821,10 +1893,21 @@ func (db *DB) searchPrepare(terms []string) (termTrigrams [][]uint32, queryTrigr
 	return
 }
 
+// R447: totalChunks reads the I counter and adds overlay chunks.
+func (db *DB) totalChunks(th TxnHolder) int {
+	n, _ := iCounter(th, db.dbi, "totalChunks")
+	total := int(n)
+	if db.overlay != nil {
+		oc, _ := db.overlay.counters()
+		total += oc
+	}
+	return total
+}
+
 // searchCollect selects trigrams, reads T records, combines per-term candidate sets
 // (intersect for AND, union for fuzzy OR), and loads C records. Returns candidates and active trigrams.
 func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32, cfg searchConfig) ([]candidateChunk, []uint32) {
-	active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
+	active := selectQueryTrigrams(th, db.dbi, queryTrigrams, db.totalChunks(th), cfg)
 	if len(active) == 0 {
 		return nil, nil
 	}
@@ -2944,7 +3027,7 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 			return err
 		}
 
-		active := selectQueryTrigrams(th, db.dbi, queryTrigrams, cfg)
+		active := selectQueryTrigrams(th, db.dbi, queryTrigrams, db.totalChunks(th), cfg)
 		if len(active) == 0 {
 			return nil
 		}
@@ -3072,7 +3155,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 		for err == nil && len(key) > 0 && key[0] == prefixF {
 			data := make([]byte, len(val))
 			copy(data, val)
-			frec, fErr := UnmarshalFValue(data)
+			frec, fErr := UnmarshalFHeader(data)
 			if fErr == nil {
 				// Parse fileid from key
 				fileid, _ := readUvarint(key[1:])

@@ -462,6 +462,160 @@ func TestDBVersion(t *testing.T) {
 	}
 }
 
+func TestDBRecordCounts(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Empty DB should have only I records (config).
+	counts, err := db.RecordCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts['I'].Count == 0 {
+		t.Fatal("expected I records in fresh DB")
+	}
+	if counts['I'].KeyBytes == 0 {
+		t.Fatal("expected non-zero KeyBytes for I records")
+	}
+	if counts['C'].Count != 0 || counts['F'].Count != 0 || counts['T'].Count != 0 {
+		t.Fatalf("expected no C/F/T records in empty DB, got C=%d F=%d T=%d",
+			counts['C'].Count, counts['F'].Count, counts['T'].Count)
+	}
+
+	// Add a file, verify counts increase.
+	fp := writeTestFile(t, dir, "a.txt", "hello world\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	counts, err = db.RecordCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts['F'].Count != 1 {
+		t.Errorf("F records = %d, want 1", counts['F'].Count)
+	}
+	if counts['C'].Count < 1 {
+		t.Error("expected at least 1 C record after AddFile")
+	}
+	if counts['T'].Count < 1 {
+		t.Error("expected at least 1 T record after AddFile")
+	}
+	if counts['T'].ValueBytes == 0 {
+		t.Error("expected non-zero ValueBytes for T records")
+	}
+}
+
+func TestDBFileIDPaths(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Empty DB.
+	paths, err := db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("expected empty map, got %d entries", len(paths))
+	}
+
+	// Add two files.
+	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")
+	fp2 := writeTestFile(t, dir, "b.txt", "foo bar\n")
+	id1, err := db.AddFile(fp1, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := db.AddFile(fp2, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err = db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(paths))
+	}
+	if paths[id1] != fp1 {
+		t.Errorf("paths[%d] = %q, want %q", id1, paths[id1], fp1)
+	}
+	if paths[id2] != fp2 {
+		t.Errorf("paths[%d] = %q, want %q", id2, paths[id2], fp2)
+	}
+
+	// Add a third file — cache should update incrementally.
+	fp3 := writeTestFile(t, dir, "c.txt", "baz qux\n")
+	id3, err := db.AddFile(fp3, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err = db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 3 {
+		t.Fatalf("after add: expected 3 entries, got %d", len(paths))
+	}
+	if paths[id3] != fp3 {
+		t.Errorf("paths[%d] = %q, want %q", id3, paths[id3], fp3)
+	}
+
+	// Remove a file — cache should update.
+	if err := db.RemoveFile(fp1); err != nil {
+		t.Fatal(err)
+	}
+	paths, err = db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("after remove: expected 2 entries, got %d", len(paths))
+	}
+	if _, ok := paths[id1]; ok {
+		t.Error("removed file should not be in cache")
+	}
+}
+
+func TestUnmarshalFHeader(t *testing.T) {
+	// Round-trip: marshal a full FRecord, unmarshal with header-only, verify fields match.
+	orig := FRecord{
+		ModTime:     1234567890,
+		ContentHash: [32]byte{1, 2, 3},
+		FileLength:  999,
+		Strategy:    "line",
+		Names:       []string{"/tmp/test.txt"},
+		Chunks:      []FileChunkEntry{{ChunkID: 42, Location: "1-10"}},
+		Tokens:      []TokenEntry{{Token: "hello", Count: 5}},
+	}
+	data := orig.MarshalValue()
+
+	hdr, err := UnmarshalFHeader(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.ModTime != orig.ModTime {
+		t.Errorf("ModTime = %d, want %d", hdr.ModTime, orig.ModTime)
+	}
+	if hdr.ContentHash != orig.ContentHash {
+		t.Errorf("ContentHash mismatch")
+	}
+	if hdr.FileLength != orig.FileLength {
+		t.Errorf("FileLength = %d, want %d", hdr.FileLength, orig.FileLength)
+	}
+	if hdr.Strategy != orig.Strategy {
+		t.Errorf("Strategy = %q, want %q", hdr.Strategy, orig.Strategy)
+	}
+	if len(hdr.Names) != 1 || hdr.Names[0] != orig.Names[0] {
+		t.Errorf("Names = %v, want %v", hdr.Names, orig.Names)
+	}
+	// Chunks and Tokens must NOT be populated.
+	if len(hdr.Chunks) != 0 {
+		t.Errorf("Chunks should be nil/empty, got %d", len(hdr.Chunks))
+	}
+	if len(hdr.Tokens) != 0 {
+		t.Errorf("Tokens should be nil/empty, got %d", len(hdr.Tokens))
+	}
+}
+
 func TestDBAddFileReturnsFileid(t *testing.T) {
 	db, dir := testDB(t)
 	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")

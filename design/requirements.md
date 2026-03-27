@@ -673,3 +673,31 @@
 - **R425:** Overlay (tmp://) documents participate: overlay trigram maps OR-unioned into the tally alongside LMDB T records
 - **R426:** CLI `-fuzzy` flag on search command calls `SearchFuzzy`. CLI `-loose` flag calls `Search` with `WithLoose()`. Default k = 20 for fuzzy
 - **R427:** (inferred) `collectTrigramUnion` reused from SearchMulti candidate expansion for T record OR-union
+
+## Feature: Record Counts
+**Source:** specs/main.md
+
+- **R443:** `RecordCounts() (map[byte]RecordStats, error)` — method on DB returning per-prefix statistics
+- **R444:** Opens a read-only LMDB transaction, iterates all keys in the subdatabase, accumulates per-prefix stats
+- **R445:** `RecordStats` struct: `Count int64`, `KeyBytes int64`, `ValueBytes int64` — aggregate totals per prefix byte
+
+## Feature: TrigramFilter totalChunks source
+**Source:** specs/main.md
+
+- **R446:** `applyTrigramFilter` must read totalChunks from the I counter, not scan F records
+- **R447:** (inferred) Include overlay chunk count in totalChunks passed to TrigramFilter, same pattern as BM25Func
+
+## Feature: FileID–Path Mapping
+**Source:** specs/main.md
+
+- **R448:** `FileIDPaths() (map[uint64]string, error)` — method on DB returning fileid→path for all indexed files
+- **R449:** Lazily loaded on first call: scans F records with `UnmarshalFHeader`, caches result
+- **R450:** Incrementally maintained: AddFile inserts, RemoveFile deletes, Reindex removes+adds
+- **R454:** (inferred) Cache is valid because microfts2 owns its subdatabase — dbi is unexported, no external writes
+
+## Feature: Partial F Record Unmarshal
+**Source:** specs/main.md
+
+- **R451:** `UnmarshalFHeader(data)` decodes ModTime, ContentHash, FileLength, Strategy, and Names from F record value
+- **R452:** Stops before Chunks and Tokens — does not allocate or decode those arrays
+- **R453:** `StaleFiles` uses `UnmarshalFHeader` instead of `UnmarshalFValue`

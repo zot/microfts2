@@ -356,52 +356,59 @@ func (f *FRecord) MarshalValue() []byte {
 	return buf[:off]
 }
 
-// UnmarshalFValue decodes an FRecord value. FileID must be set separately (from key).
-func UnmarshalFValue(data []byte) (FRecord, error) {
+// unmarshalFHeader decodes the header fields of an F record value:
+// ModTime, ContentHash, FileLength, Strategy, and Names.
+// Returns the record, the byte offset after Names, and any error.
+func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	var f FRecord
 	if len(data) < 40 {
-		return f, fmt.Errorf("FRecord too short: %d bytes", len(data))
+		return f, 0, fmt.Errorf("FRecord too short: %d bytes", len(data))
 	}
 	off := 0
 
-	// ModTime
 	f.ModTime = int64(binary.BigEndian.Uint64(data[off:]))
 	off += 8
 
-	// ContentHash
 	copy(f.ContentHash[:], data[off:off+32])
 	off += 32
 
-	// FileLength
 	fl, n := readUvarint(data[off:])
 	if n <= 0 {
-		return f, fmt.Errorf("FRecord: bad fileLength")
+		return f, 0, fmt.Errorf("FRecord: bad fileLength")
 	}
 	f.FileLength = int64(fl)
 	off += n
 
-	// Strategy
 	s, n := readString(data[off:])
 	if n == 0 {
-		return f, fmt.Errorf("FRecord: bad strategy")
+		return f, 0, fmt.Errorf("FRecord: bad strategy")
 	}
 	f.Strategy = s
 	off += n
 
-	// Names
 	nNames, n := readUvarint(data[off:])
 	if n <= 0 {
-		return f, fmt.Errorf("FRecord: bad namecount")
+		return f, 0, fmt.Errorf("FRecord: bad namecount")
 	}
 	off += n
 	f.Names = make([]string, nNames)
 	for i := range f.Names {
 		s, n := readString(data[off:])
 		if n == 0 {
-			return f, fmt.Errorf("FRecord: bad name")
+			return f, 0, fmt.Errorf("FRecord: bad name")
 		}
 		f.Names[i] = s
 		off += n
+	}
+
+	return f, off, nil
+}
+
+// UnmarshalFValue decodes an FRecord value. FileID must be set separately (from key).
+func UnmarshalFValue(data []byte) (FRecord, error) {
+	f, off, err := unmarshalFHeader(data)
+	if err != nil {
+		return f, err
 	}
 
 	// Chunks
@@ -449,6 +456,13 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 	}
 
 	return f, nil
+}
+
+// R451, R452: UnmarshalFHeader decodes only the header fields of an F record value:
+// ModTime, ContentHash, FileLength, Strategy, and Names. Skips Chunks and Tokens.
+func UnmarshalFHeader(data []byte) (FRecord, error) {
+	f, _, err := unmarshalFHeader(data)
+	return f, err
 }
 
 // --- Shared chunkid list encoding ---
