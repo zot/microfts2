@@ -616,6 +616,45 @@ func TestUnmarshalFHeader(t *testing.T) {
 	}
 }
 
+func TestDBSearchCache(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "hello world\n")
+	id, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without cache: FileInfoByID works.
+	f1, err := db.FileInfoByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f1.Strategy != "line" {
+		t.Fatalf("Strategy = %q, want %q", f1.Strategy, "line")
+	}
+
+	// With cache: first call reads, second returns cached.
+	done := db.NewSearchCache()
+	defer done()
+
+	f2, err := db.FileInfoByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f2.Strategy != f1.Strategy {
+		t.Error("cached result should match uncached")
+	}
+
+	// Second call should hit cache (same result).
+	f3, err := db.FileInfoByID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f3.FileID != f2.FileID {
+		t.Error("cached FileID mismatch")
+	}
+}
+
 func TestDBAddFileReturnsFileid(t *testing.T) {
 	db, dir := testDB(t)
 	fp1 := writeTestFile(t, dir, "a.txt", "hello world\n")

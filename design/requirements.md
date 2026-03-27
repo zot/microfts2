@@ -694,6 +694,14 @@
 - **R449:** Lazily loaded on first call: scans F records with `UnmarshalFHeader`, caches result
 - **R450:** Incrementally maintained: AddFile inserts, RemoveFile deletes, Reindex removes+adds
 - **R454:** (inferred) Cache is valid because microfts2 owns its subdatabase — dbi is unexported, no external writes
+- **R455:** `pathToID` reverse cache (path→fileid) built alongside `pathCache`, used by `lookupFileByPath` to skip N record lookup
+
+## Feature: Search Cache
+**Source:** specs/main.md
+
+- **R456:** `NewSearchCache() func()` — enables FRecord caching on DB, returns cleanup function that clears the cache
+- **R457:** `readFRecord` checks `frecordCache` before LMDB read; caches result on miss
+- **R458:** (inferred) Cache is keyed by fileid; same fileid returns same FRecord without re-read
 
 ## Feature: Partial F Record Unmarshal
 **Source:** specs/main.md

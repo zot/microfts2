@@ -53,7 +53,9 @@ type DB struct {
 	chunkers    map[string]Chunker // in-memory Go chunker strategies
 	overlay     *overlay           // R349: in-memory tmp:// documents
 	overlayOnce sync.Once          // guards lazy overlay creation
-	pathCache   map[uint64]string  // R454: cached fileid→path, lazily loaded
+	pathCache    map[uint64]string   // R454: cached fileid→path, lazily loaded
+	pathToID     map[string]uint64  // R455: cached path→fileid, built with pathCache
+	frecordCache map[uint64]FRecord // R456: opt-in FRecord cache, nil when inactive
 }
 
 // Settings holds the in-memory representation of I records.
@@ -494,17 +496,27 @@ func parseNFinalValue(val []byte) (string, uint64) {
 	return name, fileid
 }
 
-// lookupFileByPath resolves a file path to its fileid and FRecord.
+// R455: lookupFileByPath resolves a file path to its fileid and FRecord.
+// Uses pathToID cache when available to skip the N record lookup.
 func (db *DB) lookupFileByPath(th TxnHolder, fpath string) (uint64, FRecord, error) {
-	txn := th.Txn()
-	finalKey := FinalKey(fpath)
-	val, err := txn.Get(db.dbi, finalKey)
-	if lmdb.IsNotFound(err) {
-		return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
-	} else if err != nil {
-		return 0, FRecord{}, fmt.Errorf("lookup %s: %w", fpath, err)
+	var fileid uint64
+	if db.pathToID != nil {
+		id, ok := db.pathToID[fpath]
+		if !ok {
+			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
+		}
+		fileid = id
+	} else {
+		txn := th.Txn()
+		finalKey := FinalKey(fpath)
+		val, err := txn.Get(db.dbi, finalKey)
+		if lmdb.IsNotFound(err) {
+			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
+		} else if err != nil {
+			return 0, FRecord{}, fmt.Errorf("lookup %s: %w", fpath, err)
+		}
+		_, fileid = parseNFinalValue(val)
 	}
-	_, fileid := parseNFinalValue(val)
 	frec, err := db.readFRecord(th, fileid)
 	if err != nil {
 		return 0, FRecord{}, err
@@ -711,7 +723,13 @@ func batchAppendW(th TxnHolder, dbi lmdb.DBI, tokens []TokenEntry, chunkid uint6
 }
 
 // readFRecord reads an F record by fileid. TxnHolder-compatible.
+// R457, R458
 func (db *DB) readFRecord(th TxnHolder, fileid uint64) (FRecord, error) {
+	if db.frecordCache != nil {
+		if f, ok := db.frecordCache[fileid]; ok {
+			return f, nil
+		}
+	}
 	val, err := th.Txn().Get(db.dbi, makeFKey(fileid))
 	if err != nil {
 		return FRecord{}, fmt.Errorf("read F record %d: %w", fileid, err)
@@ -723,6 +741,9 @@ func (db *DB) readFRecord(th TxnHolder, fileid uint64) (FRecord, error) {
 		return FRecord{}, err
 	}
 	f.FileID = fileid
+	if db.frecordCache != nil {
+		db.frecordCache[fileid] = f
+	}
 	return f, nil
 }
 
@@ -1188,8 +1209,19 @@ func (db *DB) loadPathCache() (map[uint64]string, error) {
 	})
 	if err == nil {
 		db.pathCache = result
+		reverse := make(map[string]uint64, len(result))
+		for id, p := range result {
+			reverse[p] = id
+		}
+		db.pathToID = reverse
 	}
 	return result, err
+}
+
+// CRC: crc-DB.md | R456
+func (db *DB) NewSearchCache() func() {
+	db.frecordCache = make(map[uint64]FRecord)
+	return func() { db.frecordCache = nil }
 }
 
 // --- AddFile ---
@@ -1271,6 +1303,7 @@ func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
 	})
 	if err == nil && db.pathCache != nil {
 		db.pathCache[fileid] = fpath
+		db.pathToID[fpath] = fileid
 	}
 	return fileid, data, err
 }
@@ -1557,12 +1590,10 @@ func (db *DB) RemoveFile(fpath string) error {
 	err := db.env.Update(func(txn *lmdb.Txn) error {
 		return db.removeFileInTxn(txnWrap{txn}, fpath)
 	})
-	if err == nil && db.pathCache != nil {
-		for id, p := range db.pathCache {
-			if p == fpath {
-				delete(db.pathCache, id)
-				break
-			}
+	if err == nil && db.pathToID != nil {
+		if id, ok := db.pathToID[fpath]; ok {
+			delete(db.pathCache, id)
+			delete(db.pathToID, fpath)
 		}
 	}
 	return err
@@ -1681,15 +1712,12 @@ func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
 		fileid, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)))
 		return txnErr
 	})
-	if err == nil && db.pathCache != nil {
-		// Remove old fileid entry (path may have had a different fileid)
-		for id, p := range db.pathCache {
-			if p == fpath {
-				delete(db.pathCache, id)
-				break
-			}
+	if err == nil && db.pathToID != nil {
+		if oldID, ok := db.pathToID[fpath]; ok {
+			delete(db.pathCache, oldID)
 		}
 		db.pathCache[fileid] = fpath
+		db.pathToID[fpath] = fileid
 	}
 	return fileid, data, err
 }

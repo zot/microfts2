@@ -1225,9 +1225,20 @@ Opens a read transaction, iterates every key in the subdatabase, and accumulates
 func (db *DB) FileIDPaths() (map[uint64]string, error)
 ```
 
-Lazily loaded, incrementally maintained cache. First call scans F records using `UnmarshalFHeader` to populate the cache. Subsequent calls return the cached map directly. AddFile, RemoveFile, and Reindex update the cache after their LMDB writes succeed. Since microfts2 owns its subdatabase (dbi is unexported), no external writes can invalidate the cache.
+Lazily loaded, incrementally maintained caches. First call scans F records using `UnmarshalFHeader` to populate both `pathCache` (fileid→path) and `pathToID` (path→fileid). Subsequent calls return directly from cache. AddFile, RemoveFile, and Reindex update both caches after their LMDB writes succeed. `lookupFileByPath` uses `pathToID` to skip the N record lookup when the cache is populated. Since microfts2 owns its subdatabase (dbi is unexported), no external writes can invalidate the caches.
 
 ## Partial F Record Unmarshal
 
 `UnmarshalFHeader(data)` decodes only the fixed-offset header fields of an F record value: ModTime, ContentHash, FileLength, Strategy, and Names. Stops before Chunks and Tokens — those are the bulk of the value and are not needed by StaleFiles or any staleness check. `StaleFiles` uses this instead of `UnmarshalFValue` to avoid deserializing chunk and token arrays.
+
+## Search Cache
+
+```go
+// NewSearchCache enables FRecord caching on the DB. Returns a cleanup function.
+// While active, readFRecord results are cached and reused across Search,
+// FileInfoByID, and any other method that reads F records.
+func (db *DB) NewSearchCache() func()
+```
+
+Opt-in per-batch cache for callers that fuse multiple searches and lookups in the same goroutine. The caller activates the cache, runs a batch of operations (Search, FileInfoByID, etc.), then calls the cleanup function. `readFRecord` checks the cache before going to LMDB — same fileid returns the same FRecord without re-reading or re-deserializing.
 
