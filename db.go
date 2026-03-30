@@ -1179,10 +1179,25 @@ func (db *DB) RecordCounts() (map[byte]RecordStats, error) {
 
 // CRC: crc-DB.md | R448, R449, R450, R454
 func (db *DB) FileIDPaths() (map[uint64]string, error) {
-	if db.pathCache != nil {
+	if db.pathCache == nil {
+		if _, err := db.loadPathCache(); err != nil {
+			return nil, err
+		}
+	}
+	// R366: merge overlay paths (ephemeral, not cached)
+	if db.overlay == nil || db.overlay.empty() {
 		return db.pathCache, nil
 	}
-	return db.loadPathCache()
+	merged := make(map[uint64]string, len(db.pathCache)+len(db.overlay.files))
+	for id, p := range db.pathCache {
+		merged[id] = p
+	}
+	db.overlay.mu.RLock()
+	for _, f := range db.overlay.files {
+		merged[f.fileID] = f.path
+	}
+	db.overlay.mu.RUnlock()
+	return merged, nil
 }
 
 func (db *DB) loadPathCache() (map[uint64]string, error) {
@@ -1222,6 +1237,32 @@ func (db *DB) loadPathCache() (map[uint64]string, error) {
 func (db *DB) NewSearchCache() func() {
 	db.frecordCache = make(map[uint64]FRecord)
 	return func() { db.frecordCache = nil }
+}
+
+// CRC: crc-DB.md | R459, R460, R461, R462
+// Copy returns a shallow copy of the DB sharing the LMDB env, overlay,
+// and chunker registry. Caches are nil — the copy lazy-loads from
+// committed LMDB state. Intended for short-lived write transactions
+// in a separate goroutine.
+func (db *DB) Copy() *DB {
+	return &DB{
+		env:      db.env,
+		dbi:      db.dbi,
+		dbName:   db.dbName,
+		settings: db.settings,
+		trigrams: db.trigrams,
+		chunkers: db.chunkers,
+		overlay:  db.overlay,
+	}
+}
+
+// CRC: crc-DB.md | R463, R464
+// InvalidateCaches nils the path and FRecord caches, forcing lazy
+// reload on next access. Does not reset overlayOnce.
+func (db *DB) InvalidateCaches() {
+	db.pathCache = nil
+	db.pathToID = nil
+	db.frecordCache = nil
 }
 
 // --- AddFile ---

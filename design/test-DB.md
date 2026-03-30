@@ -252,3 +252,21 @@
 **Input:** add chunks: one with "alpha beta" adjacent, one with "alpha ... many words ... beta". Search "alpha beta" with WithProximityRerank(10)
 **Expected:** adjacent chunk ranks higher than distant chunk
 **Refs:** crc-DB.md, R279, R280, R281, R282
+
+## Test: Copy shares env but has nil caches
+**Purpose:** Copy() returns a DB with shared env and nil caches
+**Input:** create DB, add a file (populates pathCache), call Copy()
+**Expected:** copy.env == original.env, copy.overlay == original.overlay, copy.chunkers == original.chunkers, copy.pathCache == nil, copy.pathToID == nil, copy.frecordCache == nil
+**Refs:** crc-DB.md, R459, R460, R461, R462
+
+## Test: Copy can perform LMDB reads
+**Purpose:** the copy is functional for indexing
+**Input:** create DB, add a file, call Copy(), use copy to read F records
+**Expected:** copy can open View txns and read records from the shared env
+**Refs:** crc-DB.md, R459, R460
+
+## Test: InvalidateCaches clears caches
+**Purpose:** InvalidateCaches nils all three caches
+**Input:** create DB, add a file, call FileIDPaths (populates caches), call InvalidateCaches()
+**Expected:** pathCache == nil, pathToID == nil, frecordCache == nil. Next FileIDPaths call re-populates from LMDB
+**Refs:** crc-DB.md, R463, R464

@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/zot/microfts2"
 )
@@ -79,6 +80,8 @@ func main() {
 		cmdChunkIndent()
 	case "chunks":
 		cmdChunks()
+	case "bench":
+		cmdBench()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		usage()
@@ -100,9 +103,9 @@ func extractRefreshFlag(args []string) (bool, []string) {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: microfts [-r] <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score, chunks,")
-	fmt.Fprintln(os.Stderr, "          chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown,")
-	fmt.Fprintln(os.Stderr, "          chunk-bracket, chunk-indent")
+	fmt.Fprintln(os.Stderr, "commands: init, add, search, delete, reindex, strategy, stale, score, bench,")
+	fmt.Fprintln(os.Stderr, "          chunks, chunk-lines, chunk-lines-overlap, chunk-words-overlap,")
+	fmt.Fprintln(os.Stderr, "          chunk-markdown, chunk-bracket, chunk-indent")
 	fmt.Fprintln(os.Stderr, "flags:")
 	fmt.Fprintln(os.Stderr, "  -r    refresh stale files before running command")
 	os.Exit(1)
@@ -223,6 +226,7 @@ func cmdSearch() {
 	}
 	defer db.Close()
 	doRefresh(db)
+	defer db.NewSearchCache()()
 
 	var opts []microfts2.SearchOption
 	opts = append(opts, opt)
@@ -741,4 +745,65 @@ func cmdChunkIndent() {
 		fmt.Printf("%s\t%s", c.Range, c.Content)
 		return true
 	})
+}
+
+func cmdBench() {
+	fs := flag.CommandLine
+	dbPath, dbName := dbFlags(fs)
+	n := fs.Int("n", 100, "number of iterations")
+	fuzzy := fs.Bool("fuzzy", false, "use SearchFuzzy instead of Search")
+	k := fs.Int("k", 20, "top-k results for fuzzy search")
+	fs.Parse(os.Args[1:])
+
+	query := strings.Join(fs.Args(), " ")
+	if *dbPath == "" || query == "" {
+		fmt.Fprintln(os.Stderr, "bench: -db and query required")
+		os.Exit(1)
+	}
+
+	db, err := microfts2.Open(*dbPath, openOpts(*dbName))
+	if err != nil {
+		fatal("open", err)
+	}
+	defer db.Close()
+
+	search := func() (*microfts2.SearchResults, error) {
+		if *fuzzy {
+			return db.SearchFuzzy(query, *k)
+		}
+		return db.Search(query)
+	}
+
+	// Warmup
+	sr, err := search()
+	if err != nil {
+		fatal("bench", err)
+	}
+	fmt.Printf("query: %q  results: %d  iterations: %d\n\n", query, len(sr.Results), *n)
+
+	// Without cache
+	start := time.Now()
+	for i := 0; i < *n; i++ {
+		if _, err := search(); err != nil {
+			fatal("bench", err)
+		}
+	}
+	noCache := time.Since(start)
+
+	// With cache
+	defer db.NewSearchCache()()
+	// One search to prime the cache
+	search()
+
+	start = time.Now()
+	for i := 0; i < *n; i++ {
+		if _, err := search(); err != nil {
+			fatal("bench", err)
+		}
+	}
+	withCache := time.Since(start)
+
+	fmt.Printf("no-cache:   %v total, %v/op\n", noCache, noCache/time.Duration(*n))
+	fmt.Printf("with-cache: %v total, %v/op\n", withCache, withCache/time.Duration(*n))
+	fmt.Printf("speedup:    %.1fx\n", float64(noCache)/float64(withCache))
 }

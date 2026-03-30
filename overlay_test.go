@@ -434,3 +434,50 @@ func TestAppendTmpFileReturnsFileid(t *testing.T) {
 	}
 }
 
+func TestFileIDPathsIncludesOverlay(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Add a disk file.
+	fp := writeTestFile(t, dir, "disk.txt", "hello world\n")
+	diskID, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a tmp:// file.
+	tmpID, err := db.AddTmpFile("tmp://sess/notes", "line", []byte("overlay content\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(paths))
+	}
+	if paths[diskID] != fp {
+		t.Errorf("disk path: got %q, want %q", paths[diskID], fp)
+	}
+	if paths[tmpID] != "tmp://sess/notes" {
+		t.Errorf("tmp path: got %q, want %q", paths[tmpID], "tmp://sess/notes")
+	}
+
+	// Remove the tmp file — should disappear from FileIDPaths.
+	if err := db.RemoveTmpFile("tmp://sess/notes"); err != nil {
+		t.Fatal(err)
+	}
+	paths, err = db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("after remove: expected 1 entry, got %d", len(paths))
+	}
+	if _, ok := paths[tmpID]; ok {
+		t.Error("removed tmp file should not appear in FileIDPaths")
+	}
+}
+

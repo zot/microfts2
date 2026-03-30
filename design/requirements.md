@@ -709,3 +709,13 @@
 - **R451:** `UnmarshalFHeader(data)` decodes ModTime, ContentHash, FileLength, Strategy, and Names from F record value
 - **R452:** Stops before Chunks and Tokens — does not allocate or decode those arrays
 - **R453:** `StaleFiles` uses `UnmarshalFHeader` instead of `UnmarshalFValue`
+
+## Feature: DB Copy and Cache Invalidation
+**Source:** specs/main.md
+
+- **R459:** `Copy() *DB` — shallow copy sharing LMDB env, overlay, and chunker registry; caches nil
+- **R460:** Copy shares `env`, `dbi`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
+- **R461:** Copy sets `pathCache`, `pathToID`, `frecordCache` to nil — lazy reload from LMDB
+- **R462:** (inferred) Copy does not copy `overlayOnce` — overlay pointer is shared directly, already initialized
+- **R463:** `InvalidateCaches()` — nils `pathCache`, `pathToID`, `frecordCache` on the receiver
+- **R464:** `InvalidateCaches` does NOT reset `overlayOnce`

@@ -2027,3 +2027,138 @@ func TestWithAfterFallsBackToModTime(t *testing.T) {
 	}
 }
 
+func BenchmarkSearchCache(b *testing.B) {
+	dir := b.TempDir()
+	dbPath := filepath.Join(dir, "benchdb")
+	db, err := Create(dbPath, Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	db.AddStrategyFunc("line", LineChunkFunc)
+	defer db.Close()
+
+	// Build a corpus with enough files to exercise FRecord cache.
+	for i := 0; i < 50; i++ {
+		name := fmt.Sprintf("file%03d.txt", i)
+		p := filepath.Join(dir, name)
+		content := fmt.Sprintf("the quick brown fox jumps over the lazy dog\nfile number %d has unique content\nalpha beta gamma delta epsilon\n", i)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := db.AddFile(p, "line"); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	// Warmup: one search to prime OS page cache / LMDB mmap.
+	if _, err := db.Search("quick brown"); err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("no-cache", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sr, err := db.Search("quick brown")
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(sr.Results) == 0 {
+				b.Fatal("expected results")
+			}
+		}
+	})
+
+	b.Run("with-cache", func(b *testing.B) {
+		defer db.NewSearchCache()()
+		for i := 0; i < b.N; i++ {
+			sr, err := db.Search("quick brown")
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(sr.Results) == 0 {
+				b.Fatal("expected results")
+			}
+		}
+	})
+}
+
+// test-DB.md: Copy shares env but has nil caches
+func TestDBCopy(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "the quick brown fox jumps over the lazy dog")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Populate caches on original.
+	if _, err := db.FileIDPaths(); err != nil {
+		t.Fatal(err)
+	}
+
+	cp := db.Copy()
+
+	// Shared fields.
+	if cp.Env() != db.Env() {
+		t.Error("copy should share env")
+	}
+	if len(cp.chunkers) != len(db.chunkers) {
+		t.Error("copy should share chunkers")
+	}
+
+	// Caches nil on copy.
+	if cp.pathCache != nil {
+		t.Error("copy pathCache should be nil")
+	}
+	if cp.pathToID != nil {
+		t.Error("copy pathToID should be nil")
+	}
+	if cp.frecordCache != nil {
+		t.Error("copy frecordCache should be nil")
+	}
+
+	// Copy is functional — can read from LMDB.
+	paths, err := cp.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Error("copy should be able to read LMDB")
+	}
+}
+
+// test-DB.md: InvalidateCaches clears caches
+func TestDBInvalidateCaches(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "the quick brown fox jumps over the lazy dog")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Populate caches.
+	if _, err := db.FileIDPaths(); err != nil {
+		t.Fatal(err)
+	}
+	if db.pathCache == nil {
+		t.Fatal("pathCache should be populated")
+	}
+
+	db.InvalidateCaches()
+
+	if db.pathCache != nil {
+		t.Error("pathCache should be nil after InvalidateCaches")
+	}
+	if db.pathToID != nil {
+		t.Error("pathToID should be nil after InvalidateCaches")
+	}
+	if db.frecordCache != nil {
+		t.Error("frecordCache should be nil after InvalidateCaches")
+	}
+
+	// Lazy reload works.
+	paths, err := db.FileIDPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Error("FileIDPaths should re-populate after InvalidateCaches")
+	}
+}

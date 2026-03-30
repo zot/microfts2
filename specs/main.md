@@ -1242,3 +1242,40 @@ func (db *DB) NewSearchCache() func()
 
 Opt-in per-batch cache for callers that fuse multiple searches and lookups in the same goroutine. The caller activates the cache, runs a batch of operations (Search, FileInfoByID, etc.), then calls the cleanup function. `readFRecord` checks the cache before going to LMDB — same fileid returns the same FRecord without re-reading or re-deserializing.
 
+# DB Copy and Cache Invalidation
+
+Support for read/write path separation in a closure actor. The caller runs reads directly on the DB and queues writes through a copy-index-reconcile cycle: copy the DB handle, index in a goroutine, then invalidate stale caches on the original after the write commits.
+
+## Copy
+
+```go
+// Copy returns a shallow copy of the DB suitable for indexing in a
+// separate goroutine. The copy shares the LMDB env, overlay, and
+// chunker registry. Caches are nil — the copy will lazy-load from
+// committed LMDB state if needed.
+func (db *DB) Copy() *DB
+```
+
+- `env`: shared (same `*lmdb.Env`) — LMDB handles concurrent readers/single writer natively
+- `dbi`, `dbName`, `settings`, `trigrams`: shared (read-only or safe to share)
+- `overlay`: shared (has its own `sync.RWMutex`)
+- `chunkers`: shared (read-only during writes — only updated by config, which runs synchronously in the main actor)
+- `overlayOnce`: not copied — overlay is already initialized on the source, and the copy shares the overlay pointer directly
+- `pathCache`, `pathToID`, `frecordCache`: nil — forces lazy reload from committed LMDB state, avoids stale data from the source's cache
+
+The copy is short-lived: one write transaction, then discarded.
+
+## InvalidateCaches
+
+```go
+// InvalidateCaches nils the path and FRecord caches, forcing lazy
+// reload on next access. Called after a write transaction commits
+// from another goroutine to clear stale cached state.
+func (db *DB) InvalidateCaches()
+```
+
+- Nils `pathCache`, `pathToID`, and `frecordCache`
+- Does NOT reset `overlayOnce` — overlay is shared and already initialized
+- No state transfer from the copy — just "your cache is stale now"
+- Next access triggers the existing lazy-load path
+
