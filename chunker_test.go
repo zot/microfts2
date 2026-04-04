@@ -124,3 +124,56 @@ func TestMarkdownChunkRangeFormat(t *testing.T) {
 		t.Errorf("chunk 1 range = %q, want %q", chunks[1].Range, "4-4")
 	}
 }
+
+func TestMarkdownChunkCodeFenceKeepsBlankLines(t *testing.T) {
+	chunks := collectMarkdownChunks(t, "text before\n```\nx = 1\n\ny = 2\n```\n")
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Range != "1-6" {
+		t.Errorf("range = %q, want %q", chunks[0].Range, "1-6")
+	}
+}
+
+func TestMarkdownChunkCodeFenceWithInfoString(t *testing.T) {
+	chunks := collectMarkdownChunks(t, "# Heading\n```go\nfunc main() {\n}\n```\n")
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Range != "1-5" {
+		t.Errorf("range = %q, want %q", chunks[0].Range, "1-5")
+	}
+}
+
+func TestMarkdownChunkTildeFence(t *testing.T) {
+	chunks := collectMarkdownChunks(t, "para\n~~~\na\n\nb\n~~~\n")
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Range != "1-6" {
+		t.Errorf("range = %q, want %q", chunks[0].Range, "1-6")
+	}
+}
+
+func TestMarkdownChunkFenceClosingRequiresMatchingLength(t *testing.T) {
+	chunks := collectMarkdownChunks(t, "text\n````\ncode\n```\nstill code\n````\n")
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Range != "1-6" {
+		t.Errorf("range = %q, want %q", chunks[0].Range, "1-6")
+	}
+}
+
+func TestMarkdownChunkTextAfterCodeFence(t *testing.T) {
+	chunks := collectMarkdownChunks(t, "before\n```\ncode\n```\n\nafter\n")
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Range != "1-4" {
+		t.Errorf("chunk 0 range = %q, want %q", chunks[0].Range, "1-4")
+	}
+	if chunks[1].Range != "6-6" {
+		t.Errorf("chunk 1 range = %q, want %q", chunks[1].Range, "6-6")
+	}
+}

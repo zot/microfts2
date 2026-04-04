@@ -1,5 +1,5 @@
 # Sequence: Add/Update/Append/Remove Temporary Document
-**Requirements:** R349, R351, R352, R354, R355, R358, R359, R360, R361, R362, R363, R364, R365, R371, R372, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R439, R440, R441, R442
+**Requirements:** R349, R351, R352, R354, R355, R358, R359, R360, R361, R362, R363, R364, R365, R371, R372, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R439, R440, R441, R442, R473, R474, R475, R476, R480, R481, R483, R485
 
 ## AddTmpFile
 
@@ -8,10 +8,12 @@ Caller              DB                    Overlay               Chunker
   |                  |                       |                      |
   |--AddTmpFile----->|                       |                      |
   |  (path,strategy, |                       |                      |
-  |   content)       |                       |                      |
+  |   content,idxOpts)|                      |                      |
+  |                  |--extract callback    |                      |
+  |                  |  from idxOpts        |                      |
   |                  |--addFile------------>|                      |
   |                  |  (path,strategy,     |                      |
-  |                  |   content,db)        |                      |
+  |                  |   content,db,cb)     |                      |
   |                  |                      |--WLock               |
   |                  |                      |--check path exists   |
   |                  |                      |  (ErrAlreadyIndexed) |
@@ -22,6 +24,8 @@ Caller              DB                    Overlay               Chunker
   |                  |                      |--Chunks(path,content)|
   |                  |                      |<---yield chunk-------|
   |                  |                      |  for each chunk:     |
+  |                  |                      |    if cb != nil:     |
+  |                  |                      |      cb(text) [R473] |
   |                  |                      |    hash content      |
   |                  |                      |    check hashes map  |
   |                  |                      |    if new:           |
@@ -50,12 +54,14 @@ Caller              DB                    Overlay
   |                  |                       |
   |--UpdateTmpFile-->|                       |
   |  (path,strategy, |                       |
-  |   content)       |                       |
-  |                  |--updateFile---------->|
+  |   content,idxOpts)|                      |
+  |                  |--extract callback    |
+  |                  |  from idxOpts        |
+  |                  |--updateFile(cb)----->|
   |                  |                       |--WLock
   |                  |                       |--find by path (err if missing)
   |                  |                       |--remove old chunks + index entries
-  |                  |                       |--add new (same as addFile body)
+  |                  |                       |--add new with cb (same as addFile body)
   |                  |                       |--WUnlock
   |                  |<--nil-----------------|
   |<--nil------------|                       |
@@ -86,7 +92,10 @@ Caller              DB                    Overlay               Chunker
   |                  |                       |                      |
   |                  |                       |--resolve chunker---->|
   |                  |                       |--Chunks(content)---->|
-  |                  |                       |<---collected---------|
+  |                  |                       |<---yield chunk-------|
+  |                  |                       |  for each chunk:     |
+  |                  |                       |    if cb != nil:     |
+  |                  |                       |      cb(text) [R483] |
   |                  |                       |                      |
   |                  |                       |--apply WithBaseLine   |
   |                  |                       |  adjustRange (R439)   |

@@ -2162,3 +2162,110 @@ func TestDBInvalidateCaches(t *testing.T) {
 		t.Error("FileIDPaths should re-populate after InvalidateCaches")
 	}
 }
+
+// CRC: crc-DB.md | R469, R470, R473, R474, R477
+func TestAddFileWithChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "multi.txt", "line one\nline two\nline three\n")
+
+	var chunks []string
+	_, err := db.AddFile(fp, "line", WithChunkCallback(func(text string) {
+		chunks = append(chunks, text)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	if chunks[0] != "line one\n" {
+		t.Errorf("chunk 0 = %q, want %q", chunks[0], "line one\n")
+	}
+	if chunks[2] != "line three\n" {
+		t.Errorf("chunk 2 = %q, want %q", chunks[2], "line three\n")
+	}
+}
+
+// CRC: crc-DB.md | R475, R484
+func TestAddFileWithoutChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "hello world\n")
+	_, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// CRC: crc-DB.md | R478
+func TestAddFileWithContentChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "multi.txt", "line one\nline two\n")
+
+	var chunks []string
+	_, content, err := db.AddFileWithContent(fp, "line", WithChunkCallback(func(text string) {
+		chunks = append(chunks, text)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+	if string(content) != "line one\nline two\n" {
+		t.Errorf("content mismatch")
+	}
+}
+
+// CRC: crc-DB.md | R471, R482
+func TestAppendChunksWithCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "line one\nline two\nline three\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var appended []string
+	appendContent := []byte("line four\nline five\n")
+	err = db.AppendChunks(fileid, appendContent, "line", WithAppendChunkCallback(func(text string) {
+		appended = append(appended, text)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appended) != 2 {
+		t.Fatalf("expected 2 appended chunks, got %d", len(appended))
+	}
+	if appended[0] != "line four\n" {
+		t.Errorf("appended[0] = %q, want %q", appended[0], "line four\n")
+	}
+}
+
+// CRC: crc-DB.md | R479
+func TestRefreshStaleWithChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "original\n")
+	_, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify the file to make it stale. Touch with future time to ensure mod time differs.
+	os.WriteFile(fp, []byte("modified line one\nmodified line two\n"), 0644)
+	future := time.Now().Add(time.Second)
+	os.Chtimes(fp, future, future)
+
+	var chunks []string
+	statuses, err := db.RefreshStale("line", WithChunkCallback(func(text string) {
+		chunks = append(chunks, text)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 refreshed file, got %d", len(statuses))
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks from refreshed file, got %d", len(chunks))
+	}
+}

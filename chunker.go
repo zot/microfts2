@@ -110,6 +110,8 @@ func (fc FuncChunker) ChunkText(path string, content []byte, rangeLabel string) 
 // Heading lines start new chunks; a heading and its following paragraph
 // (up to the next blank line or heading) form one chunk. Blank lines are
 // boundaries only and are not included in any chunk's content.
+// Fenced code blocks (``` or ~~~) suppress blank-line splitting — all lines
+// from opening fence through matching close belong to the current chunk. // R465, R466, R467, R468
 func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	if len(content) == 0 {
 		return nil
@@ -121,6 +123,8 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	endLine := 0       // 1-indexed end of most recent content line
 	endByte := 0       // byte offset past end of most recent content line
 	pos := 0           // current byte position
+	fenceChar := byte(0) // backtick or tilde when inside a fence
+	fenceLen := 0        // number of fence characters in the opening fence
 
 	flush := func() bool {
 		if startLine < 0 {
@@ -145,6 +149,38 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 		}
 		lineNum++
 		line := content[lineStart:lineEnd]
+
+		// Inside a fenced code block: only check for closing fence.
+		if fenceChar != 0 {
+			if isClosingFence(line, fenceChar, fenceLen) {
+				fenceChar = 0
+				fenceLen = 0
+			}
+			// Either way, line belongs to current chunk.
+			if startLine < 0 {
+				startLine = lineNum
+				startByte = lineStart
+			}
+			endLine = lineNum
+			endByte = lineEnd
+			pos = lineEnd
+			continue
+		}
+
+		// Check for opening fence.
+		if fc, fl := parseFenceOpen(line); fc != 0 {
+			fenceChar = fc
+			fenceLen = fl
+			// Fence continues the current chunk (R466).
+			if startLine < 0 {
+				startLine = lineNum
+				startByte = lineStart
+			}
+			endLine = lineNum
+			endByte = lineEnd
+			pos = lineEnd
+			continue
+		}
 
 		blank := isBlankLine(line)
 		heading := !blank && line[0] == '#'
@@ -177,6 +213,57 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 
 	flush()
 	return nil
+}
+
+// parseFenceOpen checks if line is a code fence opening (``` or ~~~).
+// Returns the fence character and count, or (0, 0) if not a fence.
+func parseFenceOpen(line []byte) (byte, int) {
+	trimmed := bytes.TrimRight(line, "\n\r")
+	if len(trimmed) < 3 {
+		return 0, 0
+	}
+	ch := trimmed[0]
+	if ch != '`' && ch != '~' {
+		return 0, 0
+	}
+	n := 1
+	for n < len(trimmed) && trimmed[n] == ch {
+		n++
+	}
+	if n < 3 {
+		return 0, 0
+	}
+	// Info string allowed after backticks, but no backticks in info string.
+	if ch == '`' {
+		for _, b := range trimmed[n:] {
+			if b == '`' {
+				return 0, 0
+			}
+		}
+	}
+	return ch, n
+}
+
+// isClosingFence checks if line closes a fence opened with fenceChar repeated fenceLen times.
+func isClosingFence(line []byte, fenceChar byte, fenceLen int) bool {
+	trimmed := bytes.TrimRight(line, "\n\r")
+	if len(trimmed) < fenceLen {
+		return false
+	}
+	n := 0
+	for n < len(trimmed) && trimmed[n] == fenceChar {
+		n++
+	}
+	if n < fenceLen {
+		return false
+	}
+	// Rest must be only whitespace.
+	for _, b := range trimmed[n:] {
+		if b != ' ' && b != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 // isBlankLine reports whether a line (possibly including trailing \n) is blank.

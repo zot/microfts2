@@ -481,3 +481,68 @@ func TestFileIDPathsIncludesOverlay(t *testing.T) {
 	}
 }
 
+// CRC: crc-Overlay.md | R473, R474, R480
+func TestAddTmpFileWithChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	var chunks []string
+	_, err := db.AddTmpFile("tmp://test/multi", "line", []byte("alpha\nbeta\ngamma\n"),
+		WithChunkCallback(func(text string) {
+			chunks = append(chunks, text)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	if chunks[0] != "alpha\n" {
+		t.Errorf("chunk 0 = %q, want %q", chunks[0], "alpha\n")
+	}
+}
+
+// CRC: crc-Overlay.md | R481
+func TestUpdateTmpFileWithChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	_, err := db.AddTmpFile("tmp://test/doc", "line", []byte("old\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chunks []string
+	err = db.UpdateTmpFile("tmp://test/doc", "line", []byte("new one\nnew two\n"),
+		WithChunkCallback(func(text string) {
+			chunks = append(chunks, text)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+	if chunks[0] != "new one\n" {
+		t.Errorf("chunk 0 = %q, want %q", chunks[0], "new one\n")
+	}
+}
+
+// CRC: crc-Overlay.md | R483
+func TestAppendTmpFileWithChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	_, err := db.AddTmpFile("tmp://test/doc", "line", []byte("first\nsecond\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var appended []string
+	_, err = db.AppendTmpFile("tmp://test/doc", "line", []byte("third\n"),
+		WithAppendChunkCallback(func(text string) {
+			appended = append(appended, text)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appended) != 1 {
+		t.Fatalf("expected 1 appended chunk, got %d", len(appended))
+	}
+	if appended[0] != "third\n" {
+		t.Errorf("appended[0] = %q, want %q", appended[0], "third\n")
+	}
+}
+

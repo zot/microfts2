@@ -48,3 +48,33 @@
 **Input:** "# Title\nline\n\nanother\n"
 **Expected:** Chunk ranges are "1-2" and "4-4"
 **Refs:** crc-Chunker.md, R174
+
+## Test: code fence keeps blank lines in chunk
+**Purpose:** Blank lines inside fenced code blocks do not split chunks
+**Input:** "text before\n```\nx = 1\n\ny = 2\n```\n"
+**Expected:** One chunk "1-6" containing everything
+**Refs:** crc-Chunker.md, R465, R466, R467
+
+## Test: code fence with info string
+**Purpose:** Fence with language tag (```go) is recognized
+**Input:** "# Heading\n```go\nfunc main() {\n}\n```\n"
+**Expected:** One chunk "1-5"
+**Refs:** crc-Chunker.md, R465
+
+## Test: tilde fence
+**Purpose:** ~~~ fences also suppress blank-line splitting
+**Input:** "para\n~~~\na\n\nb\n~~~\n"
+**Expected:** One chunk "1-6"
+**Refs:** crc-Chunker.md, R465, R467
+
+## Test: fence closing requires matching length
+**Purpose:** Closing fence must have >= opening fence's char count
+**Input:** "text\n````\ncode\n```\nstill code\n````\n"
+**Expected:** One chunk "1-6" — the ``` on line 4 doesn't close the ````
+**Refs:** crc-Chunker.md, R468
+
+## Test: text after code fence
+**Purpose:** Normal splitting resumes after fence closes
+**Input:** "before\n```\ncode\n```\n\nafter\n"
+**Expected:** Two chunks: "1-4" and "6-6"
+**Refs:** crc-Chunker.md, R465, R466

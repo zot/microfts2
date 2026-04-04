@@ -60,7 +60,8 @@ func newOverlay() *overlay {
 }
 
 // addFile indexes a tmp:// document in the overlay. R358, R359, R360
-func (o *overlay) addFile(path, strategy string, content []byte, db *DB) (uint64, error) {
+// CRC: crc-Overlay.md | R473, R474, R475, R476, R480
+func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) (uint64, error) {
 	if !utf8.Valid(content) {
 		return 0, fmt.Errorf("tmp content is not valid UTF-8: %s", path)
 	}
@@ -70,7 +71,7 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB) (uint64
 	}
 
 	// Collect chunks outside the lock (chunking is CPU work).
-	collected, err := collectChunksFromContent(path, content, chunker, db)
+	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
 	if err != nil {
 		return 0, err
 	}
@@ -101,8 +102,8 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB) (uint64
 	return fileID, nil
 }
 
-// updateFile replaces a tmp:// document's content. R361, R362, R363
-func (o *overlay) updateFile(path, strategy string, content []byte, db *DB) error {
+// updateFile replaces a tmp:// document's content. R361, R362, R363, R481
+func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) error {
 	if !utf8.Valid(content) {
 		return fmt.Errorf("tmp content is not valid UTF-8: %s", path)
 	}
@@ -110,7 +111,7 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB) erro
 	if chunker == nil {
 		return fmt.Errorf("chunking strategy %q not registered", strategy)
 	}
-	collected, err := collectChunksFromContent(path, content, chunker, db)
+	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
 	if err != nil {
 		return err
 	}
@@ -170,8 +171,12 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	ofile, exists := o.files[path]
 	if !exists {
 		o.mu.RUnlock()
-		// R431: auto-create via addFile.
-		return o.addFile(path, strategy, content, db)
+		// R431: auto-create via addFile. Extract callback from opts.
+		var cfg appendConfig
+		for _, opt := range opts {
+			opt(&cfg)
+		}
+		return o.addFile(path, strategy, content, db, cfg.chunkCallback)
 	}
 	if ofile.strategy != strategy {
 		o.mu.RUnlock()
@@ -185,17 +190,18 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 		return 0, fmt.Errorf("chunking strategy %q not registered", strategy)
 	}
 
-	collected, err := collectChunksFromContent(path, content, chunker, db)
+	var cfg appendConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// R483: fire callback for appended chunks
+	collected, err := collectChunksFromContent(path, content, chunker, db, cfg.chunkCallback)
 	if err != nil {
 		return 0, err
 	}
 	if len(collected) == 0 {
 		return fileID, nil
-	}
-
-	var cfg appendConfig
-	for _, opt := range opts {
-		opt(&cfg)
 	}
 	if cfg.baseLine > 0 {
 		for i := range collected {
@@ -346,13 +352,18 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 
 // collectChunksFromContent runs the chunker and extracts trigrams/tokens.
 // Pure computation — no overlay state accessed.
-func collectChunksFromContent(path string, content []byte, chunker Chunker, db *DB) ([]collectedChunk, error) {
+// CRC: crc-Overlay.md | R485
+func collectChunksFromContent(path string, content []byte, chunker Chunker, db *DB, cb ChunkCallback) ([]collectedChunk, error) {
 	var chunks []collectedChunk
 	var utf8Err error
 	if err := chunker.Chunks(path, content, func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, path)
 			return false
+		}
+		// R473: fire callback after UTF-8 validation, before hashing
+		if cb != nil {
+			cb(string(c.Content))
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{

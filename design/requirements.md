@@ -377,6 +377,10 @@
 - **R177:** Blank lines are boundaries only — not included in any chunk's content; gaps between chunks are expected
 - **R175:** CLI subcommand `microfts chunk-markdown <file>` outputs `range\tcontent` per chunk
 - **R176:** Registered as a built-in func strategy alongside other built-in chunkers
+- **R465:** Fenced code blocks (opening `` ``` `` or `~~~`, with optional info string) suppress blank-line splitting — all lines from fence open through matching close belong to the current chunk
+- **R466:** A fence opening does not start a new chunk — it continues the current paragraph/chunk
+- **R467:** Blank lines inside a fenced code block are not chunk boundaries
+- **R468:** Fence matching: closing fence is a line starting with the same character (`` ` `` or `~`) repeated at least as many times as the opening, with no other non-whitespace content
 
 ## Feature: Per-token Trigram Generation
 **Source:** specs/main.md
@@ -719,3 +723,24 @@
 - **R462:** (inferred) Copy does not copy `overlayOnce` — overlay pointer is shared directly, already initialized
 - **R463:** `InvalidateCaches()` — nils `pathCache`, `pathToID`, `frecordCache` on the receiver
 - **R464:** `InvalidateCaches` does NOT reset `overlayOnce`
+
+## Feature: Chunk Processor Callback
+**Source:** specs/main.md
+
+- **R469:** `ChunkCallback` type: `func(chunkText string)` — receives clean chunk text during indexing
+- **R470:** `WithChunkCallback(fn ChunkCallback) IndexOption` — supplies callback for indexing methods
+- **R471:** `WithAppendChunkCallback(fn ChunkCallback) AppendOption` — supplies callback for append methods
+- **R472:** `IndexOption` type: `func(*indexConfig)` — functional option for indexing methods, parallel to SearchOption and AppendOption
+- **R473:** Callback fires once per chunk, in chunk order, after UTF-8 validation, before hashing/trigram extraction
+- **R474:** Callback receives `string(chunk.Content)` — a copy, safe to retain
+- **R475:** Nil callback (no option supplied) is a no-op — zero overhead on existing path
+- **R476:** Callback errors are not propagated — observation only, never aborts indexing
+- **R477:** `AddFile` gains `...IndexOption` variadic parameter
+- **R478:** `AddFileWithContent` gains `...IndexOption` variadic parameter
+- **R479:** `RefreshStale` gains `...IndexOption` variadic parameter
+- **R480:** `AddTmpFile` gains `...IndexOption` variadic parameter
+- **R481:** `UpdateTmpFile` gains `...IndexOption` variadic parameter
+- **R482:** `AppendChunks` accepts `WithAppendChunkCallback` via existing `...AppendOption`
+- **R483:** `AppendTmpFile` accepts `WithAppendChunkCallback` via existing `...AppendOption`
+- **R484:** (inferred) Backward compatible — existing callers pass zero IndexOption args; append signatures unchanged
+- **R485:** (inferred) `collectChunks` and overlay `collectChunksFromContent` are the injection points for the callback

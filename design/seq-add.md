@@ -1,5 +1,5 @@
 # Sequence: Add File
-**Requirements:** R10, R11, R12, R20, R25, R26, R29, R77, R79, R81, R92, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147, R213, R214, R215, R223, R224, R225, R226, R227, R228, R229, R230, R231, R233, R234, R235, R236, R237, R238, R240, R241, R244, R245, R249, R250, R251, R252, R253, R261, R262
+**Requirements:** R10, R11, R12, R20, R25, R26, R29, R77, R79, R81, R92, R110, R111, R116, R118, R120, R121, R122, R128, R129, R130, R131, R146, R147, R213, R214, R215, R223, R224, R225, R226, R227, R228, R229, R230, R231, R233, R234, R235, R236, R237, R238, R240, R241, R244, R245, R249, R250, R251, R252, R253, R261, R262, R469, R470, R472, R473, R474, R475, R476, R477, R478, R485
 
 Participants: DB, Chunker, Trigrams, KeyChain
 
@@ -24,10 +24,14 @@ DB                      Chunker       Trigrams      KeyChain
  |    else:                              |            |
  |-- RunChunkerFunc(cmd) -> c ---------> |            |
  |                                       |            |
+ |  apply IndexOptions (extract callback) |            |
+ |                                       |            |
  |  call c.Chunks(path, content, yield): |            |
  |    for each yielded Chunk{Range, Content, Attrs}:  |
  |      copy Range as string             |            |
  |      validate UTF-8 on Content        |            |
+ |      if callback != nil:              |            |
+ |        callback(string(Content)) [R473]            |
  |      compute SHA-256 of Content       |            |
  |-- TrigramCounts(Content) -------->    |            |
  | <-- map[uint32]int ---------------    |            |

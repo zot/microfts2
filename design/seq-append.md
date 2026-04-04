@@ -1,5 +1,5 @@
 # Sequence: Append Chunks
-**Requirements:** R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R223, R224, R225, R226, R236, R237, R253, R261, R262
+**Requirements:** R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R223, R224, R225, R226, R236, R237, R253, R261, R262, R471, R482
 
 Participants: DB, Trigrams
 
@@ -13,10 +13,14 @@ DB                                    Trigrams
  |                                      |
  |  resolve Chunker for strategy        |
  |                                      |
+ |  extract ChunkCallback from opts      |
+ |                                      |
  |  call c.Chunks(path, content, yield):|
  |    for each yielded Chunk:           |
  |      copy Range as string            |
  |      validate UTF-8 on Content       |
+ |      if callback != nil:             |
+ |        callback(string(Content)) [R482]
  |      compute SHA-256 of Content      |
  |-- TrigramCounts(Content) ----------> |
  | <-- map[uint32]int ----------------- |

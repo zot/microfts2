@@ -1071,17 +1071,26 @@ func (db *DB) ensureOverlay() *overlay {
 
 // CRC: crc-DB.md | Seq: seq-tmp-add.md | R358, R359, R360
 // AddTmpFile indexes a tmp:// document in the in-memory overlay.
-func (db *DB) AddTmpFile(path, strategy string, content []byte) (uint64, error) {
-	return db.ensureOverlay().addFile(path, strategy, content, db)
+// CRC: crc-DB.md | R480
+func (db *DB) AddTmpFile(path, strategy string, content []byte, opts ...IndexOption) (uint64, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return db.ensureOverlay().addFile(path, strategy, content, db, cfg.chunkCallback)
 }
 
-// CRC: crc-DB.md | Seq: seq-tmp-add.md | R361, R362, R363
+// CRC: crc-DB.md | Seq: seq-tmp-add.md | R361, R362, R363, R481
 // UpdateTmpFile replaces the content of an existing tmp:// document.
-func (db *DB) UpdateTmpFile(path, strategy string, content []byte) error {
-	return db.ensureOverlay().updateFile(path, strategy, content, db)
+func (db *DB) UpdateTmpFile(path, strategy string, content []byte, opts ...IndexOption) error {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return db.ensureOverlay().updateFile(path, strategy, content, db, cfg.chunkCallback)
 }
 
-// CRC: crc-DB.md | R428-R442
+// CRC: crc-DB.md | R428-R442, R483
 // AppendTmpFile appends content to an existing tmp:// document, creating it if
 // it doesn't exist. New chunks are indexed from the appended content without
 // touching existing chunks.
@@ -1267,19 +1276,28 @@ func (db *DB) InvalidateCaches() {
 
 // --- AddFile ---
 
-// Seq: seq-add.md
-func (db *DB) AddFile(fpath, strategy string) (uint64, error) {
-	fileid, _, err := db.addFileCore(fpath, strategy)
+// Seq: seq-add.md | R477
+func (db *DB) AddFile(fpath, strategy string, opts ...IndexOption) (uint64, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	fileid, _, err := db.addFileCore(fpath, strategy, cfg.chunkCallback)
 	return fileid, err
 }
 
-// CRC: crc-DB.md | R120
-func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error) {
-	return db.addFileCore(fpath, strategy)
+// CRC: crc-DB.md | R120, R478
+func (db *DB) AddFileWithContent(fpath, strategy string, opts ...IndexOption) (uint64, []byte, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return db.addFileCore(fpath, strategy, cfg.chunkCallback)
 }
 
 // collectChunks reads a file, runs the chunker, and returns the collected chunks.
-func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, int64, [32]byte, error) {
+// CRC: crc-DB.md | R485
+func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collectedChunk, []byte, int64, [32]byte, error) {
 	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
 		return nil, nil, 0, [32]byte{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
 	}
@@ -1306,6 +1324,10 @@ func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, i
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
 		}
+		// R473: fire callback after UTF-8 validation, before hashing
+		if cb != nil {
+			cb(string(c.Content))
+		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
 			rangeStr:  string(c.Range),
@@ -1330,8 +1352,8 @@ func (db *DB) collectChunks(fpath, strategy string) ([]collectedChunk, []byte, i
 }
 
 // Seq: seq-add.md | R118
-func (db *DB) addFileCore(fpath, strategy string) (uint64, []byte, error) {
-	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy)
+func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback) (uint64, []byte, error) {
+	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1726,18 +1748,26 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) error {
 
 // --- Reindex ---
 
-func (db *DB) Reindex(fpath, strategy string) (uint64, error) {
-	fileid, _, err := db.reindexCore(fpath, strategy)
+func (db *DB) Reindex(fpath, strategy string, opts ...IndexOption) (uint64, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	fileid, _, err := db.reindexCore(fpath, strategy, cfg.chunkCallback)
 	return fileid, err
 }
 
 // CRC: crc-DB.md | R121
-func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error) {
-	return db.reindexCore(fpath, strategy)
+func (db *DB) ReindexWithContent(fpath, strategy string, opts ...IndexOption) (uint64, []byte, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return db.reindexCore(fpath, strategy, cfg.chunkCallback)
 }
 
-func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
-	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy)
+func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback) (uint64, []byte, error) {
+	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1763,6 +1793,27 @@ func (db *DB) reindexCore(fpath, strategy string) (uint64, []byte, error) {
 	return fileid, data, err
 }
 
+// --- ChunkCallback ---
+
+// ChunkCallback receives clean chunk text during indexing.
+// Called once per chunk, in chunk order. The string is a copy, safe to retain.
+// CRC: crc-DB.md | R469
+type ChunkCallback func(chunkText string)
+
+// IndexOption configures indexing methods (AddFile, AddFileWithContent, RefreshStale, AddTmpFile, UpdateTmpFile).
+// CRC: crc-DB.md | R472
+type IndexOption func(*indexConfig)
+
+type indexConfig struct {
+	chunkCallback ChunkCallback
+}
+
+// WithChunkCallback supplies a chunk callback for indexing methods.
+// CRC: crc-DB.md | R470
+func WithChunkCallback(fn ChunkCallback) IndexOption {
+	return func(c *indexConfig) { c.chunkCallback = fn }
+}
+
 // --- AppendChunks ---
 
 // AppendOption configures AppendChunks behavior.
@@ -1775,6 +1826,7 @@ type appendConfig struct {
 	fileLength    int64
 	hasFileLength bool
 	baseLine      int
+	chunkCallback ChunkCallback
 }
 
 // WithContentHash sets the full-file SHA-256 hash (caller pre-computed).
@@ -1800,6 +1852,12 @@ func WithFileLength(n int64) AppendOption {
 // R162
 func WithBaseLine(n int) AppendOption {
 	return func(c *appendConfig) { c.baseLine = n }
+}
+
+// WithAppendChunkCallback supplies a chunk callback for append methods.
+// CRC: crc-DB.md | R471
+func WithAppendChunkCallback(fn ChunkCallback) AppendOption {
+	return func(c *appendConfig) { c.chunkCallback = fn }
 }
 
 // AppendChunks adds chunks to an existing file without full reindex.
@@ -1841,6 +1899,10 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
 			return false
+		}
+		// R482: fire callback after UTF-8 validation, before hashing
+		if cfg.chunkCallback != nil {
+			cfg.chunkCallback(string(c.Content))
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
@@ -3257,7 +3319,8 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 
 // RefreshStale reindexes all stale files. If strategy is empty, each file's
 // existing strategy is used. Returns the list of stale/missing files.
-func (db *DB) RefreshStale(strategy string) ([]FileStatus, error) {
+// CRC: crc-DB.md | R479
+func (db *DB) RefreshStale(strategy string, opts ...IndexOption) ([]FileStatus, error) {
 	statuses, err := db.StaleFiles()
 	if err != nil {
 		return nil, err
@@ -3271,7 +3334,7 @@ func (db *DB) RefreshStale(strategy string) ([]FileStatus, error) {
 			if strat == "" {
 				strat = fs.Strategy
 			}
-			if _, err := db.Reindex(fs.Path, strat); err != nil {
+			if _, err := db.Reindex(fs.Path, strat, opts...); err != nil {
 				return result, fmt.Errorf("refresh %s: %w", fs.Path, err)
 			}
 			fs.Status = "refreshed"

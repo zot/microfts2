@@ -78,3 +78,21 @@
 **Input:** AddTmpFile, Close, reopen, search for tmp content
 **Expected:** No tmp results after reopen (overlay is gone)
 **Refs:** crc-Overlay.md
+
+## Test: AddTmpFile with ChunkCallback
+**Purpose:** callback fires for each chunk in overlay add
+**Input:** AddTmpFile with multi-chunk content and WithChunkCallback capturing texts
+**Expected:** slice has one entry per chunk, matching chunk content, in order
+**Refs:** crc-Overlay.md, seq-tmp-add.md, R473, R474, R480
+
+## Test: UpdateTmpFile with ChunkCallback
+**Purpose:** callback fires for new chunks during update
+**Input:** AddTmpFile, UpdateTmpFile with new content and WithChunkCallback
+**Expected:** callback receives new chunk texts (not old)
+**Refs:** crc-Overlay.md, seq-tmp-add.md, R481
+
+## Test: AppendTmpFile with WithAppendChunkCallback
+**Purpose:** callback fires for appended chunks only
+**Input:** AddTmpFile (2 chunks), AppendTmpFile with WithAppendChunkCallback (1 chunk)
+**Expected:** callback slice has 1 entry matching the appended chunk
+**Refs:** crc-Overlay.md, seq-tmp-add.md, R483

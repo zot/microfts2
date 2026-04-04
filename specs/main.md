@@ -253,6 +253,10 @@ Splits on blank lines and heading transitions:
 - Non-heading text between boundaries is one chunk
 - Blank lines are boundaries only — they are not included in any chunk's content
 - Gaps between chunks are expected; each chunk's range notes its precise position in the file
+- Fenced code blocks (opening `` ``` `` or `~~~`, with optional info string) suppress blank-line splitting — all lines from the opening fence through the matching closing fence are part of the current chunk, not a new one
+- A fence opening does not start a new chunk — it continues the current paragraph/chunk
+- Blank lines inside a fenced code block are not boundaries
+- Fence matching: a closing fence is a line starting with the same character (`` ` `` or `~`) repeated at least as many times as the opening fence, with no other non-whitespace content
 
 Range: `startline-endline` (1-based, inclusive). Content: the raw text of those lines (excluding boundary blank lines).
 
@@ -1278,4 +1282,81 @@ func (db *DB) InvalidateCaches()
 - Does NOT reset `overlayOnce` — overlay is shared and already initialized
 - No state transfer from the copy — just "your cache is stale now"
 - Next access triggers the existing lazy-load path
+
+# Chunk Processor Callback
+
+A callback that fires for each chunk during indexing, giving the caller access to clean chunk text without re-reading the file. Motivated by ark's need to extract tags from chunk content during indexing — the chunker (e.g. chat-jsonl) has already stripped metadata noise, so the callback sees clean text.
+
+## Problem
+
+Without this callback, callers that need per-chunk text during indexing must either:
+1. Re-read the file and run the chunker themselves (double work)
+2. Extract data from the raw file, which includes noise the chunker would have stripped
+
+## Design
+
+A functional option on all indexing methods. The callback receives each chunk's text as a string after the chunker produces it but before microfts2 processes it (hashing, trigram extraction, etc.).
+
+```go
+// ChunkCallback receives clean chunk text during indexing.
+// Called once per chunk, in chunk order. Must not retain the string
+// beyond the call (copy if needed for accumulation).
+type ChunkCallback func(chunkText string)
+
+// WithChunkCallback supplies a callback for indexing methods.
+func WithChunkCallback(fn ChunkCallback) IndexOption
+```
+
+## IndexOption type
+
+A new functional option type for indexing methods, parallel to `SearchOption` for search and `AppendOption` for append:
+
+```go
+type IndexOption func(*indexConfig)
+```
+
+## Option constructors
+
+Two constructors produce options for their respective method families, sharing the same `ChunkCallback` type:
+
+```go
+// WithChunkCallback supplies a chunk callback for indexing methods (AddFile, etc.).
+func WithChunkCallback(fn ChunkCallback) IndexOption
+
+// WithAppendChunkCallback supplies a chunk callback for append methods (AppendChunks, AppendTmpFile).
+func WithAppendChunkCallback(fn ChunkCallback) AppendOption
+```
+
+No existing signatures change. Append methods keep `...AppendOption`. Indexing methods gain `...IndexOption`.
+
+## Affected methods
+
+Indexing methods gain `...IndexOption`:
+
+```go
+func (db *DB) AddFile(fpath, strategy string, opts ...IndexOption) (uint64, error)
+func (db *DB) AddFileWithContent(fpath, strategy string, opts ...IndexOption) (uint64, []byte, error)
+func (db *DB) RefreshStale(strategy string, opts ...IndexOption) ([]FileStatus, error)
+func (db *DB) AddTmpFile(path, strategy string, content []byte, opts ...IndexOption) (uint64, error)
+func (db *DB) UpdateTmpFile(path, strategy string, content []byte, opts ...IndexOption) error
+```
+
+Append methods use existing `...AppendOption` (no change):
+
+```go
+func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error
+func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...AppendOption) (uint64, error)
+```
+
+## Callback behavior
+
+- Called once per chunk, in the order the chunker produces them
+- Receives `string(chunk.Content)` — a copy, safe to retain
+- A nil callback (no `WithChunkCallback` option) means no-op — zero overhead on the existing path
+- The callback fires inside `collectChunks` and equivalent overlay paths, after UTF-8 validation, before hashing
+- Errors from the callback are not propagated — the callback is for observation, not control flow. If the caller needs to signal failure, it sets a flag in its closure and checks after indexing returns.
+
+## Backward compatibility
+
+Indexing methods gain a variadic `...IndexOption` — existing callers pass zero args, no breakage. Append methods are unchanged — `WithAppendChunkCallback` is just a new `AppendOption` constructor.
 

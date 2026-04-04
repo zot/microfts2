@@ -270,3 +270,33 @@
 **Input:** create DB, add a file, call FileIDPaths (populates caches), call InvalidateCaches()
 **Expected:** pathCache == nil, pathToID == nil, frecordCache == nil. Next FileIDPaths call re-populates from LMDB
 **Refs:** crc-DB.md, R463, R464
+
+## Test: AddFile with ChunkCallback
+**Purpose:** callback receives clean chunk text during AddFile
+**Input:** create DB, add a multi-chunk file with WithChunkCallback that appends texts to a slice
+**Expected:** slice contains one entry per chunk, in chunk order, matching chunk content
+**Refs:** crc-DB.md, seq-add.md, R469, R470, R473, R474, R477
+
+## Test: AddFile without ChunkCallback
+**Purpose:** nil callback has zero overhead
+**Input:** create DB, add file with no IndexOption
+**Expected:** file added successfully, same as before (backward compatible)
+**Refs:** crc-DB.md, R475, R484
+
+## Test: AddFileWithContent with ChunkCallback
+**Purpose:** callback works on WithContent variant
+**Input:** create DB, add file with WithChunkCallback, capture texts
+**Expected:** callback fires, content also returned as second value
+**Refs:** crc-DB.md, R478
+
+## Test: AppendChunks with WithAppendChunkCallback
+**Purpose:** callback fires for appended chunks only
+**Input:** create DB, add file (3 chunks), append content (2 chunks) with WithAppendChunkCallback
+**Expected:** callback slice has exactly 2 entries matching appended chunk content
+**Refs:** crc-DB.md, seq-append.md, R471, R482
+
+## Test: RefreshStale with ChunkCallback
+**Purpose:** callback fires during stale file reindex
+**Input:** create DB, add file, modify file on disk, call RefreshStale with WithChunkCallback
+**Expected:** callback fires for each chunk of the reindexed file
+**Refs:** crc-DB.md, R479
