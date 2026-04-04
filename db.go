@@ -66,10 +66,14 @@ type Settings struct {
 }
 
 // SearchResult is a single match from Search.
+// R99, R490, R491
 type SearchResult struct {
 	Path  string
 	Range string
 	Score float64
+
+	chunkID uint64 // R490: set by scoreAndResolve; dedup key for Retrieve
+	chunk   []byte // R491: lazily populated by Retrieve
 }
 
 // ScoredChunk is a per-chunk trigram match score from ScoreFile.
@@ -118,7 +122,9 @@ type TrigramFilter func(trigrams []TrigramCount, totalChunks int) []TrigramCount
 // SearchOption configures search behavior.
 type SearchOption func(*searchConfig)
 
+// CRC: crc-DB.md | R487, R488, R489, R486
 type searchConfig struct {
+	*DB
 	scoreFunc          ScoreFunc
 	onlyIDs            map[uint64]struct{} // if non-nil, only include these file IDs
 	exceptIDs          map[uint64]struct{} // if non-nil, exclude these file IDs
@@ -130,6 +136,8 @@ type searchConfig struct {
 	proximityTopN      int                 // if > 0, rerank top-N by proximity R279
 	loose              bool                // R336: OR semantics at term level
 	noTmp              bool                // skip overlay (tmp://) documents
+	chunkCache         *ChunkCache         // R486: optional external cache for post-filters
+	chunkContent       map[uint64][]byte   // R494: per-search chunkID→content dedup cache
 }
 
 // ChunkFilter receives a CRecord during candidate evaluation.
@@ -140,6 +148,13 @@ type ChunkFilter func(chunk CRecord) bool
 // WithChunkFilter adds a chunk filter. Multiple calls accumulate (AND semantics).
 func WithChunkFilter(fn ChunkFilter) SearchOption {
 	return func(c *searchConfig) { c.chunkFilters = append(c.chunkFilters, fn) }
+}
+
+// WithChunkCache threads an external ChunkCache through post-filters (verify, regex,
+// except-regex). When present, post-filters use the cache instead of re-reading files.
+// R486
+func WithChunkCache(cc *ChunkCache) SearchOption {
+	return func(c *searchConfig) { c.chunkCache = cc }
 }
 
 // WithAfter keeps chunks with timestamp >= t. Checks "timestamp" attr first
@@ -288,12 +303,8 @@ func FilterBestN(n int) TrigramFilter {
 	}
 }
 
-func defaultSearchConfig() searchConfig {
-	return searchConfig{} // scoreFunc nil = use default (coverage, or fuzzy term score)
-}
-
-func applySearchOpts(opts []SearchOption) searchConfig {
-	cfg := defaultSearchConfig()
+func (db *DB) newSearchConfig(opts []SearchOption) searchConfig {
+	cfg := searchConfig{DB: db, chunkContent: make(map[uint64][]byte)} // R494
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -2037,8 +2048,8 @@ func (db *DB) totalChunks(th TxnHolder) int {
 
 // searchCollect selects trigrams, reads T records, combines per-term candidate sets
 // (intersect for AND, union for fuzzy OR), and loads C records. Returns candidates and active trigrams.
-func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32, cfg searchConfig) ([]candidateChunk, []uint32) {
-	active := selectQueryTrigrams(th, db.dbi, queryTrigrams, db.totalChunks(th), cfg)
+func (s *searchConfig) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32) ([]candidateChunk, []uint32) {
+	active := selectQueryTrigrams(th, s.dbi, queryTrigrams, s.totalChunks(th), *s)
 	if len(active) == 0 {
 		return nil, nil
 	}
@@ -2058,10 +2069,10 @@ func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams
 		if len(termActive) == 0 {
 			continue
 		}
-		termChunks := collectChunkIDs(th, db.dbi, termActive)
+		termChunks := collectChunkIDs(th, s.dbi, termActive)
 		if candidateChunkIDs == nil {
 			candidateChunkIDs = termChunks
-		} else if cfg.loose {
+		} else if s.loose {
 			// R337: union across terms for fuzzy search
 			for id := range termChunks {
 				candidateChunkIDs[id] = true
@@ -2069,18 +2080,18 @@ func (db *DB) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams
 		} else {
 			candidateChunkIDs = intersectChunkSets(candidateChunkIDs, termChunks)
 		}
-		if !cfg.loose && len(candidateChunkIDs) == 0 {
+		if !s.loose && len(candidateChunkIDs) == 0 {
 			return nil, nil
 		}
 	}
 
-	cands := db.collectCandidates(th, candidateChunkIDs, cfg)
+	cands := s.collectCandidates(th, candidateChunkIDs)
 	return cands, active
 }
 
 // Seq: seq-search.md | R178, R179, R180, R181, R182
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error) {
-	cfg := applySearchOpts(opts)
+	cfg := db.newSearchConfig(opts)
 
 	query = strings.TrimSpace(query)
 	terms := parseQueryTerms(query)
@@ -2105,11 +2116,11 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	var results []SearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		cands, active := db.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams, cfg)
+		cands, active := cfg.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams)
 		if len(cands) == 0 {
 			return nil
 		}
-		results = db.scoreAndResolve(txnWrap{txn}, cands, active, cfg.scoreFunc, cfg)
+		results = cfg.scoreAndResolve(txnWrap{txn}, cands, active, cfg.scoreFunc)
 		return nil
 	})
 	if err != nil {
@@ -2122,18 +2133,18 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	}
 
 	if cfg.verify {
-		results = verifyResults(db, results, query)
+		results = cfg.verifyResults(results, query)
 	}
 
 	// R188, R189: apply regex post-filters after verify, before sort
-	results, err = applyRegexPostFilters(db, results, cfg)
+	results, err = cfg.applyRegexPostFilters(results)
 	if err != nil {
 		return nil, err
 	}
 
 	// R279: proximity rerank if configured
 	if cfg.proximityTopN > 0 {
-		results = proximityRerank(db, results, query, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, query, cfg.proximityTopN)
 	}
 
 	sortResults(results)
@@ -2148,7 +2159,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 // Phase 1: trigram OR-union tally from T record posting lists (select top-k)
 // Phase 2: C record re-score with ScoreCoverage for the top-k winners
 func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchResults, error) {
-	cfg := applySearchOpts(opts)
+	cfg := db.newSearchConfig(opts)
 
 	query = strings.TrimSpace(query)
 	terms := parseQueryTerms(query)
@@ -2221,8 +2232,8 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 		for _, e := range entries {
 			topIDs[e.chunkID] = true
 		}
-		cands := db.collectCandidates(th, topIDs, cfg)
-		results = db.scoreAndResolve(th, cands, queryTrigrams, scoreCoverage, cfg)
+		cands := cfg.collectCandidates(th, topIDs)
+		results = cfg.scoreAndResolve(th, cands, queryTrigrams, scoreCoverage)
 		return nil
 	})
 	if err != nil {
@@ -2231,15 +2242,15 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 
 	// R423: post-filters
 	if cfg.verify {
-		results = verifyResults(db, results, query)
+		results = cfg.verifyResults(results, query)
 	}
 	var ferr error
-	results, ferr = applyRegexPostFilters(db, results, cfg)
+	results, ferr = cfg.applyRegexPostFilters(results)
 	if ferr != nil {
 		return nil, ferr
 	}
 	if cfg.proximityTopN > 0 {
-		results = proximityRerank(db, results, query, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, query, cfg.proximityTopN)
 	}
 
 	sortResults(results)
@@ -2261,7 +2272,7 @@ type MultiSearchResult struct {
 
 // CRC: crc-DB.md | Seq: seq-search-multi.md | R283, R284, R285, R287, R288, R289, R290
 func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
-	cfg := applySearchOpts(opts)
+	cfg := db.newSearchConfig(opts)
 
 	query = strings.TrimSpace(query)
 	terms := parseQueryTerms(query)
@@ -2277,7 +2288,7 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 	var multiResults []MultiSearchResult
 
 	err := db.env.View(func(txn *lmdb.Txn) error {
-		cands, active := db.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams, cfg)
+		cands, active := cfg.searchCollect(txnWrap{txn}, termTrigrams, queryTrigrams)
 
 		if len(cands) == 0 {
 			return nil
@@ -2285,7 +2296,7 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 
 		// Score with each strategy
 		for name, scoreFunc := range strategies {
-			results := db.scoreAndResolve(txnWrap{txn}, cands, active, scoreFunc, cfg)
+			results := cfg.scoreAndResolve(txnWrap{txn}, cands, active, scoreFunc)
 			sortResults(results)
 			if k > 0 && len(results) > k {
 				results = results[:k]
@@ -2314,15 +2325,15 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 	for i := range multiResults {
 		r := multiResults[i].Results
 		if cfg.verify {
-			r = verifyResults(db, r, query)
+			r = cfg.verifyResults(r, query)
 		}
 		var ferr error
-		r, ferr = applyRegexPostFilters(db, r, cfg)
+		r, ferr = cfg.applyRegexPostFilters(r)
 		if ferr != nil {
 			return nil, ferr
 		}
 		if cfg.proximityTopN > 0 {
-			r = proximityRerank(db, r, query, cfg.proximityTopN)
+			r = cfg.proximityRerank(r, query, cfg.proximityTopN)
 		}
 		sortResults(r)
 		if k > 0 && len(r) > k {
@@ -2402,11 +2413,11 @@ type candidateChunk struct {
 
 // collectCandidates reads C records for candidate chunkids, applies chunk filters,
 // and returns pre-loaded candidates. CRC: crc-DB.md | R284
-func (db *DB) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool, cfg searchConfig) []candidateChunk {
+func (s *searchConfig) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool) []candidateChunk {
 	txn := th.Txn()
 	var candidates []candidateChunk
 	for chunkid := range chunkIDs {
-		cVal, err := txn.Get(db.dbi, makeCKey(chunkid))
+		cVal, err := txn.Get(s.dbi, makeCKey(chunkid))
 		if err != nil {
 			continue
 		}
@@ -2417,9 +2428,9 @@ func (db *DB) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool, cfg sear
 			continue
 		}
 		crec.ChunkID = chunkid
-		crec.attach(db, txn)
+		crec.attach(s.DB, txn)
 
-		if !applyChunkFilters(crec, cfg) {
+		if !s.applyChunkFilters(crec) {
 			continue
 		}
 
@@ -2439,7 +2450,7 @@ func (db *DB) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool, cfg sear
 }
 
 // scoreAndResolve scores pre-loaded candidates and resolves to SearchResults.
-func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active []uint32, scoreFunc ScoreFunc, cfg searchConfig) []SearchResult {
+func (s *searchConfig) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active []uint32, scoreFunc ScoreFunc) []SearchResult {
 	txn := th.Txn()
 	var results []SearchResult
 	frecCache := make(map[uint64]*FRecord)
@@ -2456,20 +2467,20 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active 
 		}
 
 		for _, fid := range cand.crec.FileIDs {
-			if cfg.onlyIDs != nil {
-				if _, ok := cfg.onlyIDs[fid]; !ok {
+			if s.onlyIDs != nil {
+				if _, ok := s.onlyIDs[fid]; !ok {
 					continue
 				}
 			}
-			if cfg.exceptIDs != nil {
-				if _, ok := cfg.exceptIDs[fid]; ok {
+			if s.exceptIDs != nil {
+				if _, ok := s.exceptIDs[fid]; ok {
 					continue
 				}
 			}
 
 			frec, ok := frecCache[fid]
 			if !ok {
-				f, err := db.readFRecord(txnWrap{txn}, fid)
+				f, err := s.readFRecord(txnWrap{txn}, fid)
 				if err != nil {
 					continue
 				}
@@ -2484,9 +2495,10 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active 
 						path = frec.Names[0]
 					}
 					results = append(results, SearchResult{
-						Path:  path,
-						Range: fce.Location,
-						Score: score,
+						Path:    path,
+						Range:   fce.Location,
+						Score:   score,
+						chunkID: cand.chunkID, // R490
 					})
 					break
 				}
@@ -2497,8 +2509,8 @@ func (db *DB) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active 
 }
 
 // applyChunkFilters runs all ChunkFilter functions, returning false if any rejects.
-func applyChunkFilters(crec CRecord, cfg searchConfig) bool {
-	for _, f := range cfg.chunkFilters {
+func (s *searchConfig) applyChunkFilters(crec CRecord) bool {
+	for _, f := range s.chunkFilters {
 		if !f(crec) {
 			return false
 		}
@@ -2553,97 +2565,32 @@ func extractPerTermTrigrams(db *DB, query string) []uint32 {
 	return result
 }
 
-// filterResults re-chunks files and keeps only results where matchFn returns true.
-// Used by both literal verify and regex verify.
-func filterResults(db *DB, results []SearchResult, matchFn func(chunkContent []byte) bool) []SearchResult {
-	chunkCache := make(map[string]map[string][]byte)
-	var verified []SearchResult
-	for _, r := range results {
-		chunks, ok := chunkCache[r.Path]
-		if !ok {
-			chunks = rechunkForVerify(db, r.Path)
-			chunkCache[r.Path] = chunks
-		}
-		if chunks == nil {
-			continue
-		}
-
-		chunkContent, ok := chunks[r.Range]
-		if !ok {
-			continue
-		}
-		if matchFn(chunkContent) {
-			verified = append(verified, r)
-		}
+// Retrieve returns chunk content for a search result. R492, R494
+// Check order: r.chunk (instant) → chunkCache (cross-search) → chunkContent map (within-search dedup) → rechunk from disk/overlay.
+func (s *searchConfig) Retrieve(r *SearchResult) []byte {
+	if r.chunk != nil {
+		return r.chunk
 	}
-	return verified
+	// R494: check per-search chunkID dedup cache
+	if content, ok := s.chunkContent[r.chunkID]; ok {
+		r.chunk = content
+		return content
+	}
+	// R486: use ChunkCache (external or per-search) for file-level caching
+	if s.chunkCache == nil {
+		s.chunkCache = s.NewChunkCache()
+	}
+	content, ok := s.chunkCache.ChunkText(r.Path, r.Range)
+	if !ok {
+		return nil
+	}
+	s.chunkContent[r.chunkID] = content
+	r.chunk = content
+	return content
 }
 
-// rechunkForVerify looks up a file's strategy, re-chunks it, and returns
-// a map from range string to chunk content.
-func rechunkForVerify(db *DB, fpath string) map[string][]byte {
-	// R370: handle tmp:// paths via overlay
-	if isTmpPath(fpath) && db.overlay != nil {
-		return rechunkForVerifyTmp(db, fpath)
-	}
-
-	var strategy string
-	err := db.env.View(func(txn *lmdb.Txn) error {
-		_, frec, err := db.lookupFileByPath(txnWrap{txn}, fpath)
-		if err != nil {
-			return err
-		}
-		strategy = frec.Strategy
-		return nil
-	})
-	if err != nil {
-		return nil
-	}
-
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
-		return nil
-	}
-
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return nil
-	}
-
-	chunks := make(map[string][]byte)
-	chunker.Chunks(fpath, data, func(c Chunk) bool {
-		content := make([]byte, len(c.Content))
-		copy(content, c.Content)
-		chunks[string(c.Range)] = content
-		return true
-	})
-	return chunks
-}
-
-// rechunkForVerifyTmp handles rechunking for tmp:// paths using stored content.
-func rechunkForVerifyTmp(db *DB, fpath string) map[string][]byte {
-	ofile := db.overlay.lookupFileByPath(fpath)
-	if ofile == nil {
-		return nil
-	}
-	chunker := db.resolveChunker(ofile.strategy)
-	if chunker == nil {
-		return nil
-	}
-	chunks := make(map[string][]byte)
-	chunker.Chunks(fpath, ofile.content, func(c Chunk) bool {
-		content := make([]byte, len(c.Content))
-		copy(content, c.Content)
-		chunks[string(c.Range)] = content
-		return true
-	})
-	return chunks
-}
-
-// verifyResults re-chunks files and discards results where
-// any query term is absent as a case-insensitive substring.
-// R124
-func verifyResults(db *DB, results []SearchResult, query string) []SearchResult {
+// verifyResults discards results where any query term is absent. R124, R493
+func (s *searchConfig) verifyResults(results []SearchResult, query string) []SearchResult {
 	terms := parseQueryTerms(query)
 	if len(terms) == 0 {
 		return results
@@ -2652,28 +2599,45 @@ func verifyResults(db *DB, results []SearchResult, query string) []SearchResult 
 	for i, t := range terms {
 		lowerTerms[i] = bytes.ToLower([]byte(t))
 	}
-	return filterResults(db, results, func(chunkContent []byte) bool {
-		lowerChunk := bytes.ToLower(chunkContent)
+	var verified []SearchResult
+	for i := range results {
+		content := s.Retrieve(&results[i])
+		if content == nil {
+			continue
+		}
+		lowerChunk := bytes.ToLower(content)
+		match := true
 		for _, term := range lowerTerms {
 			if !bytes.Contains(lowerChunk, term) {
-				return false
+				match = false
+				break
 			}
 		}
-		return true
-	})
+		if match {
+			verified = append(verified, results[i])
+		}
+	}
+	return verified
 }
 
-// verifyResultsRegex re-chunks files and discards results
-// where the compiled regex does not match.
-func verifyResultsRegex(db *DB, results []SearchResult, re *regexp.Regexp) []SearchResult {
-	return filterResults(db, results, func(chunkContent []byte) bool {
-		return re.Match(chunkContent)
-	})
+// verifyResultsRegex discards results where the regex does not match. R493
+func (s *searchConfig) verifyResultsRegex(results []SearchResult, re *regexp.Regexp) []SearchResult {
+	var verified []SearchResult
+	for i := range results {
+		content := s.Retrieve(&results[i])
+		if content == nil {
+			continue
+		}
+		if re.Match(content) {
+			verified = append(verified, results[i])
+		}
+	}
+	return verified
 }
 
-// CRC: crc-DB.md | R279, R280, R281, R282
+// CRC: crc-DB.md | R279, R280, R281, R282, R493
 // proximityRerank reranks the top-N results by query term proximity in chunk text.
-func proximityRerank(db *DB, results []SearchResult, query string, topN int) []SearchResult {
+func (s *searchConfig) proximityRerank(results []SearchResult, query string, topN int) []SearchResult {
 	if topN <= 0 || len(results) == 0 {
 		return results
 	}
@@ -2693,7 +2657,7 @@ func proximityRerank(db *DB, results []SearchResult, query string, topN int) []S
 	rest := results[topN:]
 
 	for i := range top {
-		content := rechunkContent(db, top[i].Path, top[i].Range)
+		content := s.Retrieve(&top[i])
 		if content == nil {
 			continue
 		}
@@ -2705,60 +2669,6 @@ func proximityRerank(db *DB, results []SearchResult, query string, topN int) []S
 
 	sortResults(top)
 	return append(top, rest...)
-}
-
-// rechunkContent recovers a single chunk's content using ChunkText.
-func rechunkContent(db *DB, fpath, targetRange string) []byte {
-	// R370: handle tmp:// paths via overlay
-	if isTmpPath(fpath) && db.overlay != nil {
-		ofile := db.overlay.lookupFileByPath(fpath)
-		if ofile == nil {
-			return nil
-		}
-		chunker := db.resolveChunker(ofile.strategy)
-		if chunker == nil {
-			return nil
-		}
-		content, ok := chunker.ChunkText(fpath, ofile.content, targetRange)
-		if !ok {
-			return nil
-		}
-		return content
-	}
-
-	chunker := db.resolveChunker(fileStrategy(db, fpath))
-	if chunker == nil {
-		return nil
-	}
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return nil
-	}
-	content, ok := chunker.ChunkText(fpath, data, targetRange)
-	if !ok {
-		return nil
-	}
-	return content
-}
-
-// fileStrategy looks up the chunking strategy for a file.
-func fileStrategy(db *DB, fpath string) string {
-	if isTmpPath(fpath) && db.overlay != nil {
-		ofile := db.overlay.lookupFileByPath(fpath)
-		if ofile != nil {
-			return ofile.strategy
-		}
-		return ""
-	}
-	var strategy string
-	db.env.View(func(txn *lmdb.Txn) error {
-		_, frec, err := db.lookupFileByPath(txnWrap{txn}, fpath)
-		if err == nil {
-			strategy = frec.Strategy
-		}
-		return nil
-	})
-	return strategy
 }
 
 // minTermSpan finds the minimum window (in words) containing all terms.
@@ -2826,39 +2736,53 @@ func abs(x int) int {
 // applyRegexPostFilters compiles regex filter and except-regex patterns from
 // the search config, then applies them as post-filters to the results.
 // R183, R184, R186, R187, R188, R191
-func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]SearchResult, error) {
-	if len(cfg.regexFilters) == 0 && len(cfg.exceptRegexFilters) == 0 {
+func (s *searchConfig) applyRegexPostFilters(results []SearchResult) ([]SearchResult, error) {
+	if len(s.regexFilters) == 0 && len(s.exceptRegexFilters) == 0 {
 		return results, nil
 	}
-	andRegexes := make([]*regexp.Regexp, len(cfg.regexFilters))
-	for i, p := range cfg.regexFilters {
+	andRegexes := make([]*regexp.Regexp, len(s.regexFilters))
+	for i, p := range s.regexFilters {
 		re, err := regexp.Compile(p)
 		if err != nil {
 			return nil, fmt.Errorf("compile filter-regex %q: %w", p, err)
 		}
 		andRegexes[i] = re
 	}
-	exceptRegexes := make([]*regexp.Regexp, len(cfg.exceptRegexFilters))
-	for i, p := range cfg.exceptRegexFilters {
+	exceptRegexes := make([]*regexp.Regexp, len(s.exceptRegexFilters))
+	for i, p := range s.exceptRegexFilters {
 		re, err := regexp.Compile(p)
 		if err != nil {
 			return nil, fmt.Errorf("compile except-regex %q: %w", p, err)
 		}
 		exceptRegexes[i] = re
 	}
-	return filterResults(db, results, func(chunkContent []byte) bool {
+	var verified []SearchResult
+	for i := range results {
+		content := s.Retrieve(&results[i])
+		if content == nil {
+			continue
+		}
+		match := true
 		for _, re := range andRegexes {
-			if !re.Match(chunkContent) {
-				return false
+			if !re.Match(content) {
+				match = false
+				break
 			}
+		}
+		if !match {
+			continue
 		}
 		for _, re := range exceptRegexes {
-			if re.Match(chunkContent) {
-				return false
+			if re.Match(content) {
+				match = false
+				break
 			}
 		}
-		return true
-	}), nil
+		if match {
+			verified = append(verified, results[i])
+		}
+	}
+	return verified, nil
 }
 
 // --- SearchRegex ---
@@ -2866,7 +2790,7 @@ func applyRegexPostFilters(db *DB, results []SearchResult, cfg searchConfig) ([]
 // Seq: seq-search.md
 // SearchRegex searches using a regex pattern against the full trigram index.
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error) {
-	cfg := applySearchOpts(opts)
+	cfg := db.newSearchConfig(opts)
 	if cfg.scoreFunc == nil {
 		cfg.scoreFunc = scoreCoverage
 	}
@@ -2892,8 +2816,8 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 			candidates = allChunkIDs(th, db.dbi)
 		}
 
-		cands := db.collectCandidates(th, candidates, cfg)
-		results = db.scoreAndResolve(th, cands, nil, cfg.scoreFunc, cfg)
+		cands := cfg.collectCandidates(th, candidates)
+		results = cfg.scoreAndResolve(th, cands, nil, cfg.scoreFunc)
 		return nil
 	})
 	if err != nil {
@@ -2905,16 +2829,16 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 		results = append(results, db.overlay.searchOverlayAll(cfg.scoreFunc, cfg)...)
 	}
 
-	results = verifyResultsRegex(db, results, compiled)
+	results = cfg.verifyResultsRegex(results, compiled)
 
 	// R188, R189, R190: apply regex post-filters after verify, before sort
-	results, err = applyRegexPostFilters(db, results, cfg)
+	results, err = cfg.applyRegexPostFilters(results)
 	if err != nil {
 		return nil, err
 	}
 
 	if cfg.proximityTopN > 0 {
-		results = proximityRerank(db, results, pattern, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, pattern, cfg.proximityTopN)
 	}
 
 	sortResults(results)
@@ -3143,7 +3067,7 @@ func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]Chun
 // Seq: seq-score.md | R178, R179, R180
 // ScoreFile returns per-chunk scores for a single file using the given scoring function.
 func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption) ([]ScoredChunk, error) {
-	cfg := applySearchOpts(opts)
+	cfg := db.newSearchConfig(opts)
 	query = strings.TrimSpace(query)
 	queryTrigrams := extractPerTermTrigrams(db, query)
 	if len(queryTrigrams) == 0 {

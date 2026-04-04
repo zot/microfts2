@@ -6,3 +6,4 @@
 /.fslckout
 /.claude/skills/ark
 /resources/
+/bench_cache_test.go

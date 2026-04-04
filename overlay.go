@@ -440,7 +440,7 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 			FileIDs:  oc.fileIDs,
 			Trigrams: oc.trigrams,
 		}
-		if !applyChunkFilters(crec, cfg) {
+		if !cfg.applyChunkFilters(crec) {
 			continue
 		}
 
@@ -477,9 +477,10 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 			for _, fce := range ofile.chunks {
 				if fce.ChunkID == cid {
 					results = append(results, SearchResult{
-						Path:  ofile.path,
-						Range: fce.Location,
-						Score: score,
+						Path:    ofile.path,
+						Range:   fce.Location,
+						Score:   score,
+						chunkID: cid, // R490
 					})
 					break
 				}
@@ -507,7 +508,7 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 			FileIDs: oc.fileIDs,
 			Trigrams: oc.trigrams,
 		}
-		if !applyChunkFilters(crec, cfg) {
+		if !cfg.applyChunkFilters(crec) {
 			continue
 		}
 
@@ -530,9 +531,10 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 			for _, fce := range ofile.chunks {
 				if fce.ChunkID == oc.chunkID {
 					results = append(results, SearchResult{
-						Path:  ofile.path,
-						Range: fce.Location,
-						Score: score,
+						Path:    ofile.path,
+						Range:   fce.Location,
+						Score:   score,
+						chunkID: oc.chunkID, // R490
 					})
 					break
 				}

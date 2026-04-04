@@ -442,7 +442,10 @@ type FileChunkEntry struct { ChunkID uint64; Location string }
 
 ## Search types
 
-SearchResult: `{ Path string, Range string, Score float64 }`
+SearchResult: `{ Path string, Range string, Score float64, chunkID uint64, chunk []byte }`
+- `chunkID` and `chunk` are unexported. `chunkID` is set during `scoreAndResolve` (the search pipeline already has the chunkID when it builds each result). `chunk` is lazily populated by `Retrieve`.
+- `Retrieve(r *SearchResult) []byte` method on `*searchConfig`: returns chunk content for the result. Checks `r.chunk` first (instant). Then checks chunkID dedup cache (`map[uint64][]byte` on searchConfig). On miss, delegates to ChunkCache — auto-creates one if no external cache was provided via `WithChunkCache`. ChunkCache handles file-level caching (read once per file), tmp:// overlay paths, and lazy chunking. Stores content on both `r.chunk` and the chunkID dedup cache.
+- Post-filters (`verifyResults`, `verifyResultsRegex`, `applyRegexPostFilters`, `proximityRerank`) use `Retrieve` instead of `filterResults`+`rechunkForVerify`. The old functions (`filterResults`, `rechunkForVerify`, `rechunkForVerifyTmp`, `rechunkContent`, `fileStrategy`) are removed.
 SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
 ScoredChunk: `{ Range string, Score float64 }`
@@ -451,8 +454,12 @@ MultiSearchResult: `{ Strategy string, Results []SearchResult }` — one strateg
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 SearchOption: `func(*searchConfig)` — functional option pattern
-Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithOverlap()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection), `WithProximityRerank(topN int)` (post-filter: rerank top-N by query term proximity in chunk text)
+Built-in options: `WithCoverage()` (default), `WithDensity()`, `WithOverlap()`, `WithScoring(fn ScoreFunc)`, `WithVerify()` (post-filter: re-chunk file using stored strategy, tokenize query into terms — split on spaces, quoted strings as single terms — verify each term is a case-insensitive substring of the chunk content; eliminates trigram false positives), `WithTrigramFilter(fn TrigramFilter)` (caller-supplied trigram selection), `WithProximityRerank(topN int)` (post-filter: rerank top-N by query term proximity in chunk text), `WithChunkCache(cc *ChunkCache)` (optional cross-search cache — `Retrieve` checks the external ChunkCache before rechunking from disk, enabling file-read reuse across multiple searches in a session)
 Built-in score functions: `ScoreOverlap` (matching trigram count), `ScoreBM25(idf, avgdl)` (returns ScoreFunc closure)
+
+### searchConfig as search pipeline receiver
+
+`searchConfig` embeds `*DB`. The search entry points (`Search`, `SearchRegex`, `SearchMulti`, `ScoreFile`, `SearchFuzzy`) build a `searchConfig`, then the entire search pipeline runs as methods on it — candidate collection, overlay merge, scoring, post-filtering, reranking. Functions that currently take `(*DB, *searchConfig, ...)` become methods on `*searchConfig` with shorter signatures. Pure structural — no behavior change.
 
 ## Chunk filtering
 

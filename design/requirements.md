@@ -267,7 +267,7 @@
 - **R96:** `ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)` returns `([]ScoredChunk, error)` — per-chunk scores using the given scoring function
 - **R97:** Coverage score = matching selected trigrams / total selected query trigrams, per chunk (default strategy)
 - **R98:** `ScoredChunk` struct: `Range string, Score float64`
-- **R99:** `SearchResult` struct: `Path string, Range string, Score float64`
+- **R99:** `SearchResult` struct: `Path string, Range string, Score float64` (plus unexported `chunkID uint64` and `chunk []byte` — see R490, R491)
 - **R100:** CLI `score` subcommand: `microfts score -db <path> [-score coverage|density] <query> <file>...` — output `filepath:range\tscore`
 - **R120:** `AddFileWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
 - **R121:** `ReindexWithContent(fpath, strategy string)` returns `(uint64, []byte, error)` — fileid + file content already read for trigram extraction
@@ -510,6 +510,19 @@
 - **R304:** Cache deep-copies Range, Content, and Attrs from yielded chunks — downstream consumers get stable references
 - **R305:** No LRU, no eviction, no invalidation — per-query lifecycle, discarded when caller drops reference
 - **R306:** (inferred) `ChunkCache` holds a reference to `*DB` for N record lookups, F record reads, and Chunker resolution
+- **R486:** `WithChunkCache(cc *ChunkCache) SearchOption` — optional cross-search cache; `Retrieve` checks ChunkCache before rechunking from disk, enabling file-read reuse across multiple searches in a session
+- **R490:** `SearchResult` carries unexported `chunkID uint64` — set during `scoreAndResolve` from the candidate's chunkID; provides dedup key for chunk content
+- **R491:** `SearchResult` carries unexported `chunk []byte` — lazily populated by `Retrieve`; once set, subsequent `Retrieve` calls return immediately
+- **R492:** `Retrieve(r *SearchResult) []byte` method on `*searchConfig` — returns chunk content. Check order: `r.chunk` (instant) → chunkID dedup cache → ChunkCache (auto-created if no external cache provided). Stores on both `r.chunk` and chunkID cache. ChunkCache handles file-level caching and tmp:// overlay paths
+- **R493:** Post-filters (`verifyResults`, `verifyResultsRegex`, `applyRegexPostFilters`, `proximityRerank`) use `Retrieve` instead of `filterResults`+`rechunkForVerify`. `filterResults`, `rechunkForVerify`, `rechunkForVerifyTmp`, `rechunkContent`, `fileStrategy` are removed
+- **R494:** (inferred) Within a search, Retrieve deduplicates by chunkID via a `map[uint64][]byte` on searchConfig — same chunk content across multiple results is retrieved once
+
+## Feature: searchConfig as Search Pipeline Receiver
+**Source:** specs/main.md
+
+- **R487:** `searchConfig` embeds `*DB` — search pipeline functions become methods on `*searchConfig`
+- **R488:** Search entry points (`Search`, `SearchRegex`, `SearchMulti`, `ScoreFile`, `SearchFuzzy`) build a `searchConfig` then dispatch to its methods
+- **R489:** (inferred) Pure structural refactor — no behavior change, no new functionality beyond method receiver conversion
 
 ## Feature: Bracket Chunker
 **Source:** specs/main.md
