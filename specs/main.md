@@ -837,7 +837,8 @@ type ChunkResult struct {
     Path    string
     Range   string
     Content string
-    Index   int  // 0-based position in the file's chunk list
+    Index   int     // 0-based position in the file's chunk list
+    Attrs   []Pair  // chunk metadata from the chunker (role, timestamp, etc.)
 }
 
 // GetChunks retrieves the target chunk (identified by range label) and

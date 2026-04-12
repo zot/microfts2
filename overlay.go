@@ -340,7 +340,7 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 		hash:     cc.hash,
 		trigrams: trigEntries,
 		tokens:   append([]TokenEntry(nil), cc.tokens...),
-		attrs:    copyPairs(cc.attrs),
+		attrs:    CopyPairs(cc.attrs),
 		fileIDs:  []uint64{fileID},
 	}
 	o.chunks[chunkID] = oc
@@ -372,7 +372,7 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = copyPairs(c.Attrs)
+		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
 	}); err != nil {

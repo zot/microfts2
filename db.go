@@ -89,6 +89,7 @@ type ChunkResult struct {
 	Range   string `json:"range"`
 	Content string `json:"content"`
 	Index   int    `json:"index"` // 0-based position in the file's chunk list
+	Attrs   []Pair `json:"attrs,omitempty"`
 }
 
 // SearchResults wraps search matches with index health status.
@@ -1346,7 +1347,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = copyPairs(c.Attrs)
+		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
 	}); err != nil {
@@ -1922,7 +1923,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			triCounts: db.trigrams.TrigramCounts(c.Content),
 			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = copyPairs(c.Attrs)
+		cc.attrs = CopyPairs(c.Attrs)
 		newChunks = append(newChunks, cc)
 		return true
 	}); err != nil {

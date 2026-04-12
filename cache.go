@@ -95,6 +95,7 @@ func (cc *ChunkCache) GetChunks(fpath, targetRange string, before, after int) ([
 			Range:   ch.Range,
 			Content: string(ch.Content),
 			Index:   i,
+			Attrs:   ch.Attrs,
 		})
 	}
 	return results, nil
@@ -193,7 +194,7 @@ func (cc *ChunkCache) storeChunk(cf *cachedFile, idx int, c Chunk) {
 	cf.chunks[idx] = cachedChunk{
 		Range:   rangeStr,
 		Content: content,
-		Attrs:   copyPairs(c.Attrs),
+		Attrs:   CopyPairs(c.Attrs),
 		valid:   true,
 	}
 	cf.byRange[rangeStr] = idx

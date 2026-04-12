@@ -36,8 +36,8 @@ func PairGet(pairs []Pair, key string) ([]byte, bool) {
 	return nil, false
 }
 
-// copyPairs deep-copies a slice of Pair.
-func copyPairs(src []Pair) []Pair {
+// CopyPairs deep-copies a slice of Pair.
+func CopyPairs(src []Pair) []Pair {
 	if len(src) == 0 {
 		return nil
 	}
