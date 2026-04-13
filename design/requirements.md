@@ -73,6 +73,7 @@
 
 - **R16:** ~~removed: old per-trigram C records replaced by per-chunk C records~~
 - **R227:** `C` records: `C[chunkid:varint] → hash:32 + packed trigrams + packed tokens + packed attrs + packed fileids`
+- **R495:** C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
 - **R228:** C record trigrams: `[n-trigrams:varint] [[trigram:3] [count:varint]]...` — per-chunk trigram counts
 - **R229:** C record tokens: `[n-tokens:varint] [[count:varint] [token:str]]...` — per-chunk token counts
 - **R230:** C record attrs: `[n-attrs:varint] [[key:bytes] [value:bytes]]...` — optional key-value pairs from chunker Attrs (e.g. timestamp, role); opaque to microfts2
@@ -121,7 +122,7 @@
 
 - **R95:** ~~removed: FileInfo struct replaced by FRecord~~
 - **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
-- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []uint64`
+- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []uint64`
 - **R245:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
 - **R246:** `TRecord` struct: `Trigram uint32, ChunkIDs []uint64`
 - **R247:** `WRecord` struct: `TokenHash uint32, ChunkIDs []uint64`
@@ -757,3 +758,14 @@
 - **R483:** `AppendTmpFile` accepts `WithAppendChunkCallback` via existing `...AppendOption`
 - **R484:** (inferred) Backward compatible — existing callers pass zero IndexOption args; append signatures unchanged
 - **R485:** (inferred) `collectChunks` and overlay `collectChunksFromContent` are the injection points for the callback
+
+## Feature: Chunk Content Length
+**Source:** specs/main.md
+
+- **R495:** C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
+- **R496:** `CRecord.ContentLen int` field — populated at index time from `len(chunk.Content)`, persisted in C record wire format
+- **R497:** (inferred) `CRecord.MarshalValue` writes contentLen varint after hash, before n-trigrams
+- **R498:** (inferred) `UnmarshalCValue` reads contentLen varint after hash, before n-trigrams
+- **R499:** (inferred) Overlay chunk structs store contentLen for parity with LMDB C records
+- **R500:** `ChunkContentLens(fileid uint64) ([]int, error)` — public method on DB. Reads the F record's chunk list, then reads each C record's ContentLen. Returns lengths in chunk-list order. Single View transaction
+- **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of LMDB

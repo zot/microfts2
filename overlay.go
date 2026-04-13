@@ -38,12 +38,13 @@ type overlayFile struct {
 
 // overlayChunk is the in-memory equivalent of a CRecord.
 type overlayChunk struct {
-	chunkID  uint64
-	hash     [32]byte
-	trigrams []TrigramEntry
-	tokens   []TokenEntry
-	attrs    []Pair
-	fileIDs  []uint64
+	chunkID    uint64
+	hash       [32]byte
+	contentLen int
+	trigrams   []TrigramEntry
+	tokens     []TokenEntry
+	attrs      []Pair
+	fileIDs    []uint64
 }
 
 func newOverlay() *overlay {
@@ -336,12 +337,13 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 	}
 
 	oc := &overlayChunk{
-		chunkID:  chunkID,
-		hash:     cc.hash,
-		trigrams: trigEntries,
-		tokens:   append([]TokenEntry(nil), cc.tokens...),
-		attrs:    CopyPairs(cc.attrs),
-		fileIDs:  []uint64{fileID},
+		chunkID:    chunkID,
+		hash:       cc.hash,
+		contentLen: cc.contentLen,
+		trigrams:   trigEntries,
+		tokens:     append([]TokenEntry(nil), cc.tokens...),
+		attrs:      CopyPairs(cc.attrs),
+		fileIDs:    []uint64{fileID},
 	}
 	o.chunks[chunkID] = oc
 	o.hashes[cc.hash] = chunkID
@@ -367,10 +369,11 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:  string(c.Range),
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
+			rangeStr:   string(c.Range),
+			hash:       h,
+			contentLen: len(c.Content),
+			triCounts:  db.trigrams.TrigramCounts(c.Content),
+			tokens:     tokenizeCounts(c.Content),
 		}
 		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
@@ -434,11 +437,12 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 		}
 
 		crec := CRecord{
-			ChunkID:  oc.chunkID,
-			Hash:     oc.hash,
-			Attrs:    oc.attrs,
-			FileIDs:  oc.fileIDs,
-			Trigrams: oc.trigrams,
+			ChunkID:    oc.chunkID,
+			Hash:       oc.hash,
+			ContentLen: oc.contentLen,
+			Attrs:      oc.attrs,
+			FileIDs:    oc.fileIDs,
+			Trigrams:   oc.trigrams,
 		}
 		if !cfg.applyChunkFilters(crec) {
 			continue
@@ -502,11 +506,12 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 	var results []SearchResult
 	for _, oc := range o.chunks {
 		crec := CRecord{
-			ChunkID: oc.chunkID,
-			Hash:    oc.hash,
-			Attrs:   oc.attrs,
-			FileIDs: oc.fileIDs,
-			Trigrams: oc.trigrams,
+			ChunkID:    oc.chunkID,
+			Hash:       oc.hash,
+			ContentLen: oc.contentLen,
+			Attrs:      oc.attrs,
+			FileIDs:    oc.fileIDs,
+			Trigrams:   oc.trigrams,
 		}
 		if !cfg.applyChunkFilters(crec) {
 			continue
@@ -583,6 +588,25 @@ func (o *overlay) tmpFileIDs() map[uint64]struct{} {
 		ids[fid] = struct{}{}
 	}
 	return ids
+}
+
+// chunkContentLens returns content lengths for a file's chunks if the fileid
+// belongs to the overlay. Returns (nil, false) if not found. R501
+func (o *overlay) chunkContentLens(fileid uint64) ([]int, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	ofile, ok := o.filesByID[fileid]
+	if !ok {
+		return nil, false
+	}
+	lens := make([]int, len(ofile.chunks))
+	for i, fce := range ofile.chunks {
+		if oc, ok := o.chunks[fce.ChunkID]; ok {
+			lens[i] = oc.contentLen
+		}
+	}
+	return lens, true
 }
 
 // counters returns the overlay's totalChunks and totalTokens. R373

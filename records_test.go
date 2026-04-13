@@ -6,7 +6,8 @@ import (
 
 func TestCRecordRoundtrip(t *testing.T) {
 	orig := CRecord{
-		ChunkID: 42,
+		ChunkID:    42,
+		ContentLen: 1234,
 		Trigrams: []TrigramEntry{
 			{Trigram: 0x616263, Count: 3}, // "abc"
 			{Trigram: 0x626364, Count: 1}, // "bcd"
@@ -31,6 +32,9 @@ func TestCRecordRoundtrip(t *testing.T) {
 
 	if got.Hash != orig.Hash {
 		t.Errorf("Hash mismatch")
+	}
+	if got.ContentLen != orig.ContentLen {
+		t.Errorf("ContentLen: got %d, want %d", got.ContentLen, orig.ContentLen)
 	}
 	if len(got.Trigrams) != len(orig.Trigrams) {
 		t.Fatalf("Trigrams len: got %d, want %d", len(got.Trigrams), len(orig.Trigrams))

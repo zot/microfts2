@@ -1,5 +1,5 @@
 # Overlay
-**Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373, R398, R399, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R438, R439, R440, R441, R442, R473, R474, R475, R476, R480, R481, R483, R485
+**Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373, R398, R399, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R438, R439, R440, R441, R442, R473, R474, R475, R476, R480, R481, R483, R485, R499, R501
 
 In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the LMDB record structure (C, F, T, W, H equivalents) in Go maps. Fileids and chunkids count down from MaxUint64 to structurally avoid collision with LMDB ids. Thread-safe: concurrent reads, serialized writes.
 

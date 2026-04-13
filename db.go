@@ -37,11 +37,12 @@ var ErrAlreadyIndexed = errors.New("file already indexed")
 
 // collectedChunk holds processed chunk data between generator collection and DB write.
 type collectedChunk struct {
-	rangeStr  string
-	hash      [32]byte
-	triCounts map[uint32]int
-	tokens    []TokenEntry
-	attrs     []Pair
+	rangeStr   string
+	hash       [32]byte
+	contentLen int
+	triCounts  map[uint32]int
+	tokens     []TokenEntry
+	attrs      []Pair
 }
 
 type DB struct {
@@ -1342,10 +1343,11 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:  string(c.Range),
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
+			rangeStr:   string(c.Range),
+			hash:       h,
+			contentLen: len(c.Content),
+			triCounts:  db.trigrams.TrigramCounts(c.Content),
+			tokens:     tokenizeCounts(c.Content),
 		}
 		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
@@ -1452,12 +1454,13 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 	}
 
 	crec := CRecord{
-		ChunkID:  chunkid,
-		Hash:     ch.hash,
-		Trigrams: triEntries,
-		Tokens:   ch.tokens,
-		Attrs:    ch.attrs,
-		FileIDs:  []uint64{fileid},
+		ChunkID:    chunkid,
+		Hash:       ch.hash,
+		ContentLen: ch.contentLen,
+		Trigrams:   triEntries,
+		Tokens:     ch.tokens,
+		Attrs:      ch.attrs,
+		FileIDs:    []uint64{fileid},
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
 		return 0, nil, err
@@ -1519,12 +1522,13 @@ func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid
 	}
 
 	crec := CRecord{
-		ChunkID:  chunkid,
-		Hash:     ch.hash,
-		Trigrams: triEntries,
-		Tokens:   ch.tokens,
-		Attrs:    ch.attrs,
-		FileIDs:  []uint64{fileid},
+		ChunkID:    chunkid,
+		Hash:       ch.hash,
+		ContentLen: ch.contentLen,
+		Trigrams:   triEntries,
+		Tokens:     ch.tokens,
+		Attrs:      ch.attrs,
+		FileIDs:    []uint64{fileid},
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
 		return 0, nil, err
@@ -2951,6 +2955,44 @@ func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
 		return err
 	})
 	return frec, err
+}
+
+// --- ChunkContentLens ---
+
+// CRC: crc-DB.md | R500, R501
+// ChunkContentLens returns the byte length of each chunk's content for a file,
+// in chunk-list order. Reads F record for chunk list, then each C record's ContentLen.
+func (db *DB) ChunkContentLens(fileid uint64) ([]int, error) {
+	// R501: check overlay first
+	if db.overlay != nil {
+		if lens, ok := db.overlay.chunkContentLens(fileid); ok {
+			return lens, nil
+		}
+	}
+	var lens []int
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		th := txnWrap{txn}
+		frec, err := db.readFRecord(th, fileid)
+		if err != nil {
+			return err
+		}
+		lens = make([]int, len(frec.Chunks))
+		for i, fce := range frec.Chunks {
+			cVal, err := txn.Get(db.dbi, makeCKey(fce.ChunkID))
+			if err != nil {
+				return fmt.Errorf("read C record %d: %w", fce.ChunkID, err)
+			}
+			cData := make([]byte, len(cVal))
+			copy(cData, cVal)
+			crec, err := UnmarshalCValue(cData)
+			if err != nil {
+				return err
+			}
+			lens[i] = crec.ContentLen
+		}
+		return nil
+	})
+	return lens, err
 }
 
 // --- GetChunks ---

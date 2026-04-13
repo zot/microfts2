@@ -1,6 +1,6 @@
 package microfts2
 
-// CRC: crc-DB.md | R220, R221, R222, R244, R245, R246, R247, R248, R249, R250, R251, R252, R264, R265, R266, R267, R295
+// CRC: crc-DB.md | R220, R221, R222, R244, R245, R246, R247, R248, R249, R250, R251, R252, R264, R265, R266, R267, R295, R495, R496, R497, R498
 
 import (
 	"encoding/binary"
@@ -42,14 +42,15 @@ type FileChunkEntry struct {
 // for search, scoring, filtering, and removal.
 // Carries unexported db/txn — the chunk is tied to the transaction that read it.
 type CRecord struct {
-	ChunkID  uint64
-	Hash     [32]byte
-	Trigrams []TrigramEntry
-	Tokens   []TokenEntry
-	Attrs    []Pair
-	FileIDs  []uint64
-	db       *DB
-	txn      *lmdb.Txn
+	ChunkID    uint64
+	Hash       [32]byte
+	ContentLen int
+	Trigrams   []TrigramEntry
+	Tokens     []TokenEntry
+	Attrs      []Pair
+	FileIDs    []uint64
+	db         *DB
+	txn        *lmdb.Txn
 }
 
 // attach sets the db and txn context for a CRecord.
@@ -141,10 +142,11 @@ func readBytes(buf []byte) ([]byte, int) {
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
-// v2 format: hash + trigrams + tokens + attrs + fileids
+// R497: hash + contentLen + trigrams + tokens + attrs + fileids
 func (c *CRecord) MarshalValue() []byte {
-	// Estimate size: hash(32) + trigrams + tokens + attrs + fileids
+	// Estimate size: hash(32) + contentLen + trigrams + tokens + attrs + fileids
 	size := 32 // hash
+	size += binary.MaxVarintLen64 // contentLen (R495)
 	size += binary.MaxVarintLen64 // n-trigrams
 	size += len(c.Trigrams) * (3 + binary.MaxVarintLen64)
 	size += binary.MaxVarintLen64 // n-tokens
@@ -164,6 +166,9 @@ func (c *CRecord) MarshalValue() []byte {
 	// Hash
 	copy(buf[off:], c.Hash[:])
 	off += 32
+
+	// ContentLen (R495)
+	off += putUvarint(buf[off:], uint64(c.ContentLen))
 
 	// Trigrams
 	off += putUvarint(buf[off:], uint64(len(c.Trigrams)))
@@ -199,7 +204,7 @@ func (c *CRecord) MarshalValue() []byte {
 }
 
 // UnmarshalCValue decodes a CRecord value. ChunkID must be set separately (from key).
-// v2 format: hash + trigrams + tokens + attrs + fileids
+// R498: hash + contentLen + trigrams + tokens + attrs + fileids
 func UnmarshalCValue(data []byte) (CRecord, error) {
 	var c CRecord
 	if len(data) < 32 {
@@ -210,6 +215,14 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 	// Hash
 	copy(c.Hash[:], data[off:off+32])
 	off += 32
+
+	// ContentLen (R495)
+	cl, n := readUvarint(data[off:])
+	if n <= 0 {
+		return c, fmt.Errorf("CRecord: bad contentLen")
+	}
+	c.ContentLen = int(cl)
+	off += n
 
 	// Trigrams
 	nTri, n := readUvarint(data[off:])

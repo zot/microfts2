@@ -95,7 +95,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 |--------|------------------------|---------------------------------------|------------------------------------------------------------------|
 | I      | name: str              | empty (value encoded in key)          | Config settings, data-in-key pattern                             |
 | H      | hash: 32               | chunkid: varint                       | Content hash → chunkid lookup                                    |
-| C      | chunkid: varint        | hash + trigrams + tokens + fileids    | Per-chunk: all analysis data                                     |
+| C      | chunkid: varint        | hash + contentLen + trigrams + tokens + fileids | Per-chunk: all analysis data                                     |
 | F      | fileid: varint         | metadata + names + chunks + token bag | Per-file: staleness info, ordered chunk list, file-level scoring |
 | N      | chain-byte + name: str | (varies by chain-byte)                | Filename → fileid mapping via key chains                         |
 | T      | trigram: 3             | chunkid: varint...                    | Trigram inverted index                                           |
@@ -109,8 +109,8 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 - `H` [hash: 32] -> [chunkid: varint]
   Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
 
-- `C` [chunkid: varint] -> [hash: 32] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [fileid: varint]...
-  Per-chunk record. Contains everything known about the chunk: content hash, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads.
+- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [fileid: varint]...
+  Per-chunk record. Contains everything known about the chunk: content hash, byte length of the chunk content, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
 
 - `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [filecount: varint] [name: str]... [chunkcount: varint] [[chunkid: varint] [location: str]]... [tokencount: varint] [[token: str] [count: varint]]
   Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name). Multiple names handle duplicate/copied files mapping to the same fileid. Ordered chunk list with opaque location labels (range strings from chunker). Aggregated token bag (union of all chunk tokens with summed counts) for file-level scoring without reading every chunk's C record.
@@ -129,6 +129,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 | Level  | Source                                         | Use                                   |
 |--------|------------------------------------------------|---------------------------------------|
 | Chunk  | C record: per-trigram counts, per-token counts | Per-chunk TF, density scoring, verify |
+| Chunk  | C record: contentLen                           | Chunk size statistics without disk I/O |
 | Chunk  | C record: attrs (e.g. timestamp, role)         | Date filtering, metadata-aware search |
 | File   | F record: aggregated token bag                 | File-level ranking, pre-filtering     |
 | Corpus | T record: chunkid list length = trigram DF     | Trigram IDF                           |
@@ -337,6 +338,7 @@ func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error)
 
 // Chunk Retrieval
 func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
+func (db *DB) ChunkContentLens(fileid uint64) ([]int, error)
 
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error

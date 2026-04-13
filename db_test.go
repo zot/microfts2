@@ -722,6 +722,53 @@ func TestDBFileInfoByID(t *testing.T) {
 	}
 }
 
+func TestChunkContentLens(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
+
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lens, err := db.ChunkContentLens(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "line" strategy: 3 lines → 3 chunks
+	if len(lens) != 3 {
+		t.Fatalf("got %d lens, want 3", len(lens))
+	}
+	// Each len should be the byte length of the line (including newline)
+	want := []int{len("hello world\n"), len("foo bar baz\n"), len("the quick brown fox\n")}
+	for i, w := range want {
+		if lens[i] != w {
+			t.Errorf("lens[%d] = %d, want %d", i, lens[i], w)
+		}
+	}
+}
+
+func TestChunkContentLensTmp(t *testing.T) {
+	db, _ := testDB(t)
+
+	fileid, err := db.AddTmpFile("tmp://test", "line", []byte("alpha\nbeta\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lens, err := db.ChunkContentLens(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lens) != 2 {
+		t.Fatalf("got %d lens, want 2", len(lens))
+	}
+	if lens[0] != len("alpha\n") || lens[1] != len("beta\n") {
+		t.Errorf("lens = %v, want [%d %d]", lens, len("alpha\n"), len("beta\n"))
+	}
+}
+
 func TestDBScoreFile(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
