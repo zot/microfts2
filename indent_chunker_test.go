@@ -153,7 +153,8 @@ def b():
 		t.Fatalf("expected at least 2 chunks, got %d", len(ranges))
 	}
 
-	text, ok := ic.ChunkText("test.py", []byte(src), ranges[1])
+	ct := ic.(ChunkTexter)
+	text, ok := ct.ChunkText("test.py", []byte(src), ranges[1])
 	if !ok {
 		t.Fatal("ChunkText returned false")
 	}

@@ -66,9 +66,13 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb Chun
 	if !utf8.Valid(content) {
 		return 0, fmt.Errorf("tmp content is not valid UTF-8: %s", path)
 	}
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
+	resolved := db.resolveChunker(strategy)
+	if resolved == nil {
 		return 0, fmt.Errorf("chunking strategy %q not registered", strategy)
+	}
+	chunker, ok := resolved.(Chunker) // R515, R516
+	if !ok {
+		return 0, fmt.Errorf("chunking strategy %q does not support content-based chunking", strategy)
 	}
 
 	// Collect chunks outside the lock (chunking is CPU work).
@@ -108,9 +112,13 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb C
 	if !utf8.Valid(content) {
 		return fmt.Errorf("tmp content is not valid UTF-8: %s", path)
 	}
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
+	resolved := db.resolveChunker(strategy)
+	if resolved == nil {
 		return fmt.Errorf("chunking strategy %q not registered", strategy)
+	}
+	chunker, ok := resolved.(Chunker) // R515, R516
+	if !ok {
+		return fmt.Errorf("chunking strategy %q does not support content-based chunking", strategy)
 	}
 	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
 	if err != nil {
@@ -186,9 +194,13 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	fileID := ofile.fileID
 	o.mu.RUnlock()
 
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
+	resolved := db.resolveChunker(strategy)
+	if resolved == nil {
 		return 0, fmt.Errorf("chunking strategy %q not registered", strategy)
+	}
+	chunker, ok := resolved.(Chunker) // R515, R516
+	if !ok {
+		return 0, fmt.Errorf("chunking strategy %q does not support content-based chunking", strategy)
 	}
 
 	var cfg appendConfig

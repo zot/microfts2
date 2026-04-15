@@ -1370,3 +1370,81 @@ func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...Appen
 
 Indexing methods gain a variadic `...IndexOption` — existing callers pass zero args, no breakage. Append methods are unchanged — `WithAppendChunkCallback` is just a new `AppendOption` constructor.
 
+# FileChunker Interface and ChunkTexter Split
+
+Binary formats (PDF, images, archives) cannot be meaningfully pre-read as `[]byte` and passed to a chunker. The chunker needs to open the file itself using format-specific libraries. This requires a new interface for file-based chunking and a rearrangement of the existing `Chunker` interface.
+
+## Interface split
+
+The current `Chunker` interface bundles two concerns: indexing (`Chunks`) and retrieval (`ChunkText`). These are split into separate interfaces:
+
+- `Chunker` keeps only `Chunks(path string, content []byte, yield func(Chunk) bool) error` — content-based chunking for text formats
+- `ChunkTexter` is a new optional interface: `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retrieval of a single chunk by range label
+
+A chunker that implements only `Chunker` gets a default `ChunkText` behavior: re-run `Chunks` and return the first chunk whose Range matches the label (the existing `chunkTextByRange` logic).
+
+A chunker that also implements `ChunkTexter` gets its optimized retrieval path used instead.
+
+Existing chunkers (BracketChunker, IndentChunker) already implement both methods — they continue to work unchanged. FuncChunker implements both via its wrapped function.
+
+## FileChunker interface
+
+A new optional interface for chunkers that read files directly:
+
+```go
+type FileChunker interface {
+    Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
+}
+```
+
+- The chunker opens and reads the file from `path` using whatever library it needs
+- It computes the SHA-256 hash of the file content
+- If `old` is non-zero and matches the computed hash, the chunker may skip chunking entirely (yield is never called) and return the hash — this avoids redundant computation when the file hasn't changed
+- Returns the content hash and any error
+- Returns zero hash `[32]byte{}` to signal "no content" (file missing, unreadable, or empty)
+- Chunk content yielded via the callback must be valid UTF-8, same as `Chunker` — the raw file may be binary but chunk text is always UTF-8
+
+A `FileChunker` does NOT need to implement `Chunker`. It is a separate interface for a separate access pattern. A chunker may implement both if it handles both content-based and file-based paths (e.g., a PDF chunker that can also accept pre-read bytes from the overlay).
+
+## Dispatch rules
+
+microfts2 checks which interfaces a registered chunker implements and dispatches accordingly:
+
+### Index-time (collectChunks, reindexCore)
+
+1. If `FileChunker`: call `FileChunker.Chunks(path, oldHash, yield)`. Skip `os.ReadFile`. The hash comes back from the chunker. If hash matches old, chunking was skipped — no work needed.
+2. If `Chunker`: existing path — `os.ReadFile`, pass content to `Chunker.Chunks`, compute hash separately.
+
+### Retrieval-time (getChunks, ChunkCache)
+
+1. If `FileChunker`: call `FileChunker.Chunks(path, [32]byte{}, yield)`. Zero old hash means "always chunk, don't skip." No `os.ReadFile` by microfts2.
+2. If `Chunker`: existing path — `os.ReadFile`, pass content.
+
+### Content-in-hand (overlay: AddTmpFile, UpdateTmpFile, AppendTmpFile)
+
+1. Always call `Chunker.Chunks(path, content, yield)` — content is provided, not on disk.
+2. If the chunker only implements `FileChunker` and not `Chunker`, this is an error — file-only chunkers cannot be used with the tmp:// overlay.
+
+### ChunkText retrieval
+
+1. If `ChunkTexter`: call `ChunkText(path, content, rangeLabel)` directly.
+2. If `Chunker` (no `ChunkTexter`): use `chunkTextByRange` default — re-run `Chunks`, stop at match.
+3. If `FileChunker` (no `ChunkTexter`): re-run `FileChunker.Chunks(path, [32]byte{}, yield)`, stop at match.
+
+## Registration
+
+`AddChunker(name, c)` accepts any value. At registration time, microfts2 checks which interfaces the value satisfies (`Chunker`, `FileChunker`, `ChunkTexter`) and stores the appropriate capabilities. A chunker must implement at least one of `Chunker` or `FileChunker`.
+
+## UTF-8 validation
+
+The UTF-8 validation in `collectChunks` (checking each yielded chunk's Content) applies regardless of which interface produced the chunks. Binary-format chunkers are responsible for extracting text — microfts2 verifies the result is valid UTF-8.
+
+## Backward compatibility
+
+- `Chunker` interface loses `ChunkText` — this is a breaking change to the interface definition
+- All existing concrete chunkers (BracketChunker, IndentChunker, FuncChunker, MarkdownChunkFunc via FuncChunker) already implement both methods — they satisfy both `Chunker` and `ChunkTexter` with no code changes
+- `ChunkFunc` type signature is unchanged
+- `FuncChunker` implements both `Chunker` and `ChunkTexter`
+- External chunkers via `RunChunkerFunc` produce a `ChunkFunc` wrapped in `FuncChunker` — unchanged
+- Callers that type-assert to `Chunker` and call `ChunkText` must update to assert `ChunkTexter` instead
+

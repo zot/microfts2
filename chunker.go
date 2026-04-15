@@ -68,10 +68,22 @@ func chunkTextByRange(c Chunker, path string, content []byte, rangeLabel string)
 	return result, found
 }
 
-// Chunker is the interface for chunking strategies.
-// Chunks produces chunks for indexing; ChunkText retrieves a single chunk's content.
+// Chunker is the content-based chunking interface for text formats. // CRC: crc-Chunker.md | R502
 type Chunker interface {
 	Chunks(path string, content []byte, yield func(Chunk) bool) error
+}
+
+// FileChunker is the file-based chunking interface for binary formats. // CRC: crc-Chunker.md | R505, R506, R507, R508, R509, R510, R511
+// Chunks reads from path, computes the SHA-256 hash, and yields chunks.
+// If old is non-zero and matches the file hash, chunking may be skipped (yield never called).
+// Returns the content hash. Zero hash signals no content.
+type FileChunker interface {
+	Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
+}
+
+// ChunkTexter retrieves a single chunk's content by range label. // CRC: crc-Chunker.md | R503
+// Optional — chunkers without this get a default that re-runs Chunks.
+type ChunkTexter interface {
 	ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)
 }
 
@@ -79,7 +91,7 @@ type Chunker interface {
 // Convenience type — wrap with FuncChunker to get a full Chunker.
 type ChunkFunc func(path string, content []byte, yield func(Chunk) bool) error
 
-// FuncChunker wraps a bare ChunkFunc into a Chunker.
+// FuncChunker wraps a bare ChunkFunc into a Chunker + ChunkTexter. // CRC: crc-Chunker.md | R521
 // ChunkText re-runs the function and returns the first chunk matching the range label.
 type FuncChunker struct {
 	Fn ChunkFunc
@@ -102,6 +114,36 @@ func (fc FuncChunker) ChunkText(path string, content []byte, rangeLabel string) 
 		return true
 	})
 	return result, found
+}
+
+// chunkTextByRangeFile is the default ChunkText for FileChunker without ChunkTexter. // CRC: crc-Chunker.md | R517
+func chunkTextByRangeFile(fc FileChunker, path, rangeLabel string) ([]byte, bool) {
+	var result []byte
+	var found bool
+	fc.Chunks(path, [32]byte{}, func(c Chunk) bool {
+		if string(c.Range) == rangeLabel {
+			result = make([]byte, len(c.Content))
+			copy(result, c.Content)
+			found = true
+			return false
+		}
+		return true
+	})
+	return result, found
+}
+
+// resolveChunkText dispatches ChunkText to the right implementation. // CRC: crc-Chunker.md | R504, R517
+func resolveChunkText(c any, path string, content []byte, rangeLabel string) ([]byte, bool) {
+	if ct, ok := c.(ChunkTexter); ok {
+		return ct.ChunkText(path, content, rangeLabel)
+	}
+	if ch, ok := c.(Chunker); ok {
+		return chunkTextByRange(ch, path, content, rangeLabel)
+	}
+	if fc, ok := c.(FileChunker); ok {
+		return chunkTextByRangeFile(fc, path, rangeLabel)
+	}
+	return nil, false
 }
 
 // CRC: crc-Chunker.md | R116, R128, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R295, R296

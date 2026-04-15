@@ -44,6 +44,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-tmp-add.md → `overlay.go`, `db.go`
 - [x] seq-tmp-search.md → `overlay.go`, `db.go`
 - [x] seq-fuzzy-trigram.md → `db.go`, `cmd/microfts/main.go`
+- [x] seq-chunker-dispatch.md → `chunker.go`, `db.go`, `cache.go`
 
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
@@ -72,3 +73,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [ ] O12: SearchOption enumeration not fully anchored in requirements — WithOnly and WithExcept exist in code without spec/requirement coverage; audit all SearchOptions against requirements
 - [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks
 - [x] O14: R417: Bigram OR-union candidate set size unbounded — monitor performance on large corpora, add filtering if needed
+- [x] O15: resolveChunkText and chunkTextByRangeFile are defined but not yet called — will be needed when a FileChunker is registered

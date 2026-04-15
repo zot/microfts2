@@ -51,7 +51,7 @@ type DB struct {
 	dbName      string
 	settings    Settings
 	trigrams    *Trigrams
-	chunkers    map[string]Chunker // in-memory Go chunker strategies
+	chunkers    map[string]any // in-memory chunker strategies (Chunker, FileChunker, or both)
 	overlay     *overlay           // R349: in-memory tmp:// documents
 	overlayOnce sync.Once          // guards lazy overlay creation
 	pathCache    map[uint64]string   // R454: cached fileid→path, lazily loaded
@@ -961,7 +961,7 @@ func Create(path string, opts Options) (*DB, error) {
 		dbName:   dbName,
 		trigrams: NewTrigrams(opts.CaseInsensitive, opts.Aliases),
 		settings: settings,
-		chunkers: make(map[string]Chunker),
+		chunkers: make(map[string]any),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
@@ -1019,7 +1019,7 @@ func Open(path string, opts Options) (*DB, error) {
 	db := &DB{
 		env:      env,
 		dbName:   dbName,
-		chunkers: make(map[string]Chunker),
+		chunkers: make(map[string]any),
 	}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
@@ -1309,7 +1309,7 @@ func (db *DB) AddFileWithContent(fpath, strategy string, opts ...IndexOption) (u
 }
 
 // collectChunks reads a file, runs the chunker, and returns the collected chunks.
-// CRC: crc-DB.md | R485
+// CRC: crc-DB.md | R485, R513, R520
 func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collectedChunk, []byte, int64, [32]byte, error) {
 	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
 		return nil, nil, 0, [32]byte{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
@@ -1320,19 +1320,15 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		return nil, nil, 0, [32]byte{}, err
 	}
 
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return nil, nil, 0, [32]byte{}, err
-	}
-
 	chunker := db.resolveChunker(strategy)
 	if chunker == nil {
 		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
 	}
 
+	// Yield callback shared by both paths: validates UTF-8, fires callback, collects chunk data.
 	var chunks []collectedChunk
 	var utf8Err error
-	if err := chunker.Chunks(fpath, data, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
@@ -1352,9 +1348,30 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
-	}); err != nil {
-		return nil, nil, 0, [32]byte{}, err
 	}
+
+	var data []byte
+	var hash [32]byte
+
+	// R513: dispatch by chunker interface
+	if fc, ok := chunker.(FileChunker); ok {
+		hash, err = fc.Chunks(fpath, [32]byte{}, yield)
+		if err != nil {
+			return nil, nil, 0, [32]byte{}, err
+		}
+	} else if ch, ok := chunker.(Chunker); ok {
+		data, err = os.ReadFile(fpath)
+		if err != nil {
+			return nil, nil, 0, [32]byte{}, err
+		}
+		if err := ch.Chunks(fpath, data, yield); err != nil {
+			return nil, nil, 0, [32]byte{}, err
+		}
+		hash = contentHash(data)
+	} else {
+		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", strategy)
+	}
+
 	if utf8Err != nil {
 		return nil, nil, 0, [32]byte{}, utf8Err
 	}
@@ -1362,7 +1379,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		return nil, nil, 0, [32]byte{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
 	}
 
-	return chunks, data, modTime, contentHash(data), nil
+	return chunks, data, modTime, hash, nil
 }
 
 // Seq: seq-add.md | R118
@@ -1385,8 +1402,8 @@ func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback) (uint64, []b
 	return fileid, data, err
 }
 
-// resolveChunker returns the Chunker for a strategy, or nil if not available.
-func (db *DB) resolveChunker(strategy string) Chunker {
+// resolveChunker returns the chunker for a strategy (Chunker, FileChunker, or both), or nil.
+func (db *DB) resolveChunker(strategy string) any {
 	if c, ok := db.chunkers[strategy]; ok {
 		return c
 	}
@@ -1886,10 +1903,14 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		o(&cfg)
 	}
 
-	// Resolve chunk function
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
+	// Resolve chunk function — AppendChunks receives content, so requires Chunker (R515, R516)
+	resolved := db.resolveChunker(strategy)
+	if resolved == nil {
 		return fmt.Errorf("chunker strategy %q not registered", strategy)
+	}
+	chunker, ok := resolved.(Chunker)
+	if !ok {
+		return fmt.Errorf("chunker strategy %q does not support content-based chunking (implements FileChunker only)", strategy)
 	}
 
 	// Read existing F record
@@ -3032,20 +3053,15 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	lo := max(0, targetIdx-before)
 	hi := min(len(frec.Chunks)-1, targetIdx+after)
 
-	// Re-chunk the file to recover content.
-	chunker := db.resolveChunker(frec.Strategy)
-	if chunker == nil {
+	// Re-chunk the file to recover content. R514: dispatch by chunker interface.
+	resolved := db.resolveChunker(frec.Strategy)
+	if resolved == nil {
 		return nil, fmt.Errorf("chunking strategy %q not registered", frec.Strategy)
-	}
-
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return nil, err
 	}
 
 	var results []ChunkResult
 	idx := 0
-	chunker.Chunks(fpath, data, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if idx >= lo && idx <= hi {
 			results = append(results, ChunkResult{
 				Path:    fpath,
@@ -3056,7 +3072,23 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 		}
 		idx++
 		return idx <= hi // stop early once past window
-	})
+	}
+
+	if fc, ok := resolved.(FileChunker); ok {
+		if _, err := fc.Chunks(fpath, [32]byte{}, yield); err != nil {
+			return nil, err
+		}
+	} else if ch, ok := resolved.(Chunker); ok {
+		data, err := os.ReadFile(fpath)
+		if err != nil {
+			return nil, err
+		}
+		if err := ch.Chunks(fpath, data, yield); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", frec.Strategy)
+	}
 
 	return results, nil
 }
@@ -3082,9 +3114,13 @@ func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]Chun
 	lo := max(0, targetIdx-before)
 	hi := min(len(ofile.chunks)-1, targetIdx+after)
 
-	chunker := db.resolveChunker(ofile.strategy)
-	if chunker == nil {
+	resolved := db.resolveChunker(ofile.strategy)
+	if resolved == nil {
 		return nil, fmt.Errorf("chunking strategy %q not registered", ofile.strategy)
+	}
+	chunker, ok := resolved.(Chunker)
+	if !ok {
+		return nil, fmt.Errorf("chunking strategy %q does not support content-based chunking", ofile.strategy)
 	}
 
 	var results []ChunkResult
@@ -3194,8 +3230,13 @@ func (db *DB) AddStrategy(name, cmd string) error {
 	})
 }
 
-// CRC: crc-DB.md | R293
-func (db *DB) AddChunker(name string, c Chunker) error {
+// CRC: crc-DB.md | R293, R518, R519
+func (db *DB) AddChunker(name string, c any) error {
+	_, isChunker := c.(Chunker)
+	_, isFileChunker := c.(FileChunker)
+	if !isChunker && !isFileChunker {
+		return fmt.Errorf("chunker %q must implement Chunker or FileChunker", name)
+	}
 	db.chunkers[name] = c
 	db.settings.ChunkingStrategies[name] = "" // empty cmd marks chunker strategy
 	return db.env.Update(func(txn *lmdb.Txn) error {

@@ -769,3 +769,29 @@
 - **R499:** (inferred) Overlay chunk structs store contentLen for parity with LMDB C records
 - **R500:** `ChunkContentLens(fileid uint64) ([]int, error)` — public method on DB. Reads the F record's chunk list, then reads each C record's ContentLen. Returns lengths in chunk-list order. Single View transaction
 - **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of LMDB
+
+## Feature: FileChunker Interface and ChunkTexter Split
+**Source:** specs/main.md
+
+- **R502:** `Chunker` interface has only `Chunks(path string, content []byte, yield func(Chunk) bool) error` — `ChunkText` is removed from this interface
+- **R503:** `ChunkTexter` interface: `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — optional, for optimized single-chunk retrieval
+- **R504:** Default ChunkText behavior: if a chunker implements `Chunker` but not `ChunkTexter`, re-run `Chunks` and return first chunk matching the range label (`chunkTextByRange` logic)
+- **R505:** `FileChunker` interface: `Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)` — file-based chunking for binary formats
+- **R506:** `FileChunker.Chunks` reads from `path` using format-specific libraries — microfts2 does not call `os.ReadFile`
+- **R507:** `FileChunker.Chunks` computes and returns the SHA-256 hash of the file content
+- **R508:** Hash-based skip: if `old` is non-zero and matches the computed hash, the chunker may skip chunking (yield never called) and return the hash
+- **R509:** Zero hash return `[32]byte{}` signals "no content" — file missing, unreadable, or empty
+- **R510:** Zero `old` parameter means "always chunk, don't skip" — used by retrieval paths
+- **R511:** `FileChunker` does not require implementing `Chunker` — they are independent interfaces
+- **R512:** A chunker may implement both `Chunker` and `FileChunker` for dual-path support
+- **R513:** Index-time dispatch (`collectChunks`, `reindexCore`): if `FileChunker`, call `FileChunker.Chunks(path, oldHash, yield)`, skip `os.ReadFile`; if `Chunker`, existing path
+- **R514:** Retrieval-time dispatch (`getChunks`, `ChunkCache`): if `FileChunker`, call `FileChunker.Chunks(path, [32]byte{}, yield)`, skip `os.ReadFile`; if `Chunker`, existing path
+- **R515:** Overlay dispatch (`AddTmpFile`, `UpdateTmpFile`, `AppendTmpFile`): always call `Chunker.Chunks(path, content, yield)` — content is provided, not on disk
+- **R516:** Overlay error: if a chunker implements only `FileChunker` (not `Chunker`), using it with the tmp:// overlay is an error
+- **R517:** ChunkText dispatch: `ChunkTexter` → direct call; `Chunker` without `ChunkTexter` → `chunkTextByRange` default; `FileChunker` without `ChunkTexter` → re-run `FileChunker.Chunks(path, [32]byte{}, yield)`, stop at match
+- **R518:** `AddChunker(name, c)` accepts any value implementing at least one of `Chunker` or `FileChunker`
+- **R519:** (inferred) `AddChunker` validates that the value implements at least one chunking interface — error if neither
+- **R520:** Chunk content from `FileChunker` must be valid UTF-8 — same validation as `Chunker` path
+- **R521:** (inferred) `FuncChunker` implements both `Chunker` and `ChunkTexter` — no change needed
+- **R522:** (inferred) `BracketChunker` and `IndentChunker` implement both `Chunker` and `ChunkTexter` — no change needed
+- **R523:** Breaking change: `Chunker` interface loses `ChunkText` method — callers that type-assert to `Chunker` for `ChunkText` must update to assert `ChunkTexter`

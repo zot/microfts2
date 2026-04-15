@@ -18,8 +18,8 @@ type ChunkCache struct {
 
 type cachedFile struct {
 	path     string
-	data     []byte
-	chunker  Chunker
+	data     []byte // nil for FileChunker (chunker reads file directly)
+	chunker  any    // Chunker or FileChunker
 	chunks   []cachedChunk // sparse — zero-value entries not yet retrieved
 	byRange  map[string]int
 	complete bool
@@ -126,9 +126,14 @@ func (cc *ChunkCache) ensureFile(fpath string) (*cachedFile, error) {
 		return nil, fmt.Errorf("chunker strategy %q not registered", frec.Strategy)
 	}
 
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return nil, err
+	// R514: dispatch — FileChunker reads the file itself, Chunker needs os.ReadFile
+	var data []byte
+	if _, ok := chunker.(FileChunker); !ok {
+		var err error
+		data, err = os.ReadFile(fpath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	cf := &cachedFile{
@@ -142,26 +147,31 @@ func (cc *ChunkCache) ensureFile(fpath string) (*cachedFile, error) {
 	return cf, nil
 }
 
-// chunkFull runs the chunker to completion, filling every slot.
+// chunkFull runs the chunker to completion, filling every slot. R514
 func (cc *ChunkCache) chunkFull(cf *cachedFile) {
 	idx := 0
-	cf.chunker.Chunks(cf.path, cf.data, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if !cf.chunkAt(idx) {
 			cc.storeChunk(cf, idx, c)
 		}
 		idx++
 		return true
-	})
+	}
+	if fc, ok := cf.chunker.(FileChunker); ok {
+		fc.Chunks(cf.path, [32]byte{}, yield)
+	} else if ch, ok := cf.chunker.(Chunker); ok {
+		ch.Chunks(cf.path, cf.data, yield)
+	}
 	cf.complete = true
 }
 
 // chunkUntil runs the chunker from the start, caching each unseen chunk,
-// stopping when the target range is found.
+// stopping when the target range is found. R514
 func (cc *ChunkCache) chunkUntil(cf *cachedFile, rangeLabel string) ([]byte, bool) {
 	var result []byte
 	var found bool
 	idx := 0
-	cf.chunker.Chunks(cf.path, cf.data, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if !cf.chunkAt(idx) {
 			cc.storeChunk(cf, idx, c)
 		}
@@ -173,7 +183,12 @@ func (cc *ChunkCache) chunkUntil(cf *cachedFile, rangeLabel string) ([]byte, boo
 		}
 		idx++
 		return true
-	})
+	}
+	if fc, ok := cf.chunker.(FileChunker); ok {
+		fc.Chunks(cf.path, [32]byte{}, yield)
+	} else if ch, ok := cf.chunker.(Chunker); ok {
+		ch.Chunks(cf.path, cf.data, yield)
+	}
 	if !found {
 		cf.complete = true
 	}

@@ -255,7 +255,8 @@ func b() {
 	}
 
 	// Retrieve the second chunk by its range label
-	text, ok := bc.ChunkText("test.go", []byte(src), ranges[1])
+	ct := bc.(ChunkTexter)
+	text, ok := ct.ChunkText("test.go", []byte(src), ranges[1])
 	if !ok {
 		t.Fatal("ChunkText returned false for existing range")
 	}
@@ -264,7 +265,7 @@ func b() {
 	}
 
 	// Non-existent range
-	_, ok = bc.ChunkText("test.go", []byte(src), "999-999")
+	_, ok = ct.ChunkText("test.go", []byte(src), "999-999")
 	if ok {
 		t.Error("ChunkText returned true for non-existent range")
 	}
