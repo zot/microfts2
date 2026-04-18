@@ -5,7 +5,7 @@ Provides the chunking interfaces (Chunker, FileChunker, ChunkTexter), the FuncCh
 
 ## Knows
 - Chunker interface: Chunks(path string, content []byte, yield func(Chunk) bool) error — content-based chunking for text formats
-- FileChunker interface: Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) — file-based chunking for binary formats
+- FileChunker interface: FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) — file-based chunking for binary formats. Distinct method name avoids collision with Chunker.Chunks so a single type can implement both
 - ChunkTexter interface: ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool) — optional optimized single-chunk retrieval
 - Chunk struct: Range, Content, Attrs []Pair
 - Pair struct: Key []byte, Value []byte — opaque key-value pair
@@ -16,7 +16,7 @@ Provides the chunking interfaces (Chunker, FileChunker, ChunkTexter), the FuncCh
 - FuncChunker.Chunks(path, content, yield): delegate to wrapped ChunkFunc
 - FuncChunker.ChunkText(path, content, rangeLabel): re-run wrapped ChunkFunc, return first chunk whose Range matches rangeLabel
 - chunkTextByRange(c, path, content, rangeLabel): default ChunkText for Chunker without ChunkTexter — re-run Chunks, stop at match
-- chunkTextByRangeFile(fc, path, rangeLabel): default ChunkText for FileChunker without ChunkTexter — re-run FileChunker.Chunks(path, zero, yield), stop at match
+- chunkTextByRangeFile(fc, path, rangeLabel): default ChunkText for FileChunker without ChunkTexter — re-run FileChunker.FileChunks(path, zero, yield), stop at match
 - wantsContent(c): helper — returns true if c implements Chunker (content-based), false if only FileChunker
 - resolveChunkText(c, path, content, rangeLabel): dispatch helper — ChunkTexter → direct; Chunker → chunkTextByRange; FileChunker → chunkTextByRangeFile
 - RunChunkerFunc(cmd): return a ChunkFunc that executes `cmd filepath`, parses `range\tcontent` lines from stdout, and yields Chunk structs via the generator pattern

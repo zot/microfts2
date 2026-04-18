@@ -13,7 +13,7 @@ DB.collectChunks(fpath, strategy)
   switch c.(type):
   |
   case FileChunker:
-  |   fc.Chunks(fpath, oldHash, yield) → (hash, err)
+  |   fc.FileChunks(fpath, oldHash, yield) → (hash, err)
   |   if hash == oldHash: skip (no yield calls)
   |   else: chunks collected from yield
   |
@@ -34,7 +34,7 @@ DB.getChunks(fpath, targetRange, before, after)
   switch c.(type):
   |
   case FileChunker:
-  |   fc.Chunks(fpath, [32]byte{}, yield) → (_, err)
+  |   fc.FileChunks(fpath, [32]byte{}, yield) → (_, err)
   |   (zero old = always chunk)
   |
   case Chunker:
@@ -71,7 +71,7 @@ resolveChunkText(c, path, content, rangeLabel)
   |
   case FileChunker (no ChunkTexter):
   |   chunkTextByRangeFile(fc, path, rangeLabel)
-  |   (re-run fc.Chunks(path, zero, yield), stop at match)
+  |   (re-run fc.FileChunks(path, zero, yield), stop at match)
 ```
 
 ## ChunkCache dispatch
@@ -86,6 +86,6 @@ ChunkCache.ensureFile(fpath)
   |
   chunkFull / chunkUntil:
   |
-  case FileChunker: fc.Chunks(path, [32]byte{}, yield)
+  case FileChunker: fc.FileChunks(path, [32]byte{}, yield)
   case Chunker:     c.Chunks(path, data, yield)
 ```

@@ -74,11 +74,12 @@ type Chunker interface {
 }
 
 // FileChunker is the file-based chunking interface for binary formats. // CRC: crc-Chunker.md | R505, R506, R507, R508, R509, R510, R511
-// Chunks reads from path, computes the SHA-256 hash, and yields chunks.
+// FileChunks reads from path, computes the SHA-256 hash, and yields chunks.
 // If old is non-zero and matches the file hash, chunking may be skipped (yield never called).
 // Returns the content hash. Zero hash signals no content.
+// The method is named FileChunks (not Chunks) so a single type can also implement Chunker.
 type FileChunker interface {
-	Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
+	FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
 }
 
 // ChunkTexter retrieves a single chunk's content by range label. // CRC: crc-Chunker.md | R503
@@ -120,7 +121,7 @@ func (fc FuncChunker) ChunkText(path string, content []byte, rangeLabel string) 
 func chunkTextByRangeFile(fc FileChunker, path, rangeLabel string) ([]byte, bool) {
 	var result []byte
 	var found bool
-	fc.Chunks(path, [32]byte{}, func(c Chunk) bool {
+	fc.FileChunks(path, [32]byte{}, func(c Chunk) bool {
 		if string(c.Range) == rangeLabel {
 			result = make([]byte, len(c.Content))
 			copy(result, c.Content)

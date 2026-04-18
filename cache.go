@@ -158,7 +158,7 @@ func (cc *ChunkCache) chunkFull(cf *cachedFile) {
 		return true
 	}
 	if fc, ok := cf.chunker.(FileChunker); ok {
-		fc.Chunks(cf.path, [32]byte{}, yield)
+		fc.FileChunks(cf.path, [32]byte{}, yield)
 	} else if ch, ok := cf.chunker.(Chunker); ok {
 		ch.Chunks(cf.path, cf.data, yield)
 	}
@@ -185,7 +185,7 @@ func (cc *ChunkCache) chunkUntil(cf *cachedFile, rangeLabel string) ([]byte, boo
 		return true
 	}
 	if fc, ok := cf.chunker.(FileChunker); ok {
-		fc.Chunks(cf.path, [32]byte{}, yield)
+		fc.FileChunks(cf.path, [32]byte{}, yield)
 	} else if ch, ok := cf.chunker.(Chunker); ok {
 		ch.Chunks(cf.path, cf.data, yield)
 	}

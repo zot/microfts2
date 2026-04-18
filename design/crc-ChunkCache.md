@@ -13,12 +13,12 @@ Per-query cache for file content and chunked data. Avoids redundant file reads a
 - GetChunks(fpath, targetRange, before, after): resolve file (if not cached), run chunker to completion (filling all slots), return window of ChunkResults — same contract as DB.GetChunks
 - ChunkText(fpath, rangeLabel): resolve file (if not cached), check byRange for hit, if miss run chunker lazily (stop at target), return content
 - ensureFile(fpath): resolve path → fileid via DB (N records), read F record, resolve chunker. Dispatch: if FileChunker, data stays nil (chunker reads file); if Chunker, os.ReadFile. Allocate sparse chunk slice from F record chunk count
-- chunkFull(cf): dispatch to Chunker.Chunks or FileChunker.Chunks(path, zero, yield), deep-copy and store all chunks, set complete=true
-- chunkUntil(cf, rangeLabel): dispatch to appropriate Chunks method, deep-copy and store each chunk, stop when target found
+- chunkFull(cf): dispatch to Chunker.Chunks or FileChunker.FileChunks(path, zero, yield), deep-copy and store all chunks, set complete=true
+- chunkUntil(cf, rangeLabel): dispatch to Chunker.Chunks or FileChunker.FileChunks, deep-copy and store each chunk, stop when target found
 
 ## Collaborators
 - DB: N record path→fileid lookup, F record reads, Chunker resolution
-- Chunker/FileChunker: Chunks method for content extraction
+- Chunker/FileChunker: Chunks/FileChunks method for content extraction
 
 ## Sequences
 - seq-cache.md

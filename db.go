@@ -1135,6 +1135,14 @@ func (db *DB) HasTmp() bool {
 	return db.overlay != nil && !db.overlay.empty()
 }
 
+// TmpFileInfos returns status info for all tmp:// documents.
+func (db *DB) TmpFileInfos() []TmpFileInfo {
+	if db.overlay == nil {
+		return nil
+	}
+	return db.overlay.fileInfos()
+}
+
 // CRC: crc-DB.md | R378
 // TmpContent returns a reader over the raw stored content of a tmp:// document.
 func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
@@ -1355,7 +1363,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 
 	// R513: dispatch by chunker interface
 	if fc, ok := chunker.(FileChunker); ok {
-		hash, err = fc.Chunks(fpath, [32]byte{}, yield)
+		hash, err = fc.FileChunks(fpath, [32]byte{}, yield)
 		if err != nil {
 			return nil, nil, 0, [32]byte{}, err
 		}
@@ -3075,7 +3083,7 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	}
 
 	if fc, ok := resolved.(FileChunker); ok {
-		if _, err := fc.Chunks(fpath, [32]byte{}, yield); err != nil {
+		if _, err := fc.FileChunks(fpath, [32]byte{}, yield); err != nil {
 			return nil, err
 		}
 	} else if ch, ok := resolved.(Chunker); ok {

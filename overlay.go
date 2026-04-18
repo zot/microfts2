@@ -63,9 +63,8 @@ func newOverlay() *overlay {
 // addFile indexes a tmp:// document in the overlay. R358, R359, R360
 // CRC: crc-Overlay.md | R473, R474, R475, R476, R480
 func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) (uint64, error) {
-	if !utf8.Valid(content) {
-		return 0, fmt.Errorf("tmp content is not valid UTF-8: %s", path)
-	}
+	// UTF-8 validation moved to chunk level — raw content may be binary
+	// (e.g., PDF) and the chunker transforms it to UTF-8 text.
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
 		return 0, fmt.Errorf("chunking strategy %q not registered", strategy)
@@ -109,9 +108,6 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb Chun
 
 // updateFile replaces a tmp:// document's content. R361, R362, R363, R481
 func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) error {
-	if !utf8.Valid(content) {
-		return fmt.Errorf("tmp content is not valid UTF-8: %s", path)
-	}
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
 		return fmt.Errorf("chunking strategy %q not registered", strategy)
@@ -171,10 +167,6 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 // appendFile appends chunks to a tmp:// document, creating it if not found (>> semantics).
 // R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R439, R440, R441, R442
 func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts []AppendOption) (uint64, error) {
-	if !utf8.Valid(content) {
-		return 0, fmt.Errorf("tmp content is not valid UTF-8: %s", path)
-	}
-
 	// R440: chunking outside write lock.
 	o.mu.RLock()
 	ofile, exists := o.files[path]
@@ -619,6 +611,53 @@ func (o *overlay) chunkContentLens(fileid uint64) ([]int, bool) {
 		}
 	}
 	return lens, true
+}
+
+// TmpChunkInfo holds info about one chunk of a tmp:// document.
+type TmpChunkInfo struct {
+	Location string
+	Size     int
+}
+
+// TmpFileInfo holds status info for a tmp:// document.
+type TmpFileInfo struct {
+	Path       string
+	FileID     uint64
+	Strategy   string
+	ContentLen int
+	ChunkCount int
+	ChunkSizes []int
+	Chunks     []TmpChunkInfo
+}
+
+// fileInfos returns status info for all tmp:// documents.
+func (o *overlay) fileInfos() []TmpFileInfo {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	infos := make([]TmpFileInfo, 0, len(o.files))
+	for _, f := range o.files {
+		sizes := make([]int, len(f.chunks))
+		chunks := make([]TmpChunkInfo, len(f.chunks))
+		for i, fce := range f.chunks {
+			sz := 0
+			if oc, ok := o.chunks[fce.ChunkID]; ok {
+				sz = oc.contentLen
+			}
+			sizes[i] = sz
+			chunks[i] = TmpChunkInfo{Location: fce.Location, Size: sz}
+		}
+		infos = append(infos, TmpFileInfo{
+			Path:       f.path,
+			FileID:     f.fileID,
+			Strategy:   f.strategy,
+			ContentLen: len(f.content),
+			ChunkCount: len(f.chunks),
+			ChunkSizes: sizes,
+			Chunks:     chunks,
+		})
+	}
+	return infos
 }
 
 // counters returns the overlay's totalChunks and totalTokens. R373

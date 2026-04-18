@@ -1393,9 +1393,11 @@ A new optional interface for chunkers that read files directly:
 
 ```go
 type FileChunker interface {
-    Chunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
+    FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
 }
 ```
+
+The method is named `FileChunks` (not `Chunks`) so that a single Go type can implement both `Chunker` and `FileChunker` — the two interfaces have different signatures and would otherwise collide on the method name.
 
 - The chunker opens and reads the file from `path` using whatever library it needs
 - It computes the SHA-256 hash of the file content
@@ -1412,12 +1414,12 @@ microfts2 checks which interfaces a registered chunker implements and dispatches
 
 ### Index-time (collectChunks, reindexCore)
 
-1. If `FileChunker`: call `FileChunker.Chunks(path, oldHash, yield)`. Skip `os.ReadFile`. The hash comes back from the chunker. If hash matches old, chunking was skipped — no work needed.
+1. If `FileChunker`: call `FileChunker.FileChunks(path, oldHash, yield)`. Skip `os.ReadFile`. The hash comes back from the chunker. If hash matches old, chunking was skipped — no work needed.
 2. If `Chunker`: existing path — `os.ReadFile`, pass content to `Chunker.Chunks`, compute hash separately.
 
 ### Retrieval-time (getChunks, ChunkCache)
 
-1. If `FileChunker`: call `FileChunker.Chunks(path, [32]byte{}, yield)`. Zero old hash means "always chunk, don't skip." No `os.ReadFile` by microfts2.
+1. If `FileChunker`: call `FileChunker.FileChunks(path, [32]byte{}, yield)`. Zero old hash means "always chunk, don't skip." No `os.ReadFile` by microfts2.
 2. If `Chunker`: existing path — `os.ReadFile`, pass content.
 
 ### Content-in-hand (overlay: AddTmpFile, UpdateTmpFile, AppendTmpFile)
@@ -1429,7 +1431,7 @@ microfts2 checks which interfaces a registered chunker implements and dispatches
 
 1. If `ChunkTexter`: call `ChunkText(path, content, rangeLabel)` directly.
 2. If `Chunker` (no `ChunkTexter`): use `chunkTextByRange` default — re-run `Chunks`, stop at match.
-3. If `FileChunker` (no `ChunkTexter`): re-run `FileChunker.Chunks(path, [32]byte{}, yield)`, stop at match.
+3. If `FileChunker` (no `ChunkTexter`): re-run `FileChunker.FileChunks(path, [32]byte{}, yield)`, stop at match.
 
 ## Registration
 
