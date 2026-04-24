@@ -66,8 +66,9 @@ func (ic *indentChunker) Chunks(path string, content []byte, yield func(Chunk) b
 	return emitIndentChunks(content, lines, groups, yield)
 }
 
-func (ic *indentChunker) ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool) {
-	return chunkTextByRange(ic, path, content, rangeLabel)
+// GetChunk is the RandomAccessChunker fast path — slices data by line range. R531
+func (ic *indentChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
+	return sliceByLineRange(data, customData, chunk)
 }
 
 // measureIndent counts the leading whitespace columns. R328

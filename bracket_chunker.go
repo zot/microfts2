@@ -71,8 +71,9 @@ func (bc *bracketChunker) Chunks(path string, content []byte, yield func(Chunk) 
 	return emitChunks(content, groups, yield)
 }
 
-func (bc *bracketChunker) ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool) {
-	return chunkTextByRange(bc, path, content, rangeLabel)
+// GetChunk is the RandomAccessChunker fast path — slices data by line range. R531
+func (bc *bracketChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
+	return sliceByLineRange(data, customData, chunk)
 }
 
 // lineIndex builds a byte-offset-to-line-number lookup.

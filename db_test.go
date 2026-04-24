@@ -136,6 +136,77 @@ func TestDBRemoveFile(t *testing.T) {
 
 
 
+func TestRemoveFileWithCallback(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "a.txt", "unique alpha content\n")
+	f2 := writeTestFile(t, dir, "b.txt", "unique beta content\n")
+	db.AddFile(f1, "line")
+	db.AddFile(f2, "line")
+
+	var callbackTxn bool
+	var gotOrphans []uint64
+	err := db.RemoveFileWithCallback(f1, func(txn *lmdb.Txn, orphans []uint64) error {
+		callbackTxn = txn != nil
+		gotOrphans = append(gotOrphans, orphans...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !callbackTxn {
+		t.Error("callback did not receive a transaction")
+	}
+	if len(gotOrphans) == 0 {
+		t.Error("expected orphaned chunk IDs, got none")
+	}
+
+	sr, _ := db.Search("alpha")
+	if len(sr.Results) != 0 {
+		t.Error("file should be removed from search results")
+	}
+	sr, _ = db.Search("beta")
+	if len(sr.Results) != 1 {
+		t.Error("other file should still be searchable")
+	}
+}
+
+func TestRemoveFileWithCallbackError(t *testing.T) {
+	db, dir := testDB(t)
+
+	fp := writeTestFile(t, dir, "a.txt", "rollback content\n")
+	db.AddFile(fp, "line")
+
+	sentinel := errors.New("abort")
+	err := db.RemoveFileWithCallback(fp, func(txn *lmdb.Txn, orphans []uint64) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+
+	sr, _ := db.Search("rollback")
+	if len(sr.Results) != 1 {
+		t.Errorf("file should still be searchable after aborted removal, got %d results", len(sr.Results))
+	}
+}
+
+func TestRemoveFileWithCallbackNil(t *testing.T) {
+	db, dir := testDB(t)
+
+	fp := writeTestFile(t, dir, "a.txt", "nil callback content\n")
+	db.AddFile(fp, "line")
+
+	if err := db.RemoveFileWithCallback(fp, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	sr, _ := db.Search("callback")
+	if len(sr.Results) != 0 {
+		t.Error("file should be removed")
+	}
+}
+
 func TestDBReindex(t *testing.T) {
 	db, dir := testDB(t)
 	// Add a second strategy that chunks every 10 bytes
@@ -168,6 +239,81 @@ func TestDBReindex(t *testing.T) {
 	}
 	if len(sr.Results) == 0 {
 		t.Fatal("search returned no results after reindex")
+	}
+}
+
+func TestReindexWithCallback(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddStrategyFunc("fixed10", fixedChunkFunc(10))
+
+	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\nthe quick brown fox\n")
+	db.AddFile(fp, "line")
+
+	var gotOrphans []uint64
+	var gotNew []uint64
+	fileid, err := db.ReindexWithCallback(fp, "fixed10", func(txn *lmdb.Txn, orphans, newIDs []uint64) error {
+		gotOrphans = append(gotOrphans, orphans...)
+		gotNew = append(gotNew, newIDs...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileid == 0 {
+		t.Error("expected non-zero fileid")
+	}
+	if len(gotOrphans) == 0 {
+		t.Error("expected orphaned chunk IDs from old indexing")
+	}
+	if len(gotNew) == 0 {
+		t.Error("expected new chunk IDs from re-indexing")
+	}
+
+	sr, _ := db.Search("hello")
+	if len(sr.Results) == 0 {
+		t.Error("content should be searchable after reindex")
+	}
+}
+
+func TestReindexWithCallbackError(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddStrategyFunc("fixed10", fixedChunkFunc(10))
+
+	fp := writeTestFile(t, dir, "test.txt", "rollback reindex content\n")
+	db.AddFile(fp, "line")
+
+	sentinel := errors.New("abort reindex")
+	_, err := db.ReindexWithCallback(fp, "fixed10", func(txn *lmdb.Txn, orphans, newIDs []uint64) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+
+	sr, _ := db.Search("rollback")
+	if len(sr.Results) != 1 {
+		t.Errorf("file should still be searchable with old strategy after aborted reindex, got %d results", len(sr.Results))
+	}
+}
+
+func TestReindexWithCallbackNil(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddStrategyFunc("fixed10", fixedChunkFunc(10))
+
+	fp := writeTestFile(t, dir, "test.txt", "nil callback reindex\n")
+	db.AddFile(fp, "line")
+
+	fileid, err := db.ReindexWithCallback(fp, "fixed10", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileid == 0 {
+		t.Error("expected non-zero fileid")
+	}
+
+	sr, _ := db.Search("reindex")
+	if len(sr.Results) == 0 {
+		t.Error("content should be searchable after reindex with nil callback")
 	}
 }
 
@@ -1485,6 +1631,56 @@ func TestExceptRegexSubtract(t *testing.T) {
 	}
 }
 
+func TestWithOnlyIntersects(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "a.txt", "common word here\n")
+	f2 := writeTestFile(t, dir, "b.txt", "common word here\n")
+	f3 := writeTestFile(t, dir, "c.txt", "common word here\n")
+	id1, _ := db.AddFile(f1, "line")
+	id2, _ := db.AddFile(f2, "line")
+	id3, _ := db.AddFile(f3, "line")
+
+	set12 := map[uint64]struct{}{id1: {}, id2: {}}
+	set23 := map[uint64]struct{}{id2: {}, id3: {}}
+
+	r, err := db.Search("common", WithOnly(set12), WithOnly(set23))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("expected 1 result (intersection), got %d", len(r.Results))
+	}
+	if r.Results[0].Path != f2 {
+		t.Errorf("expected %s, got %s", f2, r.Results[0].Path)
+	}
+}
+
+func TestWithExceptUnions(t *testing.T) {
+	db, dir := testDB(t)
+
+	f1 := writeTestFile(t, dir, "a.txt", "common word here\n")
+	f2 := writeTestFile(t, dir, "b.txt", "common word here\n")
+	f3 := writeTestFile(t, dir, "c.txt", "common word here\n")
+	id1, _ := db.AddFile(f1, "line")
+	id2, _ := db.AddFile(f2, "line")
+	_, _ = db.AddFile(f3, "line")
+
+	excl1 := map[uint64]struct{}{id1: {}}
+	excl2 := map[uint64]struct{}{id2: {}}
+
+	r, err := db.Search("common", WithExcept(excl1), WithExcept(excl2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Results) != 1 {
+		t.Fatalf("expected 1 result (union of exclusions), got %d", len(r.Results))
+	}
+	if r.Results[0].Path != f3 {
+		t.Errorf("expected %s, got %s", f3, r.Results[0].Path)
+	}
+}
+
 // test-DB.md: regex filter with SearchRegex | R189, R190
 func TestRegexFilterWithSearchRegex(t *testing.T) {
 	db, dir := testDB(t)
@@ -1633,6 +1829,105 @@ func TestGetChunksFileNotInDB(t *testing.T) {
 	_, err := db.GetChunks("/nonexistent/file.txt", "1-1", 0, 0)
 	if err == nil {
 		t.Fatal("expected error for file not in database")
+	}
+}
+
+// R524-R544: DB.GetChunks fast path via RandomAccessChunker
+func TestGetChunksFastPath(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "testdb")
+	db, err := Create(dbPath, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// Register LineChunker (RandomAccessChunker-capable) under a new strategy name.
+	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := writeTestFile(t, dir, "test.txt", "one\ntwo\nthree\nfour\nfive\n")
+	if _, err := db.AddFile(f, "fastline"); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks, err := db.GetChunks(f, "3-3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	for i, want := range []struct {
+		rng, content string
+	}{
+		{"2-2", "two\n"},
+		{"3-3", "three\n"},
+		{"4-4", "four\n"},
+	} {
+		if chunks[i].Range != want.rng {
+			t.Errorf("chunk %d range = %q, want %q", i, chunks[i].Range, want.rng)
+		}
+		if chunks[i].Content != want.content {
+			t.Errorf("chunk %d content = %q, want %q", i, chunks[i].Content, want.content)
+		}
+	}
+}
+
+// R535, R536: ChunkCache.ChunkTextWithId and ChunkText wrapper
+func TestChunkCacheChunkTextWithId(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "testdb")
+	db, err := Create(dbPath, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
+		t.Fatal(err)
+	}
+
+	f := writeTestFile(t, dir, "test.txt", "alpha\nbeta\ngamma\n")
+	fileid, err := db.AddFile(f, "fastline")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frec, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cc := db.NewChunkCache()
+
+	// ChunkText via range
+	got, ok := cc.ChunkText(f, "2-2")
+	if !ok {
+		t.Fatal("ChunkText(2-2) returned false")
+	}
+	if string(got) != "beta\n" {
+		t.Errorf("ChunkText = %q, want %q", got, "beta\n")
+	}
+
+	// ChunkTextWithId via chunkID (cached hit — same range)
+	var targetChunkID uint64
+	for _, fce := range frec.Chunks {
+		if fce.Location == "2-2" {
+			targetChunkID = fce.ChunkID
+			break
+		}
+	}
+	if targetChunkID == 0 {
+		t.Fatal("couldn't find chunkID for 2-2")
+	}
+	got2, ok := cc.ChunkTextWithId(f, targetChunkID)
+	if !ok {
+		t.Fatal("ChunkTextWithId returned false")
+	}
+	if string(got2) != "beta\n" {
+		t.Errorf("ChunkTextWithId = %q, want %q", got2, "beta\n")
 	}
 }
 

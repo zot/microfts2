@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -51,23 +52,6 @@ func CopyPairs(src []Pair) []Pair {
 	return dst
 }
 
-// chunkTextByRange scans a Chunker's output for a matching range label and returns its content.
-// Shared by BracketChunker and IndentChunker.
-func chunkTextByRange(c Chunker, path string, content []byte, rangeLabel string) ([]byte, bool) {
-	var result []byte
-	var found bool
-	c.Chunks(path, content, func(ch Chunk) bool {
-		if string(ch.Range) == rangeLabel {
-			result = make([]byte, len(ch.Content))
-			copy(result, ch.Content)
-			found = true
-			return false
-		}
-		return true
-	})
-	return result, found
-}
-
 // Chunker is the content-based chunking interface for text formats. // CRC: crc-Chunker.md | R502
 type Chunker interface {
 	Chunks(path string, content []byte, yield func(Chunk) bool) error
@@ -82,69 +66,113 @@ type FileChunker interface {
 	FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)
 }
 
-// ChunkTexter retrieves a single chunk's content by range label. // CRC: crc-Chunker.md | R503
-// Optional — chunkers without this get a default that re-runs Chunks.
-type ChunkTexter interface {
-	ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)
+// RandomAccessChunker retrieves a single chunk by pre-filled range. // CRC: crc-Chunker.md | R524, R525, R526, R527, R528
+// Caller pre-fills chunk.Range (from F record Location) and chunk.Attrs (from C record).
+// Chunker fills chunk.Content and may replace or augment chunk.Attrs.
+// customData is per-file scratch — nil on first call, chunker populates lazily and reuses.
+type RandomAccessChunker interface {
+	GetChunk(path string, data []byte, customData *any, chunk *Chunk) error
+}
+
+// sliceByLineRange is the shared fast-path helper for chunkers whose range
+// label is "startLine-endLine". Uses a lazy line-offset table in customData.
+// CRC: crc-Chunker.md | R531, R532
+func sliceByLineRange(data []byte, customData *any, chunk *Chunk) error {
+	startLine, endLine, err := parseLineRange(string(chunk.Range))
+	if err != nil {
+		return err
+	}
+	offsets := ensureLineOffsets(customData, data, endLine)
+	if startLine < 1 || startLine >= len(offsets) {
+		return fmt.Errorf("startLine %d out of range (have %d lines)", startLine, len(offsets)-1)
+	}
+	if endLine < startLine || endLine >= len(offsets) {
+		return fmt.Errorf("endLine %d out of range (have %d lines)", endLine, len(offsets)-1)
+	}
+	chunk.Content = data[offsets[startLine-1]:offsets[endLine]]
+	return nil
+}
+
+// ensureLineOffsets lazily populates a []int of line-start byte offsets in customData,
+// extending as needed to cover at least `needLines` lines. Final entry may be len(data)
+// for the last line without trailing newline, acting as an end-of-content sentinel.
+// CRC: crc-Chunker.md | R532
+func ensureLineOffsets(customData *any, data []byte, needLines int) []int {
+	var offsets []int
+	if *customData != nil {
+		if o, ok := (*customData).([]int); ok {
+			offsets = o
+		}
+	}
+	if offsets == nil {
+		offsets = []int{0}
+	}
+	for len(offsets) <= needLines {
+		last := offsets[len(offsets)-1]
+		if last >= len(data) {
+			break
+		}
+		nl := bytes.IndexByte(data[last:], '\n')
+		if nl < 0 {
+			offsets = append(offsets, len(data))
+			break
+		}
+		offsets = append(offsets, last+nl+1)
+	}
+	*customData = offsets
+	return offsets
+}
+
+// parseLineRange parses "startLine-endLine" into (start, end, err).
+func parseLineRange(s string) (int, int, error) {
+	dash := strings.IndexByte(s, '-')
+	if dash < 0 {
+		return 0, 0, fmt.Errorf("invalid line range %q", s)
+	}
+	start, err := strconv.Atoi(s[:dash])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid start in %q: %w", s, err)
+	}
+	end, err := strconv.Atoi(s[dash+1:])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid end in %q: %w", s, err)
+	}
+	return start, end, nil
+}
+
+// LineChunker exposes LineChunkFunc as a Chunker + RandomAccessChunker. // CRC: crc-Chunker.md | R531
+type LineChunker struct{}
+
+func (LineChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
+	return LineChunkFunc(path, content, yield)
+}
+
+func (LineChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
+	return sliceByLineRange(data, customData, chunk)
+}
+
+// MarkdownChunker exposes MarkdownChunkFunc as a Chunker + RandomAccessChunker. // CRC: crc-Chunker.md | R531
+type MarkdownChunker struct{}
+
+func (MarkdownChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
+	return MarkdownChunkFunc(path, content, yield)
+}
+
+func (MarkdownChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
+	return sliceByLineRange(data, customData, chunk)
 }
 
 // ChunkFunc is a generator that yields chunks for a file.
 // Convenience type — wrap with FuncChunker to get a full Chunker.
 type ChunkFunc func(path string, content []byte, yield func(Chunk) bool) error
 
-// FuncChunker wraps a bare ChunkFunc into a Chunker + ChunkTexter. // CRC: crc-Chunker.md | R521
-// ChunkText re-runs the function and returns the first chunk matching the range label.
+// FuncChunker wraps a bare ChunkFunc into a Chunker. // CRC: crc-Chunker.md
 type FuncChunker struct {
 	Fn ChunkFunc
 }
 
 func (fc FuncChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
 	return fc.Fn(path, content, yield)
-}
-
-func (fc FuncChunker) ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool) {
-	var result []byte
-	var found bool
-	fc.Fn(path, content, func(c Chunk) bool {
-		if string(c.Range) == rangeLabel {
-			result = make([]byte, len(c.Content))
-			copy(result, c.Content)
-			found = true
-			return false
-		}
-		return true
-	})
-	return result, found
-}
-
-// chunkTextByRangeFile is the default ChunkText for FileChunker without ChunkTexter. // CRC: crc-Chunker.md | R517
-func chunkTextByRangeFile(fc FileChunker, path, rangeLabel string) ([]byte, bool) {
-	var result []byte
-	var found bool
-	fc.FileChunks(path, [32]byte{}, func(c Chunk) bool {
-		if string(c.Range) == rangeLabel {
-			result = make([]byte, len(c.Content))
-			copy(result, c.Content)
-			found = true
-			return false
-		}
-		return true
-	})
-	return result, found
-}
-
-// resolveChunkText dispatches ChunkText to the right implementation. // CRC: crc-Chunker.md | R504, R517
-func resolveChunkText(c any, path string, content []byte, rangeLabel string) ([]byte, bool) {
-	if ct, ok := c.(ChunkTexter); ok {
-		return ct.ChunkText(path, content, rangeLabel)
-	}
-	if ch, ok := c.(Chunker); ok {
-		return chunkTextByRange(ch, path, content, rangeLabel)
-	}
-	if fc, ok := c.(FileChunker); ok {
-		return chunkTextByRangeFile(fc, path, rangeLabel)
-	}
-	return nil, false
 }
 
 // CRC: crc-Chunker.md | R116, R128, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R295, R296
@@ -155,6 +183,9 @@ func resolveChunkText(c any, path string, content []byte, rangeLabel string) ([]
 // boundaries only and are not included in any chunk's content.
 // Fenced code blocks (``` or ~~~) suppress blank-line splitting — all lines
 // from opening fence through matching close belong to the current chunk. // R465, R466, R467, R468
+// Headline merging: after a heading chunk, consecutive tag-only chunks
+// (lines starting with @) and one following content chunk are absorbed
+// into a single merged chunk with internal blank lines included. // R563, R564, R565, R566, R567, R568, R569, R570
 func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	if len(content) == 0 {
 		return nil
@@ -169,16 +200,63 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	fenceChar := byte(0) // backtick or tilde when inside a fence
 	fenceLen := 0        // number of fence characters in the opening fence
 
+	chunkIsHeading := false // current chunk was started by a heading line
+	chunkAllTags := true    // all lines in current chunk start with '@'
+
+	merging := false     // buffering a heading chunk for merge
+	mStartLine := 0
+	mStartByte := 0
+	mEndLine := 0
+	mEndByte := 0
+
+	emitMerge := func() bool {
+		r := fmt.Sprintf("%d-%d", mStartLine, mEndLine)
+		if !yield(Chunk{Range: []byte(r), Content: content[mStartByte:mEndByte]}) {
+			return false
+		}
+		merging = false
+		return true
+	}
+
 	flush := func() bool {
 		if startLine < 0 {
 			return true
 		}
-		r := fmt.Sprintf("%d-%d", startLine, endLine)
-		if !yield(Chunk{Range: []byte(r), Content: content[startByte:endByte]}) {
-			return false
-		}
+		sl, sb, el, eb := startLine, startByte, endLine, endByte
+		isHead, allTags := chunkIsHeading, chunkAllTags
 		startLine = -1
-		return true
+		chunkIsHeading = false
+		chunkAllTags = true
+
+		if merging {
+			if allTags {
+				mEndLine = el
+				mEndByte = eb
+				return true
+			}
+			if isHead {
+				if !emitMerge() {
+					return false
+				}
+				merging = true
+				mStartLine, mStartByte = sl, sb
+				mEndLine, mEndByte = el, eb
+				return true
+			}
+			mEndLine = el
+			mEndByte = eb
+			return emitMerge()
+		}
+
+		if isHead {
+			merging = true
+			mStartLine, mStartByte = sl, sb
+			mEndLine, mEndByte = el, eb
+			return true
+		}
+
+		r := fmt.Sprintf("%d-%d", sl, el)
+		return yield(Chunk{Range: []byte(r), Content: content[sb:eb]})
 	}
 
 	for pos < len(content) {
@@ -199,11 +277,11 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 				fenceChar = 0
 				fenceLen = 0
 			}
-			// Either way, line belongs to current chunk.
 			if startLine < 0 {
 				startLine = lineNum
 				startByte = lineStart
 			}
+			chunkAllTags = false
 			endLine = lineNum
 			endByte = lineEnd
 			pos = lineEnd
@@ -219,6 +297,7 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 				startLine = lineNum
 				startByte = lineStart
 			}
+			chunkAllTags = false
 			endLine = lineNum
 			endByte = lineEnd
 			pos = lineEnd
@@ -238,14 +317,25 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 					return nil
 				}
 			}
+			if merging {
+				if !emitMerge() {
+					return nil
+				}
+			}
 			startLine = lineNum
 			startByte = lineStart
 			endLine = lineNum
 			endByte = lineEnd
+			chunkIsHeading = true
+			chunkAllTags = false
 		} else {
 			if startLine < 0 {
 				startLine = lineNum
 				startByte = lineStart
+				chunkAllTags = true
+			}
+			if len(line) > 0 && line[0] != '@' {
+				chunkAllTags = false
 			}
 			endLine = lineNum
 			endByte = lineEnd
@@ -255,6 +345,9 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	}
 
 	flush()
+	if merging {
+		emitMerge()
+	}
 	return nil
 }
 

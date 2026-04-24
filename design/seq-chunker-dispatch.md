@@ -1,7 +1,7 @@
 # Sequence: Chunker Dispatch
-**Requirements:** R502, R505, R513, R514, R515, R516, R517
+**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544
 
-How DB dispatches to the right chunking interface at each call site.
+How DB and ChunkCache dispatch to the right chunking interface at each call site.
 
 ## Index-time (collectChunks)
 
@@ -24,20 +24,33 @@ DB.collectChunks(fpath, strategy)
   |   contentHash(data) → hash
 ```
 
-## Retrieval-time (getChunks, non-tmp)
+## Retrieval-time (DB.GetChunks, non-tmp)
 
 ```
-DB.getChunks(fpath, targetRange, before, after)
+DB.GetChunks(fpath, targetRange, before, after)
+  |
+  read frec via lookupFileByPath
+  find targetIdx by frec.Chunks[i].Location == targetRange
+  compute [lo, hi] clamped to bounds
   |
   resolveChunker(frec.Strategy) → c (any)
   |
   switch c.(type):
   |
-  case FileChunker:
-  |   fc.FileChunks(fpath, [32]byte{}, yield) → (_, err)
-  |   (zero old = always chunk)
+  case RandomAccessChunker:                                       # fast path, R529
+  |   var cd any                                                  # transient customData for this call
+  |   data = os.ReadFile(fpath) if Chunker, else nil
+  |   for i in [lo, hi]:
+  |     fce = frec.Chunks[i]
+  |     crec = read C record by fce.ChunkID                       # for Attrs
+  |     chunk = Chunk{Range: fce.Location, Attrs: crec.Attrs}     # R526, R527
+  |     ra.GetChunk(fpath, data, &cd, &chunk) → err               # R528
+  |     append to results
   |
-  case Chunker:
+  case FileChunker:                                               # streaming fallback, R530
+  |   fc.FileChunks(fpath, [32]byte{}, yield) → (_, err)
+  |
+  case Chunker:                                                   # streaming fallback, R530
   |   os.ReadFile(fpath)
   |   c.Chunks(fpath, data, yield) → err
 ```
@@ -55,25 +68,6 @@ DB.AddTmpFile(path, strategy, content)
   c.Chunks(path, content, yield) → err
 ```
 
-## ChunkText retrieval
-
-```
-resolveChunkText(c, path, content, rangeLabel)
-  |
-  switch c.(type):
-  |
-  case ChunkTexter:
-  |   c.ChunkText(path, content, rangeLabel)
-  |
-  case Chunker (no ChunkTexter):
-  |   chunkTextByRange(c, path, content, rangeLabel)
-  |   (re-run Chunks, stop at match)
-  |
-  case FileChunker (no ChunkTexter):
-  |   chunkTextByRangeFile(fc, path, rangeLabel)
-  |   (re-run fc.FileChunks(path, zero, yield), stop at match)
-```
-
 ## ChunkCache dispatch
 
 ```
@@ -81,11 +75,48 @@ ChunkCache.ensureFile(fpath)
   |
   resolveChunker → c (any)
   |
-  case FileChunker: data = nil (chunker reads file)
-  case Chunker:     data = os.ReadFile(fpath)
+  case FileChunker (no Chunker): data = nil
+  case Chunker: data = os.ReadFile(fpath)
   |
-  chunkFull / chunkUntil:
+  snapshot fileChunks := frec.Chunks
+  build rangeIds := {fce.Location → fce.ChunkID for fce in fileChunks}
+  customData := nil
+
+ChunkCache.ChunkTextWithId(fpath, chunkID)
   |
-  case FileChunker: fc.FileChunks(path, [32]byte{}, yield)
-  case Chunker:     c.Chunks(path, data, yield)
+  cf := ensureFile(fpath)
+  locate i such that fileChunks[i].ChunkID == chunkID
+  loc := fileChunks[i].Location
+  if byRange[loc] hit: return chunks[idx].Content
+  |
+  switch cf.chunker.(type):
+  |
+  case RandomAccessChunker:                                       # fast path, R529, R542
+  |   crec = read C record by chunkID
+  |   chunk = Chunk{Range: loc, Attrs: crec.Attrs}
+  |   ra.GetChunk(cf.path, cf.data, &cf.customData, &chunk)
+  |   storeChunk(cf, chunk)
+  |
+  default:                                                        # streaming fallback, R543
+  |   run Chunks/FileChunks from start, storeChunk each yield
+  |   stop when yielded Range == loc
+
+ChunkCache.ChunkText(fpath, rangeLabel)
+  |
+  cf := ensureFile(fpath)
+  chunkID := cf.rangeIds[rangeLabel]
+  return ChunkTextWithId(fpath, chunkID)                          # R536
+
+ChunkCache.GetChunks(fpath, targetRange, before, after)
+  |
+  cf := ensureFile(fpath)
+  locate targetPos in cf.fileChunks by Location == targetRange
+  compute [lo, hi]
+  |
+  for i in [lo, hi]:
+    fce = cf.fileChunks[i]
+    if byRange[fce.Location] hit: use cached
+    else: retrieve via fast path or streaming (same dispatch as ChunkTextWithId)
+  |
+  assemble []ChunkResult in positional order                      # R544
 ```

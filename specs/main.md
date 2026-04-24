@@ -259,7 +259,16 @@ Splits on blank lines and heading transitions:
 - Blank lines inside a fenced code block are not boundaries
 - Fence matching: a closing fence is a line starting with the same character (`` ` `` or `~`) repeated at least as many times as the opening fence, with no other non-whitespace content
 
-Range: `startline-endline` (1-based, inclusive). Content: the raw text of those lines (excluding boundary blank lines).
+Headline merging: a heading absorbs following tag-only chunks and one content chunk into a single merged chunk.
+- A tag line is any line whose first character is `@`
+- After a heading chunk is emitted internally (heading + any non-blank, non-tag continuation lines up to a blank line or heading), the chunker looks ahead
+- If the next chunk consists entirely of tag lines (every line starts with `@`), it is merged into the heading chunk. This repeats for consecutive tag-only chunks.
+- After all tag-only chunks (if any), the next chunk is also merged if it is a non-heading chunk (paragraph, fenced code block, table, etc.)
+- Blank lines between the heading, tag chunks, and the absorbed content chunk become internal to the merged chunk — they are included in the merged chunk's content
+- The merged chunk's range spans from the heading's start line to the last line of the final absorbed chunk
+- If no tag-only or content chunks follow the heading (e.g. two headings in a row, or heading at end of file), the heading chunk is emitted as-is
+
+Range: `startline-endline` (1-based, inclusive). Content: the raw text of those lines. For merged heading chunks, internal blank lines are included. For non-merged chunks, boundary blank lines are excluded.
 
 Exported as `microfts2.MarkdownChunkFunc` for direct use as a `ChunkFunc` (wraps into a Chunker via FuncChunker when registered).
 
@@ -324,7 +333,9 @@ func (db *DB) Version() (string, error)
 func (db *DB) AddFile(fpath, strategy string) (uint64, error)
 func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) RemoveFile(fpath string) error
+func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
+func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) FileInfoByID(fileid uint64) (FRecord, error)
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error
@@ -870,15 +881,20 @@ func (db *DB) NewChunkCache() *ChunkCache
 // Drop-in replacement for DB.GetChunks — same signature, cached.
 func (cc *ChunkCache) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
 
-// Single chunk text by range label. Returns cached content if available.
+// Fast-path single-chunk retrieval by chunkID (e.g. from SearchResult).
+func (cc *ChunkCache) ChunkTextWithId(fpath string, chunkID uint64) ([]byte, bool)
+
+// Convenience wrapper: resolves chunkID from range label, calls ChunkTextWithId.
 func (cc *ChunkCache) ChunkText(fpath, rangeLabel string) ([]byte, bool)
 ```
 
+Detailed behavior and cachedFile shape are specified in *ChunkCache API changes* below (alongside the `RandomAccessChunker` fast path).
+
 ## Caching strategy
 
-- **First access to a file:** resolve path → fileid via N records (one View txn), read F record for chunk list and strategy, read file from disk into `data`, resolve Chunker.
-- **Lazy chunking (ChunkText path):** run `Chunker.Chunks()` but stop as soon as the target range is found. Each chunk encountered along the way is deep-copied and stored at its index. A `byRange` map indexes range label → position. Subsequent requests for already-seen ranges are a map lookup.
-- **Full chunking (GetChunks path):** run `Chunker.Chunks()` to completion, fill every slot. Subsequent `ChunkText` calls on any range in the file are map lookups.
+- **First access to a file:** resolve path → fileid via N records (one View txn), read F record, snapshot positional `fileChunks` + `rangeIds` map, resolve Chunker. For `Chunker` backends, read file content into `data`. For `FileChunker`-only backends, `data` stays nil.
+- **Retrieval path:** dispatches to `RandomAccessChunker.GetChunk` if available (fast path: C record read + pre-filled Chunk + direct extraction). Otherwise streams `Chunks`/`FileChunks` from the start, caching each encountered chunk, stopping at the target range.
+- **Access-order storage:** `chunks []cachedChunk` grows in insertion order. Positional meaning is provided by the separate `fileChunks` list + `byRange` map, not by slice index.
 - **Copy semantics:** the cache deep-copies Range, Content, and Attrs on store. Downstream consumers get stable references.
 
 ## Lifecycle
@@ -1370,26 +1386,13 @@ func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...Appen
 
 Indexing methods gain a variadic `...IndexOption` — existing callers pass zero args, no breakage. Append methods are unchanged — `WithAppendChunkCallback` is just a new `AppendOption` constructor.
 
-# FileChunker Interface and ChunkTexter Split
+# FileChunker Interface
 
-Binary formats (PDF, images, archives) cannot be meaningfully pre-read as `[]byte` and passed to a chunker. The chunker needs to open the file itself using format-specific libraries. This requires a new interface for file-based chunking and a rearrangement of the existing `Chunker` interface.
-
-## Interface split
-
-The current `Chunker` interface bundles two concerns: indexing (`Chunks`) and retrieval (`ChunkText`). These are split into separate interfaces:
-
-- `Chunker` keeps only `Chunks(path string, content []byte, yield func(Chunk) bool) error` — content-based chunking for text formats
-- `ChunkTexter` is a new optional interface: `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retrieval of a single chunk by range label
-
-A chunker that implements only `Chunker` gets a default `ChunkText` behavior: re-run `Chunks` and return the first chunk whose Range matches the label (the existing `chunkTextByRange` logic).
-
-A chunker that also implements `ChunkTexter` gets its optimized retrieval path used instead.
-
-Existing chunkers (BracketChunker, IndentChunker) already implement both methods — they continue to work unchanged. FuncChunker implements both via its wrapped function.
+Binary formats (PDF, images, archives) cannot be meaningfully pre-read as `[]byte` and passed to a chunker. The chunker needs to open the file itself using format-specific libraries. `FileChunker` is a separate interface for this access pattern.
 
 ## FileChunker interface
 
-A new optional interface for chunkers that read files directly:
+An optional interface for chunkers that read files directly:
 
 ```go
 type FileChunker interface {
@@ -1427,26 +1430,150 @@ microfts2 checks which interfaces a registered chunker implements and dispatches
 1. Always call `Chunker.Chunks(path, content, yield)` — content is provided, not on disk.
 2. If the chunker only implements `FileChunker` and not `Chunker`, this is an error — file-only chunkers cannot be used with the tmp:// overlay.
 
-### ChunkText retrieval
-
-1. If `ChunkTexter`: call `ChunkText(path, content, rangeLabel)` directly.
-2. If `Chunker` (no `ChunkTexter`): use `chunkTextByRange` default — re-run `Chunks`, stop at match.
-3. If `FileChunker` (no `ChunkTexter`): re-run `FileChunker.FileChunks(path, [32]byte{}, yield)`, stop at match.
-
 ## Registration
 
-`AddChunker(name, c)` accepts any value. At registration time, microfts2 checks which interfaces the value satisfies (`Chunker`, `FileChunker`, `ChunkTexter`) and stores the appropriate capabilities. A chunker must implement at least one of `Chunker` or `FileChunker`.
+`AddChunker(name, c)` accepts any value. At registration time, microfts2 checks which interfaces the value satisfies (`Chunker`, `FileChunker`, `RandomAccessChunker`) and stores the appropriate capabilities. A chunker must implement at least one of `Chunker` or `FileChunker`.
 
 ## UTF-8 validation
 
 The UTF-8 validation in `collectChunks` (checking each yielded chunk's Content) applies regardless of which interface produced the chunks. Binary-format chunkers are responsible for extracting text — microfts2 verifies the result is valid UTF-8.
 
+# Random-Access Chunk Retrieval
+
+The default retrieval path (`ChunkCache.ChunkText`, `DB.GetChunks`) is a linear scan: the chunker runs from the start of the file, yielding each chunk in order, until the target range is found. For small files this is fine. For a 600-page PDF whose target chunk is on the last page, walking from the top is wasteful.
+
+`RandomAccessChunker` is an optional chunker interface that skips the scan — given a range label, the chunker extracts that chunk directly, using a caller-provided scratch pointer for per-file state (e.g. a line-offset table or page index).
+
+## RandomAccessChunker interface
+
+```go
+type RandomAccessChunker interface {
+    GetChunk(path string, data []byte, customData *any, chunk *Chunk) error
+}
+```
+
+- `path`: file path being retrieved from
+- `data`: pre-read content (nil when the wrapping chunker is `FileChunker`-only — the random-access chunker must read the file itself)
+- `customData`: pointer to a per-file scratch slot. First call: `*customData == nil`. The chunker lazily populates it (e.g. build a line-offset table) and reuses across subsequent calls. The slot's lifetime is tied to the enclosing `cachedFile` (or the single `DB.GetChunks` invocation) — it garbage collects when the owner goes away.
+- `chunk`: pointer to a Chunk with `Range` pre-filled (from the F record's Location) and `Attrs` pre-filled (from the C record's stored attributes). The chunker must fill `Content`. It may replace `Attrs` with its own derivation if it wants; otherwise the stored Attrs remain authoritative. The chunker may also *consume* stored Attrs as retrieval hints — e.g. a stored "page-offset" Attr lets a PDF chunker jump directly.
+
+## Dispatch
+
+`ChunkCache.ChunkTextWithId`, `ChunkCache.GetChunks`, and `DB.GetChunks` check whether the resolved chunker is a `RandomAccessChunker`. If yes, they take the fast path. If no, they fall back to the existing streaming path (`Chunker.Chunks` / `FileChunker.FileChunks` yielding from the start).
+
+## Built-in chunkers
+
+All four built-in chunkers (`LineChunk`, `MarkdownChunkFunc`, `BracketChunker`, `IndentChunker`) produce line-range labels as output. Their fast path is identical: `customData` stores a `[]int` line-offset table, incrementally extended as needed. Given `"startLine-endLine"`, the chunker slices `data[offsets[startLine-1]:offsets[endLine]]`. No depth or indent state is needed because the stored range label already identifies the byte region.
+
+## Removal of ChunkTexter
+
+The earlier `ChunkTexter` interface — content-only retrieval via `ChunkText(path, content, rangeLabel) ([]byte, bool)` — is removed. It was defined but never dispatched to by any production code path. `RandomAccessChunker` supersedes it entirely: the new interface returns a full Chunk (not just content), supports per-file scratch state, and uses stored Attrs as authoritative metadata.
+
+# ChunkCache API changes
+
+`ChunkCache` is extended to support both range-based and chunkID-based retrieval, and its positional indexing changes shape to support random-access population.
+
+## API
+
+```go
+// Full-window retrieval. Same contract as DB.GetChunks, cached.
+func (cc *ChunkCache) GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)
+
+// Fast-path single-chunk retrieval. Callers that already have a chunkID
+// (e.g. from SearchResult) skip the range→chunkID lookup.
+func (cc *ChunkCache) ChunkTextWithId(fpath string, chunkID uint64) ([]byte, bool)
+
+// Convenience wrapper for range-based callers. Resolves chunkID from
+// the F record's Location list, delegates to ChunkTextWithId.
+func (cc *ChunkCache) ChunkText(fpath, rangeLabel string) ([]byte, bool)
+```
+
+## cachedFile shape
+
+The per-file cache entry gains positional access and random-access scratch:
+
+- `fileChunks []FileChunkEntry` — positional chunk list from `frec.Chunks`. Populated at `ensureFile` time. Used by `GetChunks` for neighbor window resolution and by `ChunkTextWithId` for C record lookup.
+- `rangeIds map[string]uint64` — Location → ChunkID, O(1) lookup for `ChunkText(range)`. Derived from `fileChunks` at `ensureFile` time.
+- `chunks []cachedChunk` — access-order (chronological) storage. When the fast path fills chunks out of positional order, they land here in insertion order. Positional meaning is provided by `fileChunks` + `byRange`, not by slice index.
+- `byRange map[string]int` — Location → index into `chunks`. Primary lookup for cached content.
+- `customData any` — per-file scratch for `RandomAccessChunker`. Nil until the chunker's first GetChunk call on this file.
+
+## GetChunks behavior
+
+1. `ensureFile` populates `fileChunks`, `rangeIds`, allocates empty `chunks`/`byRange`/`customData`.
+2. Locate `targetPos`: positional index of `targetRange` in `fileChunks`.
+3. Compute window `lo, hi` around `targetPos`, clamped to bounds.
+4. For each `i` in `[lo, hi]`: get `fileChunks[i].Location` and `fileChunks[i].ChunkID`. If `byRange[Location]` hit, use cached content. Miss: read C record by ChunkID, pre-fill Chunk, call `GetChunk` (fast path) or fall back to the streaming path. Store result in `chunks` + `byRange`.
+5. Assemble `[]ChunkResult` in positional order.
+
+## ChunkTextWithId / ChunkText behavior
+
+1. `ensureFile` as above.
+2. `ChunkText(range)`: resolve `chunkID := rangeIds[range]`, delegate to `ChunkTextWithId`.
+3. `ChunkTextWithId(chunkID)`: find positional entry in `fileChunks` by matching ChunkID (small N, linear scan). Check `byRange[Location]` — hit: return content. Miss: read C record, pre-fill Chunk, dispatch fast path or streaming path, store, return.
+
+## Caching strategy
+
+- **First access to a file:** resolve path → fileid via N records, read F record for chunk list and strategy, snapshot `fileChunks` + `rangeIds`, resolve Chunker. For `Chunker` backends, read file content into `data`. For `FileChunker`-only backends, `data` stays nil.
+- **Fast path (RandomAccessChunker):** C record read → pre-fill Chunk → GetChunk fills Content → deep-copy into `chunks` + `byRange`.
+- **Streaming path (non-RandomAccessChunker):** `ChunkTextWithId` runs `Chunks`/`FileChunks` from the start, deep-copying each chunk into `chunks` + `byRange`, stopping when the target range is found. `GetChunks` may run the full stream.
+- **Copy semantics:** deep-copy Range, Content, and Attrs on store. Downstream consumers get stable references.
+
 ## Backward compatibility
 
-- `Chunker` interface loses `ChunkText` — this is a breaking change to the interface definition
-- All existing concrete chunkers (BracketChunker, IndentChunker, FuncChunker, MarkdownChunkFunc via FuncChunker) already implement both methods — they satisfy both `Chunker` and `ChunkTexter` with no code changes
-- `ChunkFunc` type signature is unchanged
-- `FuncChunker` implements both `Chunker` and `ChunkTexter`
-- External chunkers via `RunChunkerFunc` produce a `ChunkFunc` wrapped in `FuncChunker` — unchanged
-- Callers that type-assert to `Chunker` and call `ChunkText` must update to assert `ChunkTexter` instead
+- `ChunkTexter` interface removed — no production code path dispatched to it. Tests updated.
+- `ChunkText` method on `Chunker` (via `BracketChunker.ChunkText`, `IndentChunker.ChunkText`, `FuncChunker.ChunkText`) removed.
+- `ChunkCache.ChunkText(fpath, rangeLabel)` signature unchanged — its implementation now delegates to `ChunkTextWithId`.
+- `ChunkCache.GetChunks` signature unchanged — its implementation uses the new access-order storage.
+- Callers that previously type-asserted to `ChunkTexter` must remove or migrate to `RandomAccessChunker`.
+
+# Remove File with Callback
+
+When microfts2 removes a file, some chunks become orphaned (no remaining file references). Callers that maintain their own LMDB records keyed by chunkid — in the same env, different subdatabase — need a hook to clean up those records transactionally. Without this, callers must track chunk→file mappings externally or accept stale records.
+
+## Design
+
+`RemoveFileWithCallback` wraps `RemoveFile` with a caller-supplied callback that fires inside the same write transaction, after orphaned chunks are identified and cleaned up from microfts2's records but before the transaction commits.
+
+```go
+// RemoveCallback receives the LMDB write transaction and the list of
+// chunk IDs that were orphaned (deleted from the index) during removal.
+// Returning a non-nil error aborts the entire transaction.
+type RemoveCallback func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error
+
+func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
+```
+
+- `fn` receives the raw `*lmdb.Txn` and a slice of orphaned chunkids — chunks that were fully removed from the index because the removed file was their last reference
+- Chunks still referenced by other files (dedup survivors) are not included — their C records were updated but not deleted
+- The callback runs inside the write transaction — `fn` can read/write any subdatabase in the same env
+- If `fn` returns a non-nil error, the entire transaction aborts — both microfts2's removals and the caller's changes roll back atomically
+- If `fn` is nil, behavior is identical to `RemoveFile`
+- No orphaned chunks (all chunks shared with other files) → `fn` is called with an empty slice
+- Cache invalidation (pathCache, pathToID) happens after the transaction commits, same as `RemoveFile`
+
+# Reindex File with Callback
+
+Same pattern as `RemoveFileWithCallback`, but for reindex. Reindexing is a remove-then-add in one transaction — the callback receives both orphaned chunk IDs from the old indexing and the new chunk IDs from re-indexing, so the caller can clean up stale records and create new ones atomically.
+
+## Design
+
+`ReindexWithCallback` wraps `Reindex` with a caller-supplied callback that fires inside the write transaction, after both the remove and add steps complete but before the transaction commits.
+
+```go
+// ReindexCallback receives the LMDB write transaction, the chunk IDs
+// orphaned during removal of the old indexing, and the chunk IDs
+// present in the newly re-indexed file.
+// Returning a non-nil error aborts the entire transaction.
+type ReindexCallback func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error
+
+func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
+```
+
+- `orphanedChunkIDs`: chunks fully removed from the index because the old file was their last reference (same semantics as `RemoveCallback`)
+- `newChunkIDs`: all chunk IDs in the re-indexed file, in chunk-list order — includes dedup hits (chunks shared with other files), not just genuinely new allocations. The caller needs every chunk ID to create its own per-chunk records
+- The callback runs inside the write transaction — `fn` can read/write any subdatabase in the same env
+- If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
+- If `fn` is nil, behavior is identical to `Reindex`
+- Cache invalidation (pathCache, pathToID) happens after the transaction commits, same as `Reindex`
 

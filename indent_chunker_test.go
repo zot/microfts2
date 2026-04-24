@@ -152,15 +152,6 @@ def b():
 	if len(ranges) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(ranges))
 	}
-
-	ct := ic.(ChunkTexter)
-	text, ok := ct.ChunkText("test.py", []byte(src), ranges[1])
-	if !ok {
-		t.Fatal("ChunkText returned false")
-	}
-	if len(text) == 0 {
-		t.Error("ChunkText returned empty")
-	}
 }
 
 func TestIndentChunkerEmpty(t *testing.T) {

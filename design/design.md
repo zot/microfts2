@@ -73,4 +73,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [ ] O12: SearchOption enumeration not fully anchored in requirements — WithOnly and WithExcept exist in code without spec/requirement coverage; audit all SearchOptions against requirements
 - [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks
 - [x] O14: R417: Bigram OR-union candidate set size unbounded — monitor performance on large corpora, add filtering if needed
-- [x] O15: resolveChunkText and chunkTextByRangeFile are defined but not yet called — will be needed when a FileChunker is registered
+- [x] O15: ~~resolveChunkText and chunkTextByRangeFile defined but not called~~ — resolved by removing ChunkTexter entirely; RandomAccessChunker (R524) supersedes it

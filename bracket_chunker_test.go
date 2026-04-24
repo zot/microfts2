@@ -229,48 +229,6 @@ func TestBracketChunkerMultiLineParams(t *testing.T) {
 	}
 }
 
-func TestBracketChunkerChunkText(t *testing.T) {
-	// R324: ChunkText retrieves specific range
-	src := `package main
-
-func a() {
-	return
-}
-
-func b() {
-	return
-}
-`
-	bc := BracketChunker(LangGo)
-
-	// Get all chunks to find the ranges
-	var ranges []string
-	bc.Chunks("test.go", []byte(src), func(c Chunk) bool {
-		ranges = append(ranges, string(c.Range))
-		return true
-	})
-
-	if len(ranges) < 2 {
-		t.Fatalf("expected at least 2 chunks, got %d", len(ranges))
-	}
-
-	// Retrieve the second chunk by its range label
-	ct := bc.(ChunkTexter)
-	text, ok := ct.ChunkText("test.go", []byte(src), ranges[1])
-	if !ok {
-		t.Fatal("ChunkText returned false for existing range")
-	}
-	if len(text) == 0 {
-		t.Error("ChunkText returned empty content")
-	}
-
-	// Non-existent range
-	_, ok = ct.ChunkText("test.go", []byte(src), "999-999")
-	if ok {
-		t.Error("ChunkText returned true for non-existent range")
-	}
-}
-
 func TestBracketChunkerEmpty(t *testing.T) {
 	bc := BracketChunker(LangGo)
 	var chunks []Chunk
