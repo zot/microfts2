@@ -95,7 +95,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 |--------|------------------------|---------------------------------------|------------------------------------------------------------------|
 | I      | name: str              | empty (value encoded in key)          | Config settings, data-in-key pattern                             |
 | H      | hash: 32               | chunkid: varint                       | Content hash → chunkid lookup                                    |
-| C      | chunkid: varint        | hash + contentLen + trigrams + tokens + fileids | Per-chunk: all analysis data                                     |
+| C      | chunkid: varint        | hash + contentLen + trigrams + tokens + fileids | Per-chunk: all analysis data                           |
 | F      | fileid: varint         | metadata + names + chunks + token bag | Per-file: staleness info, ordered chunk list, file-level scoring |
 | N      | chain-byte + name: str | (varies by chain-byte)                | Filename → fileid mapping via key chains                         |
 | T      | trigram: 3             | chunkid: varint...                    | Trigram inverted index                                           |
@@ -415,6 +415,12 @@ func (c *CRecord) DB() *DB
 
 // Convenience navigation — passes self as TxnHolder.
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error)
+
+// ReadCRecord fetches a CRecord by chunkID inside an existing txn.
+// The returned CRecord has db/txn attached so callers can use Txn(), DB(),
+// and FileRecord(fileid) on the result. Must be called inside a View or
+// Update txn — the txn is part of the CRecord and outlives the call.
+func (db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
 type FRecord struct {

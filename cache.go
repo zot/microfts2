@@ -197,7 +197,7 @@ func (cf *cachedFile) lookupLocation(chunkID uint64) (string, bool) {
 func (cc *ChunkCache) retrieveFast(cf *cachedFile, chunkID uint64, loc string, ra RandomAccessChunker) bool {
 	var attrs []Pair
 	err := cc.db.env.View(func(txn *lmdb.Txn) error {
-		crec, err := cc.db.readCRecord(txn, chunkID)
+		crec, err := cc.db.ReadCRecord(txn, chunkID)
 		if err != nil {
 			return err
 		}
@@ -237,7 +237,7 @@ func (cc *ChunkCache) populateFastWindow(cf *cachedFile, ra RandomAccessChunker,
 	attrsByID := make(map[uint64][]Pair, len(pending))
 	err := cc.db.env.View(func(txn *lmdb.Txn) error {
 		for _, t := range pending {
-			crec, err := cc.db.readCRecord(txn, t.chunkID)
+			crec, err := cc.db.ReadCRecord(txn, t.chunkID)
 			if err != nil {
 				return fmt.Errorf("read C record %d: %w", t.chunkID, err)
 			}

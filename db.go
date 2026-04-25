@@ -3186,7 +3186,7 @@ func (db *DB) getChunksFast(fpath string, frec FRecord, lo, hi int, chunker any,
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		for i := lo; i <= hi; i++ {
 			cid := frec.Chunks[i].ChunkID
-			crec, err := db.readCRecord(txn, cid)
+			crec, err := db.ReadCRecord(txn, cid)
 			if err != nil {
 				return fmt.Errorf("read C record for chunkid %d: %w", cid, err)
 			}
@@ -3354,16 +3354,23 @@ func (db *DB) AddStrategy(name, cmd string) error {
 	})
 }
 
-// readCRecord fetches and unmarshals a C record by chunkID.
-// Must be called inside an LMDB View or Update txn.
-func (db *DB) readCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error) {
+// CRC: crc-DB.md | R571
+// ReadCRecord fetches and unmarshals a C record by chunkID, attaching db/txn
+// to the result so Txn(), DB(), and FileRecord(fileid) work on it. Must be
+// called inside an LMDB View or Update txn — the txn is part of the CRecord.
+func (db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error) {
 	cVal, err := txn.Get(db.dbi, makeCKey(chunkID))
 	if err != nil {
 		return CRecord{}, err
 	}
 	buf := make([]byte, len(cVal))
 	copy(buf, cVal)
-	return UnmarshalCValue(buf)
+	crec, err := UnmarshalCValue(buf)
+	if err != nil {
+		return CRecord{}, err
+	}
+	crec.attach(db, txn)
+	return crec, nil
 }
 
 // CRC: crc-DB.md | R293, R518, R519, R533

@@ -139,6 +139,7 @@
 - **R265:** CRecord implements `TxnHolder` via its `Txn()` accessor; internal DB methods accept `TxnHolder` instead of raw `*lmdb.Txn`
 - **R266:** `CRecord.FileRecord(fileid)` passes self as `TxnHolder` to internal read methods — no txn extraction needed
 - **R267:** (inferred) `txnWrap` struct wraps raw `*lmdb.Txn` from View/Update blocks into a `TxnHolder`
+- **R571:** `(db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)` — public power-user accessor; fetches a CRecord by chunkID within an existing txn and attaches db/txn to the returned record so `Txn()`, `DB()`, and `FileRecord(fileid)` work on the result
 
 ## Feature: Data-in-Key Pattern
 **Source:** specs/main.md
