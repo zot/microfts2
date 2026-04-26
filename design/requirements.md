@@ -859,3 +859,39 @@
 - **R560:** If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
 - **R561:** If `fn` is nil, behavior is identical to `Reindex`
 - **R562:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `Reindex`
+
+## Feature: Chunk Locator
+**Source:** specs/main.md
+
+- **R587:** `Chunk` struct gains a `Locator []byte` field: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }`
+- **R588:** `Locator` is a reusable buffer like `Range` and `Content` — the caller must copy before the next yield
+- **R589:** `Locator` is opaque to microfts2; only the chunker that produced it interprets it
+- **R590:** `Locator` is per-occurrence (stored in the F record's chunk list), not per-content (Attrs remain on the C record)
+- **R591:** `Locator` may be nil when the chunker does not need fast random-access retrieval or append-merge resume
+- **R592:** F record per-chunk entry shape becomes `[chunkid: varint] [location: bytes] [locator: bytes]` — both `location` and `locator` are length-prefixed byte strings (either may be empty)
+- **R593:** Tree-format chunkers (markdown, bracket, indent) encode their resume state in the locator: end-of-file shape (leaf vs inner-with-absorbed-leaf) plus structural depth (heading level, indent depth, bracket depth)
+- **R594:** Built-in line-oriented chunkers may use the locator to encode byte-range coordinates so random-access retrieval avoids rebuilding line-offset tables
+
+## Feature: C Record Fileid Refcounts
+**Source:** specs/main.md
+
+- **R595:** C record fileids list shape becomes `[n-fileids: varint] [[fileid: varint] [count: varint]]...` — paralleling the trigram and token shape
+- **R596:** Add-occurrence: increment count for the fileid in the chunk's C record (insert a new entry with count=1 if the fileid is absent)
+- **R597:** Drop-occurrence: decrement count for the fileid; remove the fileid entry when count reaches 0
+- **R598:** When the C record's fileids list is empty after a drop, cascade orphan cleanup: delete C, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token), delete H record
+- **R599:** Removing a whole file via `RemoveFile` drops all of that fileid's occurrences at once (single decrement-to-zero per chunkid in that file's chunk list)
+- **R600:** New chunks (first occurrence) write their C record with `[fileid, count=1]`
+
+## Feature: AppendAwareChunker
+**Source:** specs/main.md
+
+- **R601:** Optional `AppendAwareChunker` interface: `AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (replacedLast bool, err error)`
+- **R602:** `lastLocator` is the locator of the file's last existing chunk (nil if the file has no chunks yet)
+- **R603:** The chunker yields the chunks that replace the trailing region — zero or more existing chunks are dropped, one or more new chunks are emitted
+- **R604:** `replacedLast=true` indicates the last existing chunk is being replaced; `false` means the new chunks are simply appended
+- **R605:** `DB.AppendChunks` dispatches to `AppendAwareChunker.AppendChunks` when the registered chunker implements the interface
+- **R606:** Chunkers that do not implement `AppendAwareChunker` get the default behavior: chunk `newBytes` alone and append the resulting chunks to the F record without boundary fixup
+- **R607:** Built-in tree-structured chunkers (line, markdown, bracket, indent) implement `AppendAwareChunker` to handle their boundary cases correctly
+- **R608:** When `replacedLast` is true, `DB.AppendChunks` drops the F record's last chunk entry, decrements the dropped chunkid's fileid count in its C record, and runs the orphan cascade if that was the last reference (same shared cleanup helper as `RemoveFile`)
+- **R609:** The drop-and-replace cleanup is a shared internal helper used by both `RemoveFile`'s per-chunk path and the append-merge drop path
+- **R610:** Current scope: `AppendAwareChunker` may replace at most one chunk (the last); replacing the last K is reserved for a future extension

@@ -253,7 +253,8 @@ func emitIndentChunks(content []byte, lines []indentLine, groups []groupSpan, yi
 			return true
 		}
 		r := fmt.Sprintf("%d-%d", startLine, endLine)
-		return yield(Chunk{Range: []byte(r), Content: content[startByte:endByte]})
+		loc := EncodeByteRangeLocator(startByte, endByte)
+		return yield(Chunk{Range: []byte(r), Locator: loc, Content: content[startByte:endByte]})
 	}
 
 	for i, li := range lines {

@@ -44,7 +44,7 @@ type overlayChunk struct {
 	trigrams   []TrigramEntry
 	tokens     []TokenEntry
 	attrs      []Pair
-	fileIDs    []uint64
+	fileIDs    []FileIDCount // refcounted, mirrors C-record shape // R595
 }
 
 func newOverlay() *overlay {
@@ -151,6 +151,7 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 		ofile.chunks = append(ofile.chunks, FileChunkEntry{
 			ChunkID:  chunkID,
 			Location: cc.rangeStr,
+			Locator:  cc.locator,
 		})
 		if fileTokMap == nil {
 			fileTokMap = make(map[string]int)
@@ -237,6 +238,7 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 		ofile.chunks = append(ofile.chunks, FileChunkEntry{
 			ChunkID:  chunkID,
 			Location: cc.rangeStr,
+			Locator:  cc.locator,
 		})
 		mergeTokenBag(fileTokMap, cc.tokens)
 	}
@@ -265,19 +267,22 @@ func (o *overlay) removeFile(path string) error {
 // removeFileChunksLocked removes a file's association from all its chunks,
 // cleaning up orphaned chunks. Must hold write lock.
 func (o *overlay) removeFileChunksLocked(ofile *overlayFile) {
+	seen := make(map[uint64]bool)
 	for _, fce := range ofile.chunks {
+		if seen[fce.ChunkID] {
+			continue
+		}
+		seen[fce.ChunkID] = true
 		oc, ok := o.chunks[fce.ChunkID]
 		if !ok {
 			continue
 		}
-		// Remove this fileID from the chunk.
-		remaining := make([]uint64, 0, len(oc.fileIDs))
-		for _, fid := range oc.fileIDs {
-			if fid != ofile.fileID {
-				remaining = append(remaining, fid)
-			}
+		var removed bool
+		oc.fileIDs, removed = removeFileID(oc.fileIDs, ofile.fileID)
+		if !removed {
+			continue
 		}
-		if len(remaining) == 0 {
+		if len(oc.fileIDs) == 0 {
 			// Orphaned — delete chunk and clean up indices.
 			for _, te := range oc.trigrams {
 				if set, ok := o.trigrams[te.Trigram]; ok {
@@ -300,8 +305,6 @@ func (o *overlay) removeFileChunksLocked(ofile *overlayFile) {
 			delete(o.chunks, fce.ChunkID)
 			o.totalChunks--
 			o.totalTokens -= len(oc.tokens)
-		} else {
-			oc.fileIDs = remaining
 		}
 	}
 }
@@ -310,7 +313,7 @@ func (o *overlay) removeFileChunksLocked(ofile *overlayFile) {
 func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 	if existing, ok := o.hashes[cc.hash]; ok {
 		oc := o.chunks[existing]
-		oc.fileIDs = append(oc.fileIDs, fileID)
+		oc.fileIDs = incFileID(oc.fileIDs, fileID)
 		return existing
 	}
 
@@ -347,7 +350,7 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 		trigrams:   trigEntries,
 		tokens:     append([]TokenEntry(nil), cc.tokens...),
 		attrs:      CopyPairs(cc.attrs),
-		fileIDs:    []uint64{fileID},
+		fileIDs:    []FileIDCount{{FileID: fileID, Count: 1}},
 	}
 	o.chunks[chunkID] = oc
 	o.hashes[cc.hash] = chunkID
@@ -467,7 +470,8 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 			}
 		}
 
-		for _, fid := range oc.fileIDs {
+		for _, fc := range oc.fileIDs {
+			fid := fc.FileID
 			if cfg.onlyIDs != nil {
 				if _, ok := cfg.onlyIDs[fid]; !ok {
 					continue
@@ -522,7 +526,8 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 		}
 
 		score := 1.0 // regex search scores all candidates equally
-		for _, fid := range oc.fileIDs {
+		for _, fc := range oc.fileIDs {
+			fid := fc.FileID
 			if cfg.onlyIDs != nil {
 				if _, ok := cfg.onlyIDs[fid]; !ok {
 					continue

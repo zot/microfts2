@@ -32,10 +32,21 @@ type TokenEntry struct {
 	Count int
 }
 
-// FileChunkEntry pairs a chunkid with its location label (opaque range string from chunker).
+// FileChunkEntry is a per-occurrence entry in the F record's chunk list.
+// Location is the chunker's Range (human display); Locator is the chunker's Locator
+// (per-occurrence opaque bytes for fast retrieval and append-merge resume).
+// Both are length-prefixed in the wire format and either may be empty.
+// CRC: crc-DB.md | R592
 type FileChunkEntry struct {
 	ChunkID  uint64
 	Location string
+	Locator  []byte
+}
+
+// FileIDCount records how many times a chunk occurs in a file. // CRC: crc-DB.md | R595
+type FileIDCount struct {
+	FileID uint64
+	Count  uint64
 }
 
 // CRecord is the per-chunk record. Self-describing: everything needed
@@ -48,9 +59,58 @@ type CRecord struct {
 	Trigrams   []TrigramEntry
 	Tokens     []TokenEntry
 	Attrs      []Pair
-	FileIDs    []uint64
+	FileIDs    []FileIDCount // refcounted: per-fileid occurrence count // CRC: crc-DB.md | R595
 	db         *DB
 	txn        *lmdb.Txn
+}
+
+// FileIDCountFor returns the occurrence count for the given fileid, or 0 if absent.
+func (c *CRecord) FileIDCountFor(fileid uint64) uint64 { return fileIDCount(c.FileIDs, fileid) }
+
+// fileIDCount looks up fileid's count in a refcounted FileIDs slice.
+func fileIDCount(s []FileIDCount, fileid uint64) uint64 {
+	for _, fc := range s {
+		if fc.FileID == fileid {
+			return fc.Count
+		}
+	}
+	return 0
+}
+
+// incFileID increments fileid's count (insert with count=1 if absent).
+func incFileID(s []FileIDCount, fileid uint64) []FileIDCount {
+	for i := range s {
+		if s[i].FileID == fileid {
+			s[i].Count++
+			return s
+		}
+	}
+	return append(s, FileIDCount{FileID: fileid, Count: 1})
+}
+
+// decFileID removes one occurrence of fileid; returns the slice and whether
+// the entry was removed entirely (count hit 0).
+func decFileID(s []FileIDCount, fileid uint64) ([]FileIDCount, bool) {
+	for i := range s {
+		if s[i].FileID == fileid {
+			if s[i].Count > 1 {
+				s[i].Count--
+				return s, false
+			}
+			return append(s[:i], s[i+1:]...), true
+		}
+	}
+	return s, false
+}
+
+// removeFileID drops all occurrences of fileid in one shot.
+func removeFileID(s []FileIDCount, fileid uint64) ([]FileIDCount, bool) {
+	for i := range s {
+		if s[i].FileID == fileid {
+			return append(s[:i], s[i+1:]...), true
+		}
+	}
+	return s, false
 }
 
 // attach sets the db and txn context for a CRecord.
@@ -68,6 +128,23 @@ func (c *CRecord) DB() *DB { return c.db }
 // FileRecord navigates to an F record within the same transaction.
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error) {
 	return c.db.readFRecord(c, fileid)
+}
+
+// IncFileID adds an occurrence for fileid. // CRC: crc-DB.md | R596
+func (c *CRecord) IncFileID(fileid uint64) { c.FileIDs = incFileID(c.FileIDs, fileid) }
+
+// DecFileID removes one occurrence; returns true when the entry was removed entirely. // CRC: crc-DB.md | R597
+func (c *CRecord) DecFileID(fileid uint64) bool {
+	var removed bool
+	c.FileIDs, removed = decFileID(c.FileIDs, fileid)
+	return removed
+}
+
+// RemoveFileID drops all occurrences of fileid in one shot. // CRC: crc-DB.md | R599
+func (c *CRecord) RemoveFileID(fileid uint64) bool {
+	var removed bool
+	c.FileIDs, removed = removeFileID(c.FileIDs, fileid)
+	return removed
 }
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
@@ -142,10 +219,9 @@ func readBytes(buf []byte) ([]byte, int) {
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
-// R497: hash + contentLen + trigrams + tokens + attrs + fileids
+// hash + contentLen + trigrams + tokens + attrs + [fileid, count] pairs // R497, R595
 func (c *CRecord) MarshalValue() []byte {
-	// Estimate size: hash(32) + contentLen + trigrams + tokens + attrs + fileids
-	size := 32 // hash
+	size := 32                    // hash
 	size += binary.MaxVarintLen64 // contentLen (R495)
 	size += binary.MaxVarintLen64 // n-trigrams
 	size += len(c.Trigrams) * (3 + binary.MaxVarintLen64)
@@ -157,20 +233,17 @@ func (c *CRecord) MarshalValue() []byte {
 	for _, p := range c.Attrs {
 		size += binary.MaxVarintLen64 + len(p.Key) + binary.MaxVarintLen64 + len(p.Value)
 	}
-	size += binary.MaxVarintLen64 // n-fileids
-	size += len(c.FileIDs) * binary.MaxVarintLen64
+	size += binary.MaxVarintLen64                             // n-fileids
+	size += len(c.FileIDs) * (2 * binary.MaxVarintLen64)      // [fileid, count] pairs
 
 	buf := make([]byte, size)
 	off := 0
 
-	// Hash
 	copy(buf[off:], c.Hash[:])
 	off += 32
 
-	// ContentLen (R495)
 	off += putUvarint(buf[off:], uint64(c.ContentLen))
 
-	// Trigrams
 	off += putUvarint(buf[off:], uint64(len(c.Trigrams)))
 	for _, te := range c.Trigrams {
 		buf[off] = byte(te.Trigram >> 16)
@@ -180,24 +253,23 @@ func (c *CRecord) MarshalValue() []byte {
 		off += putUvarint(buf[off:], uint64(te.Count))
 	}
 
-	// Tokens
 	off += putUvarint(buf[off:], uint64(len(c.Tokens)))
 	for _, te := range c.Tokens {
 		off += putUvarint(buf[off:], uint64(te.Count))
 		off += putString(buf[off:], te.Token)
 	}
 
-	// Attrs
 	off += putUvarint(buf[off:], uint64(len(c.Attrs)))
 	for _, p := range c.Attrs {
 		off += putBytes(buf[off:], p.Key)
 		off += putBytes(buf[off:], p.Value)
 	}
 
-	// FileIDs
+	// FileIDs as [fileid, count] pairs (R595)
 	off += putUvarint(buf[off:], uint64(len(c.FileIDs)))
-	for _, fid := range c.FileIDs {
-		off += putUvarint(buf[off:], fid)
+	for _, fc := range c.FileIDs {
+		off += putUvarint(buf[off:], fc.FileID)
+		off += putUvarint(buf[off:], fc.Count)
 	}
 
 	return buf[:off]
@@ -290,19 +362,25 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 		c.Attrs[i] = Pair{Key: k, Value: v}
 	}
 
-	// FileIDs
+	// FileIDs as [fileid, count] pairs (R595)
 	nFIDs, n := readUvarint(data[off:])
 	if n <= 0 {
 		return c, fmt.Errorf("CRecord: bad n-fileids")
 	}
 	off += n
-	c.FileIDs = make([]uint64, nFIDs)
+	c.FileIDs = make([]FileIDCount, nFIDs)
 	for i := range c.FileIDs {
 		fid, n := readUvarint(data[off:])
 		if n <= 0 {
 			return c, fmt.Errorf("CRecord: bad fileid")
 		}
-		c.FileIDs[i] = fid
+		c.FileIDs[i].FileID = fid
+		off += n
+		cnt, n := readUvarint(data[off:])
+		if n <= 0 {
+			return c, fmt.Errorf("CRecord: bad fileid count")
+		}
+		c.FileIDs[i].Count = cnt
 		off += n
 	}
 
@@ -312,17 +390,21 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 // --- FRecord marshal/unmarshal ---
 
 // MarshalValue encodes the FRecord value (everything except the key prefix and fileid).
+// Chunk entries are [chunkid, location, locator] — both location and locator are
+// length-prefixed bytes (either may be empty). // R592
 func (f *FRecord) MarshalValue() []byte {
-	size := 8 + 32 // modTime + contentHash
-	size += binary.MaxVarintLen64 // fileLength
+	size := 8 + 32                                  // modTime + contentHash
+	size += binary.MaxVarintLen64                   // fileLength
 	size += binary.MaxVarintLen64 + len(f.Strategy) // strategy
-	size += binary.MaxVarintLen64 // filecount
+	size += binary.MaxVarintLen64                   // filecount
 	for _, name := range f.Names {
 		size += binary.MaxVarintLen64 + len(name)
 	}
 	size += binary.MaxVarintLen64 // chunkcount
 	for _, ch := range f.Chunks {
-		size += binary.MaxVarintLen64 + binary.MaxVarintLen64 + len(ch.Location)
+		size += binary.MaxVarintLen64                       // chunkid
+		size += binary.MaxVarintLen64 + len(ch.Location)    // location
+		size += binary.MaxVarintLen64 + len(ch.Locator)     // locator
 	}
 	size += binary.MaxVarintLen64 // tokencount
 	for _, t := range f.Tokens {
@@ -332,34 +414,29 @@ func (f *FRecord) MarshalValue() []byte {
 	buf := make([]byte, size)
 	off := 0
 
-	// ModTime (fixed 8 bytes, big-endian)
 	binary.BigEndian.PutUint64(buf[off:], uint64(f.ModTime))
 	off += 8
 
-	// ContentHash (fixed 32 bytes)
 	copy(buf[off:], f.ContentHash[:])
 	off += 32
 
-	// FileLength
 	off += putUvarint(buf[off:], uint64(f.FileLength))
 
-	// Strategy
 	off += putString(buf[off:], f.Strategy)
 
-	// Names
 	off += putUvarint(buf[off:], uint64(len(f.Names)))
 	for _, name := range f.Names {
 		off += putString(buf[off:], name)
 	}
 
-	// Chunks
+	// Chunks: [chunkid, location, locator]
 	off += putUvarint(buf[off:], uint64(len(f.Chunks)))
 	for _, ch := range f.Chunks {
 		off += putUvarint(buf[off:], ch.ChunkID)
 		off += putString(buf[off:], ch.Location)
+		off += putBytes(buf[off:], ch.Locator)
 	}
 
-	// Tokens
 	off += putUvarint(buf[off:], uint64(len(f.Tokens)))
 	for _, t := range f.Tokens {
 		off += putString(buf[off:], t.Token)
@@ -424,7 +501,7 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 		return f, err
 	}
 
-	// Chunks
+	// Chunks: [chunkid, location, locator] // R592
 	nChunks, n := readUvarint(data[off:])
 	if n <= 0 {
 		return f, fmt.Errorf("FRecord: bad chunkcount")
@@ -443,6 +520,12 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 			return f, fmt.Errorf("FRecord: bad location")
 		}
 		f.Chunks[i].Location = loc
+		off += n
+		locator, n := readBytes(data[off:])
+		if n == 0 {
+			return f, fmt.Errorf("FRecord: bad locator")
+		}
+		f.Chunks[i].Locator = locator
 		off += n
 	}
 

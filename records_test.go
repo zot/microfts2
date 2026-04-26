@@ -1,8 +1,11 @@
 package microfts2
 
 import (
+	"bytes"
 	"testing"
 )
+
+func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 
 func TestCRecordRoundtrip(t *testing.T) {
 	orig := CRecord{
@@ -20,7 +23,11 @@ func TestCRecordRoundtrip(t *testing.T) {
 			{Key: []byte("timestamp"), Value: []byte("1709900000")},
 			{Key: []byte("role"), Value: []byte("user")},
 		},
-		FileIDs: []uint64{1, 7, 42},
+		FileIDs: []FileIDCount{
+			{FileID: 1, Count: 1},
+			{FileID: 7, Count: 3},
+			{FileID: 42, Count: 1},
+		},
 	}
 	copy(orig.Hash[:], "abcdefghijklmnopqrstuvwxyz012345")
 
@@ -65,7 +72,7 @@ func TestCRecordRoundtrip(t *testing.T) {
 	}
 	for i := range orig.FileIDs {
 		if got.FileIDs[i] != orig.FileIDs[i] {
-			t.Errorf("FileID[%d]: got %d, want %d", i, got.FileIDs[i], orig.FileIDs[i])
+			t.Errorf("FileID[%d]: got %+v, want %+v", i, got.FileIDs[i], orig.FileIDs[i])
 		}
 	}
 }
@@ -83,6 +90,107 @@ func TestCRecordEmptyRoundtrip(t *testing.T) {
 	}
 }
 
+func TestCRecordFileIDIncDec(t *testing.T) {
+	c := CRecord{}
+	c.IncFileID(7)
+	c.IncFileID(7)
+	c.IncFileID(7)
+	c.IncFileID(42)
+	if got := c.FileIDCountFor(7); got != 3 {
+		t.Errorf("count for 7: got %d, want 3", got)
+	}
+	if got := c.FileIDCountFor(42); got != 1 {
+		t.Errorf("count for 42: got %d, want 1", got)
+	}
+
+	if removed := c.DecFileID(7); removed {
+		t.Errorf("DecFileID(7) at count 3: should not remove entry")
+	}
+	if got := c.FileIDCountFor(7); got != 2 {
+		t.Errorf("count for 7 after dec: got %d, want 2", got)
+	}
+
+	c.DecFileID(7)
+	if removed := c.DecFileID(7); !removed {
+		t.Errorf("DecFileID(7) at count 1: should remove entry")
+	}
+	if got := c.FileIDCountFor(7); got != 0 {
+		t.Errorf("count for 7 after final dec: got %d, want 0", got)
+	}
+	if len(c.FileIDs) != 1 {
+		t.Errorf("FileIDs length after removing 7: got %d, want 1", len(c.FileIDs))
+	}
+}
+
+func TestCRecordRefcountRoundtrip(t *testing.T) {
+	orig := CRecord{
+		ChunkID: 1,
+		FileIDs: []FileIDCount{
+			{FileID: 5, Count: 7},
+			{FileID: 99, Count: 2},
+		},
+	}
+	data := orig.MarshalValue()
+	got, err := UnmarshalCValue(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.FileIDs) != 2 {
+		t.Fatalf("FileIDs len: got %d, want 2", len(got.FileIDs))
+	}
+	for i, want := range orig.FileIDs {
+		if got.FileIDs[i] != want {
+			t.Errorf("FileIDs[%d]: got %+v, want %+v", i, got.FileIDs[i], want)
+		}
+	}
+}
+
+func TestFRecordLocatorRoundtrip(t *testing.T) {
+	orig := FRecord{
+		FileID:   1,
+		Strategy: "line",
+		Names:    []string{"/x/y.txt"},
+		Chunks: []FileChunkEntry{
+			{ChunkID: 10, Location: "1-1", Locator: []byte{0, 100}},
+			{ChunkID: 11, Location: "2-2", Locator: nil},
+			{ChunkID: 12, Location: "3-3", Locator: []byte("docx#para/47")},
+		},
+	}
+	data := orig.MarshalValue()
+	got, err := UnmarshalFValue(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Chunks) != 3 {
+		t.Fatalf("Chunks len: got %d, want 3", len(got.Chunks))
+	}
+	for i, want := range orig.Chunks {
+		if got.Chunks[i].ChunkID != want.ChunkID {
+			t.Errorf("Chunks[%d].ChunkID: got %d, want %d", i, got.Chunks[i].ChunkID, want.ChunkID)
+		}
+		if got.Chunks[i].Location != want.Location {
+			t.Errorf("Chunks[%d].Location: got %q, want %q", i, got.Chunks[i].Location, want.Location)
+		}
+		if !bytesEqual(got.Chunks[i].Locator, want.Locator) {
+			t.Errorf("Chunks[%d].Locator: got %v, want %v", i, got.Chunks[i].Locator, want.Locator)
+		}
+	}
+}
+
+func TestEncodeByteRangeLocator(t *testing.T) {
+	loc := EncodeByteRangeLocator(100, 250)
+	start, end, ok := DecodeByteRangeLocator(loc)
+	if !ok {
+		t.Fatal("decode failed")
+	}
+	if start != 100 || end != 250 {
+		t.Errorf("got %d-%d, want 100-250", start, end)
+	}
+	if _, _, ok := DecodeByteRangeLocator(nil); ok {
+		t.Error("expected ok=false for nil locator")
+	}
+}
+
 func TestFRecordRoundtrip(t *testing.T) {
 	orig := FRecord{
 		FileID:     99,
@@ -91,9 +199,9 @@ func TestFRecordRoundtrip(t *testing.T) {
 		Strategy:   "chunk-lines",
 		Names:      []string{"/home/user/file.txt", "/home/user/link.txt"},
 		Chunks: []FileChunkEntry{
-			{ChunkID: 1, Location: "1-10"},
+			{ChunkID: 1, Location: "1-10", Locator: []byte{0, 100}},
 			{ChunkID: 2, Location: "11-20"},
-			{ChunkID: 3, Location: "21-30"},
+			{ChunkID: 3, Location: "21-30", Locator: []byte("docx#para/3")},
 		},
 		Tokens: []TokenEntry{
 			{Token: "hello", Count: 7},
@@ -132,7 +240,9 @@ func TestFRecordRoundtrip(t *testing.T) {
 		t.Fatalf("Chunks len: got %d, want %d", len(got.Chunks), len(orig.Chunks))
 	}
 	for i := range orig.Chunks {
-		if got.Chunks[i] != orig.Chunks[i] {
+		if got.Chunks[i].ChunkID != orig.Chunks[i].ChunkID ||
+			got.Chunks[i].Location != orig.Chunks[i].Location ||
+			!bytesEqual(got.Chunks[i].Locator, orig.Chunks[i].Locator) {
 			t.Errorf("Chunk[%d]: got %+v, want %+v", i, got.Chunks[i], orig.Chunks[i])
 		}
 	}

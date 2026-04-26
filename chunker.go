@@ -3,6 +3,7 @@ package microfts2
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -17,13 +18,57 @@ type Pair struct {
 }
 
 // Chunk is a single chunk yielded by a Chunker.
-// Range is an opaque label (e.g. "1-10" for lines); Content is the chunk text.
-// Range and Content may be reused between yields — caller must copy if retaining.
-// Attrs is optional per-chunk metadata (nil means no attrs).
+// Range is the human-readable label used for CLI output (e.g. "1-10" for lines).
+// Locator is the chunker's per-occurrence opaque bytes used for fast random-access
+// retrieval and append-merge resume; nil if the chunker doesn't need it.
+// Content is the chunk text. Range, Locator, and Content are reusable buffers — the
+// caller must copy before the next yield. Attrs is optional per-chunk metadata
+// (per-content, lives on C record). // CRC: crc-Chunker.md | R587, R588, R589, R590, R591
 type Chunk struct {
 	Range   []byte
+	Locator []byte
 	Content []byte
 	Attrs   []Pair
+}
+
+// AppendAwareChunker is the optional interface a chunker implements to handle
+// append-merge boundary cases. Given the locator of the file's last existing
+// chunk (nil if none) and the new bytes being appended, the chunker yields
+// the chunks that replace the trailing region. replacedLast=true tells the
+// dispatcher to drop the F record's last entry and decrement that chunkid's
+// fileid count in its C record (cascading orphan cleanup as in RemoveFile).
+// Chunkers that don't implement this interface get the default behavior in
+// DB.AppendChunks: chunk newBytes alone and append. // CRC: crc-Chunker.md | R601, R602, R603, R604, R610
+type AppendAwareChunker interface {
+	AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (replacedLast bool, err error)
+}
+
+// EncodeByteRangeLocator encodes a byte range [start, end) as varint pairs.
+// Used by built-in line-oriented chunkers to populate Chunk.Locator so
+// random-access retrieval and append-merge can avoid line-offset table builds.
+// CRC: crc-Chunker.md | R594
+func EncodeByteRangeLocator(start, end int) []byte {
+	buf := make([]byte, 2*binary.MaxVarintLen64)
+	n := binary.PutUvarint(buf, uint64(start))
+	n += binary.PutUvarint(buf[n:], uint64(end))
+	return buf[:n]
+}
+
+// DecodeByteRangeLocator parses a locator written by EncodeByteRangeLocator.
+// Returns (start, end, ok). ok=false on malformed input. // CRC: crc-Chunker.md | R594
+func DecodeByteRangeLocator(loc []byte) (int, int, bool) {
+	if len(loc) == 0 {
+		return 0, 0, false
+	}
+	start, n := binary.Uvarint(loc)
+	if n <= 0 {
+		return 0, 0, false
+	}
+	end, m := binary.Uvarint(loc[n:])
+	if m <= 0 {
+		return 0, 0, false
+	}
+	return int(start), int(end), true
 }
 
 // PairGet returns the value for the first Pair matching key, or nil if not found.
@@ -211,7 +256,8 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 
 	emitMerge := func() bool {
 		r := fmt.Sprintf("%d-%d", mStartLine, mEndLine)
-		if !yield(Chunk{Range: []byte(r), Content: content[mStartByte:mEndByte]}) {
+		loc := EncodeByteRangeLocator(mStartByte, mEndByte)
+		if !yield(Chunk{Range: []byte(r), Locator: loc, Content: content[mStartByte:mEndByte]}) {
 			return false
 		}
 		merging = false
@@ -256,7 +302,8 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 		}
 
 		r := fmt.Sprintf("%d-%d", sl, el)
-		return yield(Chunk{Range: []byte(r), Content: content[sb:eb]})
+		loc := EncodeByteRangeLocator(sb, eb)
+		return yield(Chunk{Range: []byte(r), Locator: loc, Content: content[sb:eb]})
 	}
 
 	for pos < len(content) {

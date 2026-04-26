@@ -11,11 +11,12 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
   - `Chunker` interface with two methods:
     - `Chunks(path string, content []byte, yield func(Chunk) bool) error` — producer: yields chunks for indexing
     - `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retriever: extracts a single chunk's content by its range label
-  - `Chunk` struct: `{ Range []byte, Content []byte, Attrs []Pair }`
-    - Range and Content are reusable buffers — the caller must copy before the next yield
-    - Range has string semantics: opaque to microfts2, meaningful to the chunker and the user
+  - `Chunk` struct: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }`
+    - Range, Locator, and Content are reusable buffers — the caller must copy before the next yield
+    - Range has string semantics: opaque to microfts2, meaningful to the chunker and the user. Used for CLI/human display.
+    - Locator is opaque bytes, chunker-defined, used by the chunker for fast random-access retrieval and append-merge. Per-occurrence (lives in F record), not per-content. nil if the chunker doesn't need it.
     - Content is the text to be trigram-indexed for this chunk
-    - Attrs is optional per-chunk metadata (e.g. timestamp, role). Opaque to microfts2 — stored in C records and exposed to ChunkFilters. nil means no attrs.
+    - Attrs is optional per-chunk metadata (e.g. timestamp, role). Opaque to microfts2 — stored in C records and exposed to ChunkFilters. Per-content (lives on the C record). nil means no attrs.
   - `Pair` type: `{ Key []byte, Value []byte }` — opaque key-value pair. Allows duplicate keys. Mirrors the DB wire format.
   - `ChunkFunc` type preserved for convenience: `func(path string, content []byte, yield func(Chunk) bool) error`
   - `FuncChunker` adapter wraps a bare `ChunkFunc` into a `Chunker`:
@@ -109,11 +110,11 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 - `H` [hash: 32] -> [chunkid: varint]
   Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
 
-- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [fileid: varint]...
-  Per-chunk record. Contains everything known about the chunk: content hash, byte length of the chunk content, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk. Self-describing — all data needed for search, scoring, filtering, and removal. Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
+- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [[fileid: varint] [count: varint]]...
+  Per-chunk record. Contains everything known about the chunk: content hash, byte length of the chunk content, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk with per-file occurrence counts. Self-describing — all data needed for search, scoring, filtering, and removal. The `[fileid, count]` pair shape parallels the trigram/token shape: count is the number of times this chunk occurs in that file. Add-occurrence increments the count (or inserts with count=1 if absent); drop-occurrence decrements (count=0 removes the fileid entry; empty fileids list cascades the orphan cleanup). Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
 
-- `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [filecount: varint] [name: str]... [chunkcount: varint] [[chunkid: varint] [location: str]]... [tokencount: varint] [[token: str] [count: varint]]
-  Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name). Multiple names handle duplicate/copied files mapping to the same fileid. Ordered chunk list with opaque location labels (range strings from chunker). Aggregated token bag (union of all chunk tokens with summed counts) for file-level scoring without reading every chunk's C record.
+- `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [filecount: varint] [name: str]... [chunkcount: varint] [[chunkid: varint] [location: bytes] [locator: bytes]]... [tokencount: varint] [[token: str] [count: varint]]
+  Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name). Multiple names handle duplicate/copied files mapping to the same fileid. Ordered chunk list with two per-occurrence opaque labels: `location` (the chunker's Range — used for CLI/human display) and `locator` (the chunker's Locator — used for fast random-access retrieval and append-merge resume). Both are length-prefixed byte strings so they can be empty. Aggregated token bag (union of all chunk tokens with summed counts) for file-level scoring without reading every chunk's C record.
 
 - `N` [0-254] [name: str] -> empty — filename prefix chain key
 - `N` [255] [name: str] -> [[full-name: str] [fileid: varint]]... — final chain key; value has full filename + fileid
@@ -164,20 +165,22 @@ We add a file to the database with a chosen chunking strategy:
 - read file content, check utf8.Valid
 - check for existing F records via FinalKey — return ErrAlreadyIndexed if present
 - allocate fileid, create N records (filename key chain) and F record
-- chunk: call Chunker.Chunks, which yields {Range, Content, Attrs} per chunk
-  - caller copies Range (as string), Content, and Attrs before next yield
+- chunk: call Chunker.Chunks, which yields {Range, Locator, Content, Attrs} per chunk
+  - caller copies Range, Locator, Content, and Attrs before next yield
   - for external command strategies, RunChunkerFunc wraps the command as a Chunker
 - for each chunk: compute SHA-256 hash, extract trigrams on Content, tokenize Content, copy Attrs
-  - look up H record by hash — if chunkid exists, add fileid to existing C record (dedup)
-  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + fileid), append chunkid to T records for each trigram, append chunkid to W records for each token
-- update F record: append (chunkid, location) pair, merge tokens into file-level token bag
+  - look up H record by hash — if chunkid exists, increment this fileid's count in the existing C record's fileids list (insert with count=1 if absent)
+  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + [fileid, count=1]), append chunkid to T records for each trigram, append chunkid to W records for each token
+- update F record: append (chunkid, location, locator) entry, merge tokens into file-level token bag
 - batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record
 
 When removing a file:
 - read F record to get the file's chunk list
-- for each chunkid: read C record, remove this fileid from the fileid list
+- for each (chunkid, location, locator) entry: read C record, decrement this fileid's count in the fileids list (or remove the fileid entry entirely, since removing a whole file drops all its occurrences at once)
   - if C record has no remaining fileids: delete C record, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token hash), delete H record
 - delete F record, delete N records (key chain)
+
+The same orphan-cascade logic is used by append-merge's drop-and-replace path (see `AppendAwareChunker` below): a chunk dropped from a single file decrements that fileid's count, with the same C/T/W/H cleanup if it was the last reference.
 
 When searching for a literal string:
 - trim leading and trailing whitespace from the query before trigram extraction
@@ -366,7 +369,7 @@ type Chunker interface {
 }
 ```
 
-Chunk: `{ Range []byte, Content []byte, Attrs []Pair }` — Range and Content are reusable buffers, caller must copy before next yield. Attrs is optional per-chunk metadata, nil by default.
+Chunk: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }` — Range, Locator, and Content are reusable buffers, caller must copy before next yield. Range is the human-readable label (CLI display). Locator is opaque chunker-defined bytes used for fast random-access retrieval and append-merge resume; nil if not needed. Attrs is optional per-chunk metadata, nil by default.
 Pair: `{ Key []byte, Value []byte }` — opaque key-value pair, allows duplicate keys
 ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern, convenience type
 FuncChunker: adapter that wraps a ChunkFunc into a Chunker (ChunkText re-runs and matches by range label)
@@ -695,6 +698,49 @@ When `AppendChunks` passes content to a `ChunkFunc`, the content starts at an ar
 `AppendChunks` passes a base line number to line-based chunkers so that Range labels (e.g. "51-60") are absolute, not relative to the appended slice. The mechanism: `ChunkFunc` signature is unchanged; `AppendChunks` counts newlines in a prefix window or accepts a base line count from the caller, then adjusts the Range values after chunking.
 
 Suggestion: `AppendChunks` accepts an optional base line number. When zero, ranges are used as-is (for non-line-based chunkers). When non-zero, line-based ranges are offset by that amount.
+
+## AppendAwareChunker (boundary-aware appends)
+
+The default `AppendChunks` flow chunks the appended bytes alone and concatenates the resulting chunks onto the F record's chunk list. That's correct for chunkers whose boundaries don't depend on what came before — e.g. `chunk-lines-overlap` is purely positional. It is *wrong* for chunkers whose final chunk may need to be reconsidered when new content arrives:
+
+- `chunk-lines`: an existing tail like `"hello"` (no trailing newline) should merge with appended `" world\n"` into one chunk.
+- markdown: an existing open paragraph should continue when the appended content is more non-blank lines, not start a fresh chunk.
+- bracket / indent: the depth/indent level at end of file determines what new content does — sibling, child, or close.
+
+For tree-structured chunkers, the final chunk at end-of-file is always either a leaf or an inner node that has absorbed a leaf. Both shapes are local. The chunker doesn't need arbitrary parser state — it needs to know which shape the last chunk is and its structural position (heading level, indent depth, etc). That information fits in the per-occurrence `Locator` byte string the chunker already writes.
+
+Optional interface:
+
+```go
+type AppendAwareChunker interface {
+    // lastLocator: locator of the last existing chunk (nil if file has no chunks yet).
+    // newBytes: content being appended.
+    // Yields chunks that replace the trailing region (zero or more existing
+    // chunks dropped, one or more new chunks emitted).
+    // replacedLast=true means the last existing chunk is being replaced — the
+    // append flow drops its F-record entry and decrements the chunkid's fileid
+    // count in its C record (cascading orphan cleanup as in RemoveFile).
+    AppendChunks(
+        path        string,
+        lastLocator []byte,
+        newBytes    []byte,
+        yield       func(Chunk) bool,
+    ) (replacedLast bool, err error)
+}
+```
+
+Chunkers that don't implement `AppendAwareChunker` get the default behavior: `AppendChunks` chunks `newBytes` alone and appends without any boundary fixup. Built-in tree-structured chunkers (markdown, bracket, indent, line) implement the interface to handle their boundary cases correctly.
+
+The chunker uses `lastLocator` as its resume state. Because the locator is per-occurrence (stored in the F record, not in the dedup-shared C record), it correctly reflects this file's tail regardless of where else the chunk's content appears.
+
+### Drop-and-replace cleanup
+
+When `replacedLast` is true, `AppendChunks`:
+1. Drops the last entry from the F record's chunk list.
+2. Reads the dropped chunk's C record, decrements this fileid's count (or removes the fileid entry if count reaches 0).
+3. If the C record's fileids list is now empty, deletes the C record, removes the chunkid from each T record (by trigram) and W record (by token), and deletes the H record. Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper.
+
+A chunker may, in principle, replace more than just the last chunk. The current spec scope is single-last-chunk replacement; a future extension could allow replacing the last K chunks if a use case appears.
 
 # Ark Integration
 

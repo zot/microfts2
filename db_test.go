@@ -2019,8 +2019,8 @@ func TestSearchMultiSharedFilters(t *testing.T) {
 
 	// Filter that rejects any chunk whose file contains "gamma"
 	filter := func(c CRecord) bool {
-		for _, fid := range c.FileIDs {
-			frec, err := c.FileRecord(fid)
+		for _, fc := range c.FileIDs {
+			frec, err := c.FileRecord(fc.FileID)
 			if err == nil && len(frec.Names) > 0 {
 				if frec.Names[0] == dir+"/b.txt" {
 					return false

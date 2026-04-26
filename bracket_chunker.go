@@ -434,7 +434,8 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 			return true
 		}
 		r := fmt.Sprintf("%d-%d", startLine, endLine)
-		return yield(Chunk{Range: []byte(r), Content: content[startByte:endByte]})
+		loc := EncodeByteRangeLocator(startByte, endByte)
+		return yield(Chunk{Range: []byte(r), Locator: loc, Content: content[startByte:endByte]})
 	}
 
 	for lineIdx, lb := range lines {

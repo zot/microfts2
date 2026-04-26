@@ -38,6 +38,7 @@ var ErrAlreadyIndexed = errors.New("file already indexed")
 // collectedChunk holds processed chunk data between generator collection and DB write.
 type collectedChunk struct {
 	rangeStr   string
+	locator    []byte // per-occurrence opaque bytes from the chunker (R587, R590)
 	hash       [32]byte
 	contentLen int
 	triCounts  map[uint32]int
@@ -188,7 +189,7 @@ func chunkTimestamp(chunk CRecord) int64 {
 	}
 	// Fall back to file mod time from first associated file.
 	if len(chunk.FileIDs) > 0 {
-		if frec, err := chunk.FileRecord(chunk.FileIDs[0]); err == nil {
+		if frec, err := chunk.FileRecord(chunk.FileIDs[0].FileID); err == nil {
 			return frec.ModTime
 		}
 	}
@@ -656,6 +657,17 @@ func tokenHash(token string) uint32 {
 func mergeTokenBag(dst map[string]int, src []TokenEntry) {
 	for _, te := range src {
 		dst[te.Token] += te.Count
+	}
+}
+
+// subtractTokenBag removes source token entries from a destination bag.
+// Used by AppendChunks drop-and-replace to undo a dropped chunk's contribution.
+func subtractTokenBag(dst map[string]int, src []TokenEntry) {
+	for _, te := range src {
+		dst[te.Token] -= te.Count
+		if dst[te.Token] <= 0 {
+			delete(dst, te.Token)
+		}
 	}
 }
 
@@ -1368,6 +1380,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
 			rangeStr:   string(c.Range),
+			locator:    append([]byte(nil), c.Locator...),
 			hash:       h,
 			contentLen: len(c.Content),
 			triCounts:  db.trigrams.TrigramCounts(c.Content),
@@ -1449,15 +1462,17 @@ type newChunkTW struct {
 	tokens   []TokenEntry
 }
 
-// dedupOrCreateChunk checks H record for dedup. On hit, adds fileid to existing C record.
-// On miss, allocates new chunkid, creates H and C records. Returns chunkid and whether it was new.
+// dedupOrCreateChunk checks H record for dedup. On hit, increments this fileid's
+// count in the existing C record (inserting with count=1 if absent). On miss,
+// allocates new chunkid, creates H and C records (with [fileid, count=1]).
+// Returns chunkid and a newChunkTW pointer for new chunks (nil for dedup hits).
+// CRC: crc-DB.md | R596, R600
 func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64) (uint64, *newChunkTW, error) {
 	txn := th.Txn()
 	hKey := makeHKey(ch.hash)
 
 	hVal, err := txn.Get(db.dbi, hKey)
 	if err == nil {
-		// Dedup hit
 		chunkid, _ := readUvarint(hVal)
 		cKey := makeCKey(chunkid)
 		cVal, err := txn.Get(db.dbi, cKey)
@@ -1470,84 +1485,15 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		if err != nil {
 			return 0, nil, err
 		}
-		crec.FileIDs = append(crec.FileIDs, fileid)
+		crec.IncFileID(fileid) // R596
 		if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
 			return 0, nil, err
-		}
-		return chunkid, nil, nil // nil newChunkTW = not new
-	} else if !lmdb.IsNotFound(err) {
-		return 0, nil, err
-	}
-
-	// New chunk
-	chunkid, err := db.allocChunkID(th)
-	if err != nil {
-		return 0, nil, err
-	}
-
-	var hValBuf [binary.MaxVarintLen64]byte
-	hn := binary.PutUvarint(hValBuf[:], chunkid)
-	if err := txn.Put(db.dbi, hKey, hValBuf[:hn], 0); err != nil {
-		return 0, nil, err
-	}
-
-	triEntries := make([]TrigramEntry, 0, len(ch.triCounts))
-	triList := make([]uint32, 0, len(ch.triCounts))
-	for tri, cnt := range ch.triCounts {
-		triEntries = append(triEntries, TrigramEntry{Trigram: tri, Count: cnt})
-		triList = append(triList, tri)
-	}
-
-	crec := CRecord{
-		ChunkID:    chunkid,
-		Hash:       ch.hash,
-		ContentLen: ch.contentLen,
-		Trigrams:   triEntries,
-		Tokens:     ch.tokens,
-		Attrs:      ch.attrs,
-		FileIDs:    []uint64{fileid},
-	}
-	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
-		return 0, nil, err
-	}
-
-	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, nil
-}
-
-// dedupOrCreateChunkIfAbsent is like dedupOrCreateChunk but only adds fileid
-// if not already present in the C record (used by AppendChunks).
-func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid uint64) (uint64, *newChunkTW, error) {
-	txn := th.Txn()
-	hKey := makeHKey(ch.hash)
-
-	hVal, err := txn.Get(db.dbi, hKey)
-	if err == nil {
-		// Dedup hit
-		chunkid, _ := readUvarint(hVal)
-		cKey := makeCKey(chunkid)
-		cVal, err := txn.Get(db.dbi, cKey)
-		if err != nil {
-			return 0, nil, fmt.Errorf("read C record %d: %w", chunkid, err)
-		}
-		cData := make([]byte, len(cVal))
-		copy(cData, cVal)
-		crec, err := UnmarshalCValue(cData)
-		if err != nil {
-			return 0, nil, err
-		}
-		// Only add fileid if not already present
-		if !slices.Contains(crec.FileIDs, fileid) {
-			crec.FileIDs = append(crec.FileIDs, fileid)
-			if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
-				return 0, nil, err
-			}
 		}
 		return chunkid, nil, nil
 	} else if !lmdb.IsNotFound(err) {
 		return 0, nil, err
 	}
 
-	// New chunk — same as dedupOrCreateChunk
 	chunkid, err := db.allocChunkID(th)
 	if err != nil {
 		return 0, nil, err
@@ -1573,7 +1519,7 @@ func (db *DB) dedupOrCreateChunkIfAbsent(th TxnHolder, ch collectedChunk, fileid
 		Trigrams:   triEntries,
 		Tokens:     ch.tokens,
 		Attrs:      ch.attrs,
-		FileIDs:    []uint64{fileid},
+		FileIDs:    []FileIDCount{{FileID: fileid, Count: 1}}, // R600
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
 		return 0, nil, err
@@ -1681,7 +1627,7 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 		if nc != nil {
 			newChunks = append(newChunks, *nc)
 		}
-		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr}
+		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr, Locator: ch.locator}
 		chunkIDs[i] = chunkid
 		mergeTokenBag(fileBag, ch.tokens)
 	}
@@ -1737,6 +1683,93 @@ func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error {
 	return err
 }
 
+// cascadeOrphan deletes the C/H records and prunes T/W postings for an orphaned chunk.
+// Increments the removed counters. Caller has already ensured FileIDs is empty. // CRC: crc-DB.md | R598, R609
+func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64) error {
+	txn := th.Txn()
+	*removedChunks++
+	for _, te := range crec.Tokens {
+		*removedTokens += int64(te.Count)
+	}
+	if err := txn.Del(db.dbi, makeCKey(chunkid), nil); err != nil && !lmdb.IsNotFound(err) {
+		return err
+	}
+	if err := txn.Del(db.dbi, makeHKey(crec.Hash), nil); err != nil && !lmdb.IsNotFound(err) {
+		return err
+	}
+	for _, te := range crec.Trigrams {
+		removeFromInvertedRecord(th, db.dbi, makeTKey(te.Trigram), chunkid)
+	}
+	seen := make(map[uint32]bool)
+	for _, te := range crec.Tokens {
+		h := tokenHash(te.Token)
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		removeFromInvertedRecord(th, db.dbi, makeWKey(h), chunkid)
+	}
+	return nil
+}
+
+// dropOccurrenceInline drops one occurrence of fileid from chunkid's C record
+// and subtracts the dropped chunk's tokens from fileBag in a single read.
+// AppendChunks uses this on its drop-and-replace path so bag bookkeeping and
+// the decrement share one C-record read. // CRC: crc-DB.md | R608
+func (db *DB) dropOccurrenceInline(
+	th TxnHolder, chunkid, fileid uint64,
+	fileBag map[string]int,
+	removedChunks, removedTokens *int64,
+) error {
+	txn := th.Txn()
+	cKey := makeCKey(chunkid)
+	cVal, err := txn.Get(db.dbi, cKey)
+	if err != nil {
+		return nil
+	}
+	cData := make([]byte, len(cVal))
+	copy(cData, cVal)
+	crec, err := UnmarshalCValue(cData)
+	if err != nil {
+		return nil
+	}
+	subtractTokenBag(fileBag, crec.Tokens)
+	crec.FileIDs, _ = decFileID(crec.FileIDs, fileid)
+	if len(crec.FileIDs) > 0 {
+		return txn.Put(db.dbi, cKey, crec.MarshalValue(), 0)
+	}
+	return db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens)
+}
+
+// dropFromChunkRef applies mutate to the chunkid's C-record FileIDs slice and
+// either rewrites the record or cascades orphan cleanup if FileIDs is now empty.
+// Used by both whole-file removal (mutate=removeFileID, all occurrences) and
+// append-merge drop-and-replace (mutate=decFileID, one occurrence).
+// Returns true when the chunk was orphaned. // CRC: crc-DB.md | R608, R609
+func (db *DB) dropFromChunkRef(
+	th TxnHolder, chunkid, fileid uint64,
+	mutate func([]FileIDCount, uint64) ([]FileIDCount, bool),
+	removedChunks, removedTokens *int64,
+) (bool, error) {
+	txn := th.Txn()
+	cKey := makeCKey(chunkid)
+	cVal, err := txn.Get(db.dbi, cKey)
+	if err != nil {
+		return false, nil // C record missing — already gone
+	}
+	cData := make([]byte, len(cVal))
+	copy(cData, cVal)
+	crec, err := UnmarshalCValue(cData)
+	if err != nil {
+		return false, nil
+	}
+	crec.FileIDs, _ = mutate(crec.FileIDs, fileid)
+	if len(crec.FileIDs) > 0 {
+		return false, txn.Put(db.dbi, cKey, crec.MarshalValue(), 0)
+	}
+	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens)
+}
+
 // R254: Remove via F record → C records → T/W cleanup for orphaned chunks
 func (db *DB) removeFileInTxn(th TxnHolder, fpath string) ([]uint64, error) {
 	txn := th.Txn()
@@ -1748,52 +1781,18 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) ([]uint64, error) {
 	var orphanedChunkIDs []uint64
 	var removedChunks int64
 	var removedTokens int64
+	seen := make(map[uint64]bool)
 	for _, fce := range frec.Chunks {
-		cKey := makeCKey(fce.ChunkID)
-		cVal, err := txn.Get(db.dbi, cKey)
-		if err != nil {
-			continue // C record missing — skip
-		}
-		cData := make([]byte, len(cVal))
-		copy(cData, cVal)
-		crec, err := UnmarshalCValue(cData)
-		if err != nil {
+		if seen[fce.ChunkID] {
 			continue
 		}
-
-		newFIDs := make([]uint64, 0, len(crec.FileIDs))
-		for _, fid := range crec.FileIDs {
-			if fid != fileid {
-				newFIDs = append(newFIDs, fid)
-			}
+		seen[fce.ChunkID] = true
+		orphaned, err := db.dropFromChunkRef(th, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens)
+		if err != nil {
+			return nil, err
 		}
-
-		if len(newFIDs) > 0 {
-			crec.FileIDs = newFIDs
-			if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
-				return nil, err
-			}
-		} else {
+		if orphaned {
 			orphanedChunkIDs = append(orphanedChunkIDs, fce.ChunkID)
-			removedChunks++
-			for _, te := range crec.Tokens {
-				removedTokens += int64(te.Count)
-			}
-			txn.Del(db.dbi, cKey, nil)
-			txn.Del(db.dbi, makeHKey(crec.Hash), nil)
-
-			for _, te := range crec.Trigrams {
-				removeFromInvertedRecord(th, db.dbi, makeTKey(te.Trigram), fce.ChunkID)
-			}
-			seen := make(map[uint32]bool)
-			for _, te := range crec.Tokens {
-				h := tokenHash(te.Token)
-				if seen[h] {
-					continue
-				}
-				seen[h] = true
-				removeFromInvertedRecord(th, db.dbi, makeWKey(h), fce.ChunkID)
-			}
 		}
 	}
 
@@ -1962,14 +1961,13 @@ func WithAppendChunkCallback(fn ChunkCallback) AppendOption {
 // AppendChunks adds chunks to an existing file without full reindex.
 // content is only the appended bytes, not the full file.
 // CRC: crc-DB.md | Seq: seq-append.md
-// R150, R151, R152, R153, R154, R155, R156, R157, R163, R164, R165, R166, R167, R168
+// R150, R151, R152, R153, R154, R155, R156, R157, R163, R164, R165, R166, R167, R168, R604, R605, R606, R608
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error {
 	var cfg appendConfig
 	for _, o := range opts {
 		o(&cfg)
 	}
 
-	// Resolve chunk function — AppendChunks receives content, so requires Chunker (R515, R516)
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
 		return fmt.Errorf("chunker strategy %q not registered", strategy)
@@ -1978,8 +1976,9 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	if !ok {
 		return fmt.Errorf("chunker strategy %q does not support content-based chunking (implements FileChunker only)", strategy)
 	}
+	appendAware, _ := resolved.(AppendAwareChunker)
 
-	// Read existing F record
+	// Read existing F record (and last entry's locator for AppendAwareChunker dispatch)
 	var frec FRecord
 	err := db.env.View(func(txn *lmdb.Txn) error {
 		var err error
@@ -1994,41 +1993,59 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	if len(frec.Names) > 0 {
 		filename = frec.Names[0]
 	}
+	var lastLocator []byte
+	if len(frec.Chunks) > 0 {
+		lastLocator = frec.Chunks[len(frec.Chunks)-1].Locator
+	}
 
-	// Chunk the appended content
+	// Yield closure shared by both dispatch paths
 	var newChunks []collectedChunk
 	var utf8Err error
-	if err := chunker.Chunks(filename, content, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
 			return false
 		}
-		// R482: fire callback after UTF-8 validation, before hashing
 		if cfg.chunkCallback != nil {
 			cfg.chunkCallback(string(c.Content))
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:  string(c.Range),
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
+			rangeStr:   string(c.Range),
+			locator:    append([]byte(nil), c.Locator...),
+			hash:       h,
+			contentLen: len(c.Content),
+			triCounts:  db.trigrams.TrigramCounts(c.Content),
+			tokens:     tokenizeCounts(c.Content),
 		}
 		cc.attrs = CopyPairs(c.Attrs)
 		newChunks = append(newChunks, cc)
 		return true
-	}); err != nil {
-		return err
+	}
+
+	// Dispatch: AppendAwareChunker fast path or default Chunker (R605, R606)
+	var replacedLast bool
+	if appendAware != nil {
+		var aerr error
+		replacedLast, aerr = appendAware.AppendChunks(filename, lastLocator, content, yield)
+		if aerr != nil {
+			return aerr
+		}
+	} else {
+		if err := chunker.Chunks(filename, content, yield); err != nil {
+			return err
+		}
 	}
 	if utf8Err != nil {
 		return utf8Err
 	}
-	if len(newChunks) == 0 {
-		return nil // nothing to append
+	if len(newChunks) == 0 && !replacedLast {
+		return nil // nothing to do
 	}
 
-	// Adjust ranges if baseLine is set (R165, R166)
-	if cfg.baseLine > 0 {
+	// Adjust ranges if baseLine is set (R165, R166). Only meaningful for default-path
+	// line-based chunkers — AppendAwareChunker is expected to emit absolute ranges itself.
+	if cfg.baseLine > 0 && appendAware == nil {
 		for i := range newChunks {
 			adjusted, err := adjustRange(newChunks[i].rangeStr, cfg.baseLine)
 			if err != nil {
@@ -2041,27 +2058,38 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	// Single atomic write transaction (R164)
 	return db.env.Update(func(txn *lmdb.Txn) error {
 		th := txnWrap{txn}
-		// Re-read F record inside write txn for consistency
 		frec, err := db.readFRecord(th, fileid)
 		if err != nil {
 			return err
 		}
 
-		// Accumulate new file-level token bag from existing
+		// Build file-level token bag from existing chunks before any drop
 		fileBag := make(map[string]int)
 		mergeTokenBag(fileBag, frec.Tokens)
+
+		// Drop-and-replace: read the dropped chunk's C record once; subtract its
+		// tokens from this file's bag; then either rewrite C with one fewer
+		// occurrence or cascade orphan cleanup. // R604, R608
+		var droppedRemoved, droppedTokens int64
+		if replacedLast && len(frec.Chunks) > 0 {
+			last := frec.Chunks[len(frec.Chunks)-1]
+			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens); err != nil {
+				return err
+			}
+			frec.Chunks = frec.Chunks[:len(frec.Chunks)-1]
+		}
 
 		var newChunksTW []newChunkTW
 
 		for _, ch := range newChunks {
-			chunkid, nc, err := db.dedupOrCreateChunkIfAbsent(th, ch, fileid)
+			chunkid, nc, err := db.dedupOrCreateChunk(th, ch, fileid)
 			if err != nil {
 				return err
 			}
 			if nc != nil {
 				newChunksTW = append(newChunksTW, *nc)
 			}
-			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr})
+			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr, Locator: ch.locator})
 			mergeTokenBag(fileBag, ch.tokens)
 		}
 
@@ -2073,6 +2101,16 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		// R275, R276: update corpus counters for new chunks
 		if err := updateCorpusCounters(th, db.dbi, newChunksTW); err != nil {
 			return err
+		}
+
+		// Dropped-chunk corpus counter offsets (R608)
+		if droppedRemoved > 0 {
+			if err := iAddCounter(th, db.dbi, "totalChunks", -droppedRemoved); err != nil {
+				return err
+			}
+			if err := iAddCounter(th, db.dbi, "totalTokens", -droppedTokens); err != nil {
+				return err
+			}
 		}
 
 		// Update F record metadata
@@ -2558,7 +2596,8 @@ func (s *searchConfig) scoreAndResolve(th TxnHolder, candidates []candidateChunk
 			}
 		}
 
-		for _, fid := range cand.crec.FileIDs {
+		for _, fc := range cand.crec.FileIDs {
+			fid := fc.FileID
 			if s.onlyIDs != nil {
 				if _, ok := s.onlyIDs[fid]; !ok {
 					continue
@@ -3325,13 +3364,17 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 
 // LineChunkFunc is a built-in ChunkFunc that yields one chunk per line.
 // Range is "N-N" (1-based line number).
+// LineChunkFunc yields one chunk per newline-terminated line. Range is "N-N";
+// Locator carries the chunk's byte range so AppendAware merge and random-access
+// retrieval can skip line-offset rebuilds. // CRC: crc-Chunker.md | R594
 func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	lineNum := 1
 	start := 0
 	for i, b := range content {
 		if b == '\n' {
 			r := fmt.Sprintf("%d-%d", lineNum, lineNum)
-			if !yield(Chunk{Range: []byte(r), Content: content[start : i+1]}) {
+			loc := EncodeByteRangeLocator(start, i+1)
+			if !yield(Chunk{Range: []byte(r), Locator: loc, Content: content[start : i+1]}) {
 				return nil
 			}
 			lineNum++
@@ -3340,7 +3383,8 @@ func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 	}
 	if start < len(content) {
 		r := fmt.Sprintf("%d-%d", lineNum, lineNum)
-		yield(Chunk{Range: []byte(r), Content: content[start:]})
+		loc := EncodeByteRangeLocator(start, len(content))
+		yield(Chunk{Range: []byte(r), Locator: loc, Content: content[start:]})
 	}
 	return nil
 }
