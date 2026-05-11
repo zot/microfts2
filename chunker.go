@@ -3,8 +3,10 @@ package microfts2
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -185,26 +187,144 @@ func parseLineRange(s string) (int, int, error) {
 	return start, end, nil
 }
 
-// LineChunker exposes LineChunkFunc as a Chunker + RandomAccessChunker. // CRC: crc-Chunker.md | R531
+// chunkFn is the shared function shape for content-based chunkers — what
+// fileChunksByRead and appendByRechunkResume delegate to.
+type chunkFn = func(path string, content []byte, yield func(Chunk) bool) error
+
+// fileChunksByRead is the standard FileChunker implementation for content-based
+// text chunkers. Reads path, computes SHA-256, and returns early without
+// yielding when old is non-zero and matches the new hash (the staleness
+// short-circuit). Otherwise delegates to chunk(path, content, yield).
+// Returns the new hash; zero hash for empty content.
+// CRC: crc-Chunker.md | R632, R636
+func fileChunksByRead(path string, old [32]byte, chunk chunkFn, yield func(Chunk) bool) ([32]byte, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if len(content) == 0 {
+		return [32]byte{}, nil
+	}
+	hash := sha256.Sum256(content)
+	if old != ([32]byte{}) && hash == old {
+		return hash, nil
+	}
+	if err := chunk(path, content, yield); err != nil {
+		return hash, err
+	}
+	return hash, nil
+}
+
+// appendByRechunkResume is the standard AppendAwareChunker implementation for
+// content-based text chunkers whose chunks carry byte-range locators. It reads
+// the file, re-chunks from the previous last chunk's byte start through EOF,
+// and either drops the first emitted chunk (clean boundary — its byte range
+// matches the previous tail, replacedLast=false) or emits it as a replacement
+// (different range, replacedLast=true). Each yielded chunk's Range and
+// Locator are adjusted to be absolute to the full file.
+//
+// When lastLocator is empty (no previous chunks), chunks newBytes alone with
+// replacedLast=false.
+//
+// chunk must be the chunker's own content-based Chunks function. The path is
+// passed through to chunk so it can use it for whatever it needs.
+// CRC: crc-Chunker.md | R631, R633, R634, R635
+func appendByRechunkResume(path string, lastLocator, newBytes []byte, chunk chunkFn, yield func(Chunk) bool) (bool, error) {
+	if len(lastLocator) == 0 {
+		return false, chunk(path, newBytes, yield)
+	}
+	oldStart, oldEnd, ok := DecodeByteRangeLocator(lastLocator)
+	if !ok {
+		return false, fmt.Errorf("append resume: malformed last-chunk locator")
+	}
+	full, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("append resume: read file: %w", err)
+	}
+	if oldStart < 0 || oldStart > len(full) || oldEnd < oldStart || oldEnd > len(full) {
+		return false, fmt.Errorf("append resume: locator [%d,%d) outside file (len %d)", oldStart, oldEnd, len(full))
+	}
+	baseLine := bytes.Count(full[:oldStart], []byte{'\n'})
+	oldLen := oldEnd - oldStart
+
+	emit := func(c Chunk) bool {
+		adjustedRange, _ := adjustRange(string(c.Range), baseLine)
+		var adjustedLoc []byte
+		if relStart, relEnd, ok := DecodeByteRangeLocator(c.Locator); ok {
+			adjustedLoc = EncodeByteRangeLocator(oldStart+relStart, oldStart+relEnd)
+		} else {
+			adjustedLoc = c.Locator
+		}
+		return yield(Chunk{
+			Range:   []byte(adjustedRange),
+			Locator: adjustedLoc,
+			Content: c.Content,
+			Attrs:   c.Attrs,
+		})
+	}
+
+	var firstSeen bool
+	var replacedLast bool
+	wrap := func(c Chunk) bool {
+		if !firstSeen {
+			firstSeen = true
+			relStart, relEnd, ok := DecodeByteRangeLocator(c.Locator)
+			if ok && relStart == 0 && relEnd == oldLen {
+				return true // clean boundary — drop and continue
+			}
+			replacedLast = true
+			return emit(c)
+		}
+		return emit(c)
+	}
+
+	if err := chunk(path, full[oldStart:], wrap); err != nil {
+		return replacedLast, err
+	}
+	return replacedLast, nil
+}
+
+// LineChunker exposes LineChunkFunc as a Chunker + FileChunker +
+// RandomAccessChunker + AppendAwareChunker. // CRC: crc-Chunker.md | R531, R633, R634, R635, R636
 type LineChunker struct{}
 
 func (LineChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
 	return LineChunkFunc(path, content, yield)
 }
 
+func (LineChunker) FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) {
+	return fileChunksByRead(path, old, LineChunkFunc, yield)
+}
+
 func (LineChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
 	return sliceByLineRange(data, customData, chunk)
 }
 
-// MarkdownChunker exposes MarkdownChunkFunc as a Chunker + RandomAccessChunker. // CRC: crc-Chunker.md | R531
+func (LineChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (bool, error) {
+	return appendByRechunkResume(path, lastLocator, newBytes, LineChunkFunc, yield)
+}
+
+// MarkdownChunker exposes MarkdownChunkFunc as a Chunker + FileChunker +
+// RandomAccessChunker + AppendAwareChunker. // CRC: crc-Chunker.md | R531, R601-R604, R610, R633, R636
 type MarkdownChunker struct{}
 
 func (MarkdownChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
 	return MarkdownChunkFunc(path, content, yield)
 }
 
+func (MarkdownChunker) FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) {
+	return fileChunksByRead(path, old, MarkdownChunkFunc, yield)
+}
+
 func (MarkdownChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
 	return sliceByLineRange(data, customData, chunk)
+}
+
+// AppendChunks delegates to appendByRechunkResume so markdown's
+// paragraph/fence/heading-merge boundaries are recognised across the append
+// boundary via re-chunking from the previous last chunk's start through EOF.
+func (MarkdownChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (bool, error) {
+	return appendByRechunkResume(path, lastLocator, newBytes, MarkdownChunkFunc, yield)
 }
 
 // ChunkFunc is a generator that yields chunks for a file.

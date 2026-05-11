@@ -1,5 +1,5 @@
 # Sequence: Append Chunks
-**Requirements:** R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R223, R224, R225, R226, R236, R237, R253, R261, R262, R471, R482, R601, R602, R603, R604, R605, R606, R607, R608, R609
+**Requirements:** R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R223, R224, R225, R226, R236, R237, R253, R261, R262, R471, R482, R601, R602, R603, R604, R605, R606, R607, R608, R609, R623, R624, R625
 
 Participants: DB, Trigrams, Chunker
 
@@ -26,6 +26,9 @@ DB                                          Trigrams       Chunker
  |--- Chunks(path, newBytes, yield) -----------|------------> |
  |  <-- yields {Range, Locator, Content, Attrs}|<-----------  |
  |    replacedLast = false                     |              |
+ |    if zero chunks and len(content) > 0:     |              |
+ |      return ErrAppendBoundary  [R623,R624]  |              |
+ |    if len(content) == 0: return nil [R625]  |              |
  |                                             |              |
  |  for each yielded Chunk:                    |              |
  |    copy Range, Locator (as bytes)            |              |

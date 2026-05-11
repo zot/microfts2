@@ -62,7 +62,7 @@ func newOverlay() *overlay {
 
 // addFile indexes a tmp:// document in the overlay. R358, R359, R360
 // CRC: crc-Overlay.md | R473, R474, R475, R476, R480
-func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) (uint64, error) {
+func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb ChunkCallback, ich IndexedChunkCallback) (uint64, error) {
 	// UTF-8 validation moved to chunk level — raw content may be binary
 	// (e.g., PDF) and the chunker transforms it to UTF-8 text.
 	resolved := db.resolveChunker(strategy)
@@ -100,14 +100,14 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb Chun
 		strategy: strategy,
 	}
 
-	o.populateFileChunksLocked(ofile, collected)
+	o.populateFileChunksLocked(ofile, collected, ich)
 	o.files[path] = ofile
 	o.filesByID[fileID] = ofile
 	return fileID, nil
 }
 
 // updateFile replaces a tmp:// document's content. R361, R362, R363, R481
-func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb ChunkCallback) error {
+func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb ChunkCallback, ich IndexedChunkCallback) error {
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
 		return fmt.Errorf("chunking strategy %q not registered", strategy)
@@ -138,20 +138,24 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb C
 	old.strategy = strategy
 	old.chunks = nil
 	old.tokens = nil
-	o.populateFileChunksLocked(old, collected)
+	o.populateFileChunksLocked(old, collected, ich)
 	return nil
 }
 
 // populateFileChunksLocked dedup-creates chunks and builds the file's chunk list
-// and token bag. Must hold write lock.
-func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []collectedChunk) {
+// and token bag. Must hold write lock. Fires ich for genuinely-new chunks.
+func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []collectedChunk, ich IndexedChunkCallback) {
 	var fileTokMap map[string]int
-	for _, cc := range collected {
-		chunkID := o.dedupOrCreateChunk(cc, ofile.fileID)
+	for i := range collected {
+		cc := collected[i]
+		chunkID, isNew := o.dedupOrCreateChunk(cc, ofile.fileID)
+		if isNew && ich != nil {
+			ich(o.indexedChunkLocked(chunkID, cc))
+		}
 		ofile.chunks = append(ofile.chunks, FileChunkEntry{
 			ChunkID:  chunkID,
-			Location: cc.rangeStr,
-			Locator:  cc.locator,
+			Location: string(cc.Range),
+			Locator:  cc.Locator,
 		})
 		if fileTokMap == nil {
 			fileTokMap = make(map[string]int)
@@ -159,10 +163,27 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 		for _, te := range cc.tokens {
 			fileTokMap[te.Token] += te.Count
 		}
+		collected[i].Content = nil // release content after overlay chunk creation (and after callback fire)
 	}
 	for tok, cnt := range fileTokMap {
 		ofile.tokens = append(ofile.tokens, TokenEntry{Token: tok, Count: cnt})
 	}
+}
+
+// indexedChunkLocked builds an IndexedChunk for the just-created overlay chunk.
+// CRecord carries no txn context — overlay-fired callbacks see nil Txn()/DB().
+// Must hold write lock; reads o.chunks for the fresh entry.
+func (o *overlay) indexedChunkLocked(chunkID uint64, cc collectedChunk) IndexedChunk {
+	oc := o.chunks[chunkID]
+	crec := CRecord{
+		ChunkID:    oc.chunkID,
+		Hash:       oc.hash,
+		ContentLen: oc.contentLen,
+		Attrs:      oc.attrs,
+		FileIDs:    oc.fileIDs,
+		Trigrams:   oc.trigrams,
+	}
+	return IndexedChunk{Chunk: cc.Chunk, CRecord: crec}
 }
 
 // appendFile appends chunks to a tmp:// document, creating it if not found (>> semantics).
@@ -173,12 +194,12 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	ofile, exists := o.files[path]
 	if !exists {
 		o.mu.RUnlock()
-		// R431: auto-create via addFile. Extract callback from opts.
+		// R431: auto-create via addFile. Extract callbacks from opts.
 		var cfg appendConfig
 		for _, opt := range opts {
-			opt(&cfg)
+			opt.applyAppend(&cfg)
 		}
-		return o.addFile(path, strategy, content, db, cfg.chunkCallback)
+		return o.addFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
 	}
 	if ofile.strategy != strategy {
 		o.mu.RUnlock()
@@ -198,7 +219,7 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 
 	var cfg appendConfig
 	for _, opt := range opts {
-		opt(&cfg)
+		opt.applyAppend(&cfg)
 	}
 
 	// R483: fire callback for appended chunks
@@ -211,11 +232,11 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	}
 	if cfg.baseLine > 0 {
 		for i := range collected {
-			adjusted, err := adjustRange(collected[i].rangeStr, cfg.baseLine)
+			adjusted, err := adjustRange(string(collected[i].Range), cfg.baseLine)
 			if err != nil {
-				return 0, fmt.Errorf("adjust range %q: %w", collected[i].rangeStr, err)
+				return 0, fmt.Errorf("adjust range %q: %w", string(collected[i].Range), err)
 			}
-			collected[i].rangeStr = adjusted
+			collected[i].Range = []byte(adjusted)
 		}
 	}
 
@@ -233,14 +254,19 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	fileTokMap := make(map[string]int, len(ofile.tokens))
 	mergeTokenBag(fileTokMap, ofile.tokens)
 
-	for _, cc := range collected {
-		chunkID := o.dedupOrCreateChunk(cc, ofile.fileID)
+	for i := range collected {
+		cc := collected[i]
+		chunkID, isNew := o.dedupOrCreateChunk(cc, ofile.fileID)
+		if isNew && cfg.indexedChunkCallback != nil {
+			cfg.indexedChunkCallback(o.indexedChunkLocked(chunkID, cc))
+		}
 		ofile.chunks = append(ofile.chunks, FileChunkEntry{
 			ChunkID:  chunkID,
-			Location: cc.rangeStr,
-			Locator:  cc.locator,
+			Location: string(cc.Range),
+			Locator:  cc.Locator,
 		})
 		mergeTokenBag(fileTokMap, cc.tokens)
+		collected[i].Content = nil // release content after overlay chunk creation (and after callback fire)
 	}
 
 	ofile.tokens = tokenBagToEntries(fileTokMap)
@@ -310,11 +336,12 @@ func (o *overlay) removeFileChunksLocked(ofile *overlayFile) {
 }
 
 // dedupOrCreateChunk checks for hash dedup, creates if new. Must hold write lock.
-func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
+// Returns (chunkID, isNew) — isNew=true when the chunk was newly created, false on dedup hit.
+func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) (uint64, bool) {
 	if existing, ok := o.hashes[cc.hash]; ok {
 		oc := o.chunks[existing]
 		oc.fileIDs = incFileID(oc.fileIDs, fileID)
-		return existing
+		return existing, false
 	}
 
 	chunkID := o.nextChunkID
@@ -346,17 +373,17 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) uint64 {
 	oc := &overlayChunk{
 		chunkID:    chunkID,
 		hash:       cc.hash,
-		contentLen: cc.contentLen,
+		contentLen: len(cc.Content),
 		trigrams:   trigEntries,
 		tokens:     append([]TokenEntry(nil), cc.tokens...),
-		attrs:      CopyPairs(cc.attrs),
+		attrs:      CopyPairs(cc.Attrs),
 		fileIDs:    []FileIDCount{{FileID: fileID, Count: 1}},
 	}
 	o.chunks[chunkID] = oc
 	o.hashes[cc.hash] = chunkID
 	o.totalChunks++
 	o.totalTokens += len(cc.tokens)
-	return chunkID
+	return chunkID, true
 }
 
 // collectChunksFromContent runs the chunker and extracts trigrams/tokens.
@@ -376,13 +403,16 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:   string(c.Range),
-			hash:       h,
-			contentLen: len(c.Content),
-			triCounts:  db.trigrams.TrigramCounts(c.Content),
-			tokens:     tokenizeCounts(c.Content),
+			Chunk: Chunk{
+				Range:   append([]byte(nil), c.Range...),
+				Locator: append([]byte(nil), c.Locator...),
+				Content: append([]byte(nil), c.Content...),
+				Attrs:   CopyPairs(c.Attrs),
+			},
+			hash:      h,
+			triCounts: db.trigrams.TrigramCounts(c.Content),
+			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
 	}); err != nil {

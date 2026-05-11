@@ -1,6 +1,9 @@
 package microfts2
 
 import (
+	"crypto/sha256"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -384,26 +387,275 @@ func TestSliceByLineRangeOutOfBounds(t *testing.T) {
 	}
 }
 
-func TestLineChunkerImplementsRandomAccess(t *testing.T) {
+// All four built-in text chunkers implement the full quartet: Chunker,
+// FileChunker, RandomAccessChunker, AppendAwareChunker. R633, R636, R637
+func TestLineChunkerImplementsAllInterfaces(t *testing.T) {
 	var _ Chunker = LineChunker{}
+	var _ FileChunker = LineChunker{}
 	var _ RandomAccessChunker = LineChunker{}
+	var _ AppendAwareChunker = LineChunker{}
 }
 
-func TestMarkdownChunkerImplementsRandomAccess(t *testing.T) {
+func TestMarkdownChunkerImplementsAllInterfaces(t *testing.T) {
 	var _ Chunker = MarkdownChunker{}
+	var _ FileChunker = MarkdownChunker{}
 	var _ RandomAccessChunker = MarkdownChunker{}
+	var _ AppendAwareChunker = MarkdownChunker{}
 }
 
-func TestBracketChunkerImplementsRandomAccess(t *testing.T) {
+func TestBracketChunkerImplementsAllInterfaces(t *testing.T) {
 	bc := BracketChunker(LangGo)
+	if _, ok := bc.(FileChunker); !ok {
+		t.Fatal("BracketChunker should implement FileChunker")
+	}
 	if _, ok := bc.(RandomAccessChunker); !ok {
 		t.Fatal("BracketChunker should implement RandomAccessChunker")
 	}
+	if _, ok := bc.(AppendAwareChunker); !ok {
+		t.Fatal("BracketChunker should implement AppendAwareChunker")
+	}
 }
 
-func TestIndentChunkerImplementsRandomAccess(t *testing.T) {
+func TestIndentChunkerImplementsAllInterfaces(t *testing.T) {
 	ic := IndentChunker(BracketLang{}, 4)
+	if _, ok := ic.(FileChunker); !ok {
+		t.Fatal("IndentChunker should implement FileChunker")
+	}
 	if _, ok := ic.(RandomAccessChunker); !ok {
 		t.Fatal("IndentChunker should implement RandomAccessChunker")
+	}
+	if _, ok := ic.(AppendAwareChunker); !ok {
+		t.Fatal("IndentChunker should implement AppendAwareChunker")
+	}
+}
+
+// collectAppendChunks runs an AppendAwareChunker against a written file and
+// returns the yielded chunks (deep-copied), replacedLast, and any error.
+func collectAppendChunks(t *testing.T, ac AppendAwareChunker, path string, lastLocator, newBytes []byte) ([]Chunk, bool, error) {
+	t.Helper()
+	var out []Chunk
+	replacedLast, err := ac.AppendChunks(path, lastLocator, newBytes, func(c Chunk) bool {
+		out = append(out, Chunk{
+			Range:   append([]byte(nil), c.Range...),
+			Locator: append([]byte(nil), c.Locator...),
+			Content: append([]byte(nil), c.Content...),
+		})
+		return true
+	})
+	return out, replacedLast, err
+}
+
+// fileChunksByRead returns early with the supplied old hash and no yields
+// when the file's hash matches — the staleness short-circuit. R632
+func TestFileChunksByReadHashSkip(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(fp, []byte("a\nb\nc\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte("a\nb\nc\n"))
+
+	calls := 0
+	chunk := func(_ string, content []byte, yield func(Chunk) bool) error {
+		calls++
+		return nil
+	}
+	got, err := fileChunksByRead(fp, hash, chunk, func(Chunk) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != hash {
+		t.Errorf("returned hash should match file hash")
+	}
+	if calls != 0 {
+		t.Errorf("chunker should not be invoked when old hash matches, got %d calls", calls)
+	}
+}
+
+// fileChunksByRead delegates to the chunker when the supplied old hash
+// differs from the file's hash. R632, R636
+func TestFileChunksByReadDelegatesOnHashMiss(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(fp, []byte("a\nb\nc\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	chunk := func(_ string, content []byte, yield func(Chunk) bool) error {
+		calls++
+		if string(content) != "a\nb\nc\n" {
+			t.Errorf("chunker received content %q, want %q", content, "a\nb\nc\n")
+		}
+		return nil
+	}
+	// old is the zero hash, so the short-circuit never fires.
+	got, err := fileChunksByRead(fp, [32]byte{}, chunk, func(Chunk) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == ([32]byte{}) {
+		t.Error("returned hash should be non-zero for non-empty file")
+	}
+	if calls != 1 {
+		t.Errorf("chunker should be invoked once on hash miss, got %d calls", calls)
+	}
+}
+
+func TestFileChunksByReadEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(fp, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	chunk := func(_ string, _ []byte, _ func(Chunk) bool) error { calls++; return nil }
+	got, err := fileChunksByRead(fp, [32]byte{}, chunk, func(Chunk) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ([32]byte{}) {
+		t.Error("empty file should return zero hash")
+	}
+	if calls != 0 {
+		t.Error("empty file should not invoke chunker")
+	}
+}
+
+// LineChunker AppendChunks — when the previous tail had no trailing newline,
+// the appended content completes that line and replaces the previous chunk.
+// R634, R635
+func TestLineChunkerAppendChunksCompletesPartialLine(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.txt")
+	initial := "alpha\nbeta\ngamma" // no trailing newline on last line
+	appended := "_continued\n"
+	if err := os.WriteFile(fp, []byte(initial+appended), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Previous last chunk: bytes 11..16 (the partial "gamma").
+	oldLocator := EncodeByteRangeLocator(11, 16)
+
+	chunks, replacedLast, err := collectAppendChunks(t, LineChunker{}, fp, oldLocator, []byte(appended))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replacedLast {
+		t.Fatal("partial line completion should set replacedLast=true")
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 merged-line chunk, got %d", len(chunks))
+	}
+	if want := "gamma_continued\n"; string(chunks[0].Content) != want {
+		t.Errorf("merged chunk content = %q, want %q", chunks[0].Content, want)
+	}
+	if want := "3-3"; string(chunks[0].Range) != want {
+		t.Errorf("merged chunk range = %q, want %q", chunks[0].Range, want)
+	}
+}
+
+// LineChunker AppendChunks — when the previous tail already ended in a newline,
+// the appended line forms a fresh chunk and the previous tail is preserved.
+// R634
+func TestLineChunkerAppendChunksCleanBoundary(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.txt")
+	initial := "alpha\nbeta\ngamma\n"
+	appended := "delta\n"
+	if err := os.WriteFile(fp, []byte(initial+appended), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Previous last chunk: bytes 11..17 (the complete "gamma\n").
+	oldLocator := EncodeByteRangeLocator(11, 17)
+
+	chunks, replacedLast, err := collectAppendChunks(t, LineChunker{}, fp, oldLocator, []byte(appended))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedLast {
+		t.Error("clean line boundary should set replacedLast=false")
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 new chunk (\"delta\\n\"), got %d", len(chunks))
+	}
+	if want := "delta\n"; string(chunks[0].Content) != want {
+		t.Errorf("new chunk content = %q, want %q", chunks[0].Content, want)
+	}
+	if want := "4-4"; string(chunks[0].Range) != want {
+		t.Errorf("new chunk range = %q, want %q", chunks[0].Range, want)
+	}
+}
+
+func TestLineChunkerAppendChunksNilLocator(t *testing.T) {
+	chunks, replacedLast, err := collectAppendChunks(t, LineChunker{}, "irrelevant.txt", nil, []byte("a\nb\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedLast {
+		t.Error("nil locator should not set replacedLast")
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks for 2 lines, got %d", len(chunks))
+	}
+}
+
+// IndentChunker AppendChunks — appending a deeper-indent line extends the
+// previous scope, replacing its chunk. R637, R638
+func TestIndentChunkerAppendChunksExtendsScope(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.py")
+	initial := "def hello():\n    print('hi')\n"
+	appended := "    print('bye')\n"
+	if err := os.WriteFile(fp, []byte(initial+appended), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Previous last chunk: the whole def hello() group, bytes 0..len(initial).
+	oldLocator := EncodeByteRangeLocator(0, len(initial))
+
+	ic := IndentChunker(BracketLang{LineComments: []string{"#"}}, 4)
+	chunks, replacedLast, err := collectAppendChunks(t, ic.(AppendAwareChunker), fp, oldLocator, []byte(appended))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replacedLast {
+		t.Fatal("extending a scope should set replacedLast=true")
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 merged scope chunk, got %d", len(chunks))
+	}
+	if want := initial + appended; string(chunks[0].Content) != want {
+		t.Errorf("merged chunk content = %q, want %q", chunks[0].Content, want)
+	}
+}
+
+// IndentChunker AppendChunks — when the appended content starts a new
+// top-level definition, the previous chunk is preserved and a new chunk
+// appears for the addition. R637
+func TestIndentChunkerAppendChunksCleanBoundary(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.py")
+	initial := "def hello():\n    print('hi')\n\n"
+	appended := "def goodbye():\n    print('bye')\n"
+	if err := os.WriteFile(fp, []byte(initial+appended), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Previous last chunk: the def hello() group (excluding the trailing blank line).
+	oldStart := 0
+	oldEnd := len("def hello():\n    print('hi')\n")
+	oldLocator := EncodeByteRangeLocator(oldStart, oldEnd)
+
+	ic := IndentChunker(BracketLang{LineComments: []string{"#"}}, 4)
+	chunks, replacedLast, err := collectAppendChunks(t, ic.(AppendAwareChunker), fp, oldLocator, []byte(appended))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedLast {
+		t.Error("clean scope boundary should set replacedLast=false")
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 new chunk (def goodbye group), got %d", len(chunks))
+	}
+	if want := "def goodbye():\n    print('bye')\n"; string(chunks[0].Content) != want {
+		t.Errorf("new chunk content = %q, want %q", chunks[0].Content, want)
 	}
 }

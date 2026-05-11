@@ -537,16 +537,16 @@
 ## Feature: Bracket Chunker
 **Source:** specs/main.md
 
-- **R307:** `BracketLang` struct: configurable lexical rules per language — line comments, block comments, string delimiters, bracket groups
-- **R308:** `StringDelim` struct: `Open`, `Close`, `Escape` strings — supports asymmetric delimiters (e.g. `[[`/`]]`) and escapeless raw strings (empty Escape)
-- **R309:** `BracketGroup` struct: `Open []string`, `Separators []string`, `Close []string` — handles word brackets like `if`/`then`/`else`/`end`
-- **R310:** Token types: comment, string, whitespace, bracket, text — scanner classifies each token
-- **R311:** Comments inside strings are not comments; strings inside comments are not strings
-- **R312:** Whitespace tokens: contiguous runs of space, newline, tab, carriage return, form feed — always recognized, not configurable
-- **R313:** Bracket tokens: single-character (`{`, `}`), multi-character (`<!--`, `-->`), or word (`begin`, `end`) — all configurable via BracketGroup
+- **R307:** `BracketLang` struct: configurable lexical rules per language — line comments, block comments, bracket groups (strings expressed as bracket groups)
+- **~~R308:~~** (Retired T1 — see R309) `StringDelim` struct: `Open`, `Close`, `Escape` strings — supports asymmetric delimiters (e.g. `[[`/`]]`) and escapeless raw strings (empty Escape)
+- **R309:** `BracketGroup` struct: `Open []string`, `Separators []string`, `Close []string`, `Escape string`, `AllowedInner []string`, `AllowedParent []string` — handles code brackets, strings, and word brackets with one shape
+- **R310:** Token types: comment, whitespace, bracket, text — scanner classifies each token (no separate string type; strings are scan-restricted bracket groups)
+- **R311:** Comments inside scan-restricted bracket groups are not comments; comments are recognized only in code-mode contexts
+- **R312:** Whitespace tokens: contiguous runs of space, newline, tab, carriage return, form feed — always recognized in code mode; literal text inside scan-restricted groups
+- **R313:** Bracket tokens: single-character (`{`, `}`), multi-character (`<!--`, `-->`, `${`), word (`begin`, `end`), or string-style (`"`, `` ` ``, `[[`/`]]`) — all expressed as `BracketGroup` entries
 - **R314:** Multi-bracket groups: a single BracketGroup can have multiple openers, separators, and closers (e.g. `if`/`while`/`for` all open, `end` closes)
-- **R315:** Text tokens: any contiguous non-whitespace characters that are not comment, string, or bracket
-- **R316:** Chunk type — group: line-oriented; starts at the line containing an open bracket (not inside comment or string), continues line by line until all brackets are closed (depth returns to 0 at end of line); unified depth across all bracket types; single-line groups are not chunks
+- **R315:** Text tokens: any contiguous non-whitespace characters that are not comment or bracket; in scan-restricted groups, all bytes that are not Close/Escape/AllowedInner-openers accumulate as text
+- **R316:** Chunk type — group: line-oriented; starts at the line containing an open bracket recognized in code mode (not inside a comment or scan-restricted group), continues line by line until all code-mode brackets are closed (depth returns to 0 at end of line); single-line groups are not chunks
 - **R317:** Leading comment/text lines immediately before an open bracket (no blank line separating) attach to the group's chunk
 - **R318:** Chunk type — paragraph: sequence of lines not inside a group, terminated by blank line or start of a group
 - **R319:** Range labels are `startline-endline` (1-based), consistent with other chunkers
@@ -555,6 +555,12 @@
 - **R322:** Table-driven: adding a new language means adding a config entry, not code
 - **R323:** CLI subcommand: `microfts chunk-bracket -lang <name> <file>` — outputs `range\tcontent` lines
 - **R324:** (inferred) ChunkText seeks to the target range without scanning the entire file — justified by the chunker's complexity
+- **R617:** `BracketGroup.Escape` — string consumed inside a scan-restricted group along with the byte that follows it; empty means "no escaping" (raw strings)
+- **R618:** `BracketGroup.AllowedInner` — nil means code mode (full scanning inside); non-nil (including empty) means scan-restricted mode (only Close, Escape, and listed openers are recognized; everything else is literal text)
+- **R619:** `BracketGroup.AllowedParent` — nil means recognized in any context; non-nil restricts recognition to scans currently inside one of the listed openers (e.g. `${` recognized only inside `` ` ``)
+- **R620:** Inside a scan-restricted group, only three token types are recognized: the group's own Close markers, the group's Escape sequence (if non-empty), and openers listed in AllowedInner; all other bytes are literal text
+- **R621:** Group-depth counting for chunk boundaries (R316) is suppressed inside scan-restricted brackets — string content does not open or close chunk groups
+- **R622:** `nil` and `[]string{}` are semantically distinct for `AllowedInner` and `AllowedParent`: `nil` means "no restriction"; an empty non-nil slice means "restriction with empty list"
 
 ## Feature: Indent Chunker
 **Source:** specs/main.md
@@ -895,3 +901,53 @@
 - **R608:** When `replacedLast` is true, `DB.AppendChunks` drops the F record's last chunk entry, decrements the dropped chunkid's fileid count in its C record, and runs the orphan cascade if that was the last reference (same shared cleanup helper as `RemoveFile`)
 - **R609:** The drop-and-replace cleanup is a shared internal helper used by both `RemoveFile`'s per-chunk path and the append-merge drop path
 - **R610:** Current scope: `AppendAwareChunker` may replace at most one chunk (the last); replacing the last K is reserved for a future extension
+
+## Feature: Tmp Overlay IndexedChunkCallback
+**Source:** ark request `microfts2-tmp-callback`
+
+- **R611:** `WithIndexedChunkCallback` fires for tmp:// overlay paths via `AddTmpFile`, `UpdateTmpFile`, and `AppendTmpFile`, mirroring the persistent-path contract
+- **R612:** Callback fires once per genuinely-new chunk (hash dedup miss), in chunk order, after the overlay chunk has been created — never for dedup hits
+- **R613:** `IndexedChunk.CRecord` populated from the overlay chunk has no LMDB transaction context: `CRecord.Txn()` and `CRecord.DB()` return nil — overlay chunkids count down from MaxUint64, so callers can distinguish overlay-fired callbacks by chunkid range
+- **R614:** Overlay-fired `IndexedChunk.CRecord` populates ChunkID, Hash, ContentLen, Attrs, FileIDs, and Trigrams from the overlay chunk
+- **R615:** `AppendTmpFile` auto-create path (file did not previously exist) routes through `AddTmpFile`, propagating both `chunkCallback` and `indexedChunkCallback` from the `appendConfig`
+- **R616:** Overlay's `dedupOrCreateChunk` returns `(chunkID, isNew bool)` so callers can fire the callback only on creation, paralleling the persistent path's `nc != nil` check
+
+## Feature: AppendChunks Silent-No-Op Guard
+**Source:** ark request `microfts2-appendaware-chunkers`
+
+- **R623:** `DB.AppendChunks` returns `ErrAppendBoundary` when the registered chunker is not an `AppendAwareChunker` and produces zero chunks from non-empty `content`
+- **R624:** `ErrAppendBoundary` is an exported sentinel error so callers can detect this case via `errors.Is(err, ErrAppendBoundary)` and fall through to `Reindex` (or equivalent full refresh) instead of silently losing the appended bytes
+- **R625:** Empty `content` remains a successful no-op (`AppendChunks` returns `nil` without touching the F record) — the guard only fires when the chunker had bytes to chunk and produced nothing
+
+## Feature: BracketChunker AppendAwareChunker
+**Source:** ark request `microfts2-appendaware-chunkers` and existing R607
+
+- **R626:** `BracketChunker` implements `AppendAwareChunker` so code files in active development can be re-indexed incrementally without a full re-chunk
+- **R627:** `BracketChunker.AppendChunks` re-chunks from the previous last chunk's byte start (decoded from `lastLocator`) through end-of-file (reading the file from disk via `path`) so an append that completes a previously-partial bracket-block is recognised
+- **R628:** If the re-chunk's first emitted chunk has the same byte range as the previous last chunk, the boundary was clean — the chunker drops it (does not re-emit) and continues with the appended chunks (`replacedLast=false`); otherwise the first chunk replaces the previous last chunk (`replacedLast=true`)
+- **R629:** When the file had no previous chunks (`lastLocator` nil or empty), `BracketChunker.AppendChunks` chunks `newBytes` alone with `replacedLast=false`
+- **R630:** `BracketChunker.AppendChunks` adjusts each yielded chunk's `Range` (line numbers offset by newlines preceding the re-chunk start) and `Locator` (byte offsets shifted by the re-chunk start) so all emitted ranges/locators are absolute to the full file
+
+## Feature: Shared Chunker Helpers
+**Source:** specs/main.md — AppendAwareChunker shared resume helper, FileChunker section
+
+- **R631:** `appendByRechunkResume(path, lastLocator, newBytes, chunk, yield)` is an internal helper that implements the re-chunk-from-prior-start resume protocol for any text chunker whose chunks carry byte-range locators; it takes the chunker's content-based `Chunks` function as a parameter and applies the drop-or-replace logic plus the Range/Locator absolute-offset adjustment
+- **R632:** `fileChunksByRead(path, old, chunk, yield)` is an internal helper that implements the `FileChunker` interface for content-based text chunkers: read the file, compute the SHA-256, return early with no yields when `old` is non-zero and matches the new hash, otherwise delegate to the chunker's content-based `Chunks`
+- **R633:** `LineChunker`, `MarkdownChunker`, `BracketChunker`, and `IndentChunker` use `appendByRechunkResume` to implement `AppendAwareChunker`; they use `fileChunksByRead` to implement `FileChunker`
+
+## Feature: LineChunker AppendAwareChunker
+**Source:** specs/main.md — chunk-lines
+
+- **R634:** `LineChunker` implements `AppendAwareChunker` so an append that completes a previously-trailing partial line correctly merges into one chunk instead of stranding a fragment
+- **R635:** `LineChunker.AppendChunks` reuses the shared re-chunk-from-prior-start resume protocol — the byte-range locator already encodes whether the previous tail ended with a newline, so no separate "ends-with-newline" flag is needed
+
+## Feature: Text Chunkers FileChunker
+**Source:** specs/main.md — chunk-lines, chunk-markdown, chunk-bracket
+
+- **R636:** `LineChunker`, `MarkdownChunker`, `BracketChunker`, and `IndentChunker` implement `FileChunker` (via `fileChunksByRead`) so callers can stat-skip the file based on a known content hash without pre-reading the bytes
+
+## Feature: IndentChunker AppendAwareChunker
+**Source:** specs/main.md — Indent Chunker section, ark request `microfts2-appendaware-chunkers` (O16 follow-through)
+
+- **R637:** `IndentChunker` implements `AppendAwareChunker` so an append that extends an indent scope, attaches new leading comments, or completes a scope that ran to EOF is recognised across the append boundary
+- **R638:** `IndentChunker.AppendChunks` reuses the shared `appendByRechunkResume` resume protocol — indent chunk locators are already byte ranges (R594), so no per-chunker resume state is needed

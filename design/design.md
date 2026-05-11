@@ -58,15 +58,15 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O1: Missing test: TestDBReindex (test-DB.md 'reindex with different strategy')
 - [x] O2: Missing test: TestDBLongFilename (test-DB.md 'key chain for long filename')
 - [x] O3: No unit tests for keychain.go (EncodeFilename, DecodeFilename, FinalKey)
-- [ ] A1: No unit tests for chunker.go — shells out to external commands, integration-only
-- [ ] A2: Requirement numbering non-sequential — cosmetic, not renumbering to avoid breaking all CRC refs
+- A1: No unit tests for chunker.go — shells out to external commands, integration-only
+- A2: Requirement numbering non-sequential — cosmetic, not renumbering to avoid breaking all CRC refs
 - [ ] O4: No test for density scoring (WithDensity search option)
 - [x] O5: ~~R record roundtrip — R records removed in LMDB reorganization~~
 - [x] O6: No test for CharSet.TrigramCounts
 - [x] O7: ~~sparse C record encode/decode — old C records removed in LMDB reorganization~~
 - [x] O8: Packed trigram functions removed (A record eliminated)
-- [ ] A3: Removed requirements uncovered: R7, R8, R14, R15, R16, R19, R21, R28, R30, R36, R48, R54, R75, R76, R83, R95, R102, R109, R123, R138, R145, R148, R149, R154, R155 — old two-tree layout, forward/reverse index, per-trigram C records, N record JSON
-- [ ] A4: Bigram index removed — R379-R412 no longer implemented. SearchFuzzy (trigram OR-union) handles typo-tolerant search. Bigrams were slow (2.5s on 74K chunks) and fat (1.7x index size). Version reverted to "2"
+- A3: Removed requirements uncovered: R7, R8, R14, R15, R16, R19, R21, R28, R30, R36, R48, R54, R75, R76, R83, R95, R102, R109, R123, R138, R145, R148, R149, R154, R155 — old two-tree layout, forward/reverse index, per-trigram C records, N record JSON
+- A4: Bigram index removed — R379-R412 no longer implemented. SearchFuzzy (trigram OR-union) handles typo-tolerant search. Bigrams were slow (2.5s on 74K chunks) and fat (1.7x index size). Version reverted to "2"
 - [ ] O9: No test for WRecord encode/decode roundtrip
 - [x] O10: No test for WithAfter/WithBefore date filtering (needs chunker producing Attrs with timestamp)
 - [x] O11: Implementation: db.go needs full rewrite for new record layout (single subdatabase, chunk dedup, record structs, T/W records, ChunkFilter)
@@ -74,4 +74,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks
 - [x] O14: R417: Bigram OR-union candidate set size unbounded — monitor performance on large corpora, add filtering if needed
 - [x] O15: ~~resolveChunkText and chunkTextByRangeFile defined but not called~~ — resolved by removing ChunkTexter entirely; RandomAccessChunker (R524) supersedes it
-- [ ] O16: AppendAwareChunker boundary-fixup logic deferred for built-in chunkers (R607). Infrastructure (interface, dispatch, dropChunkOccurrence, F-record entry shape with Locator) is in place. Built-in chunkers populate Locator with byte ranges (R594) but none yet implements AppendAwareChunker. Each chunker needs a richer locator schema or a side channel to access prior content (e.g., "ends-with-newline" flag for LineChunker; structural-shape state for markdown/bracket/indent). Default behavior — chunk newBytes alone — applies until each chunker's resume protocol is designed.
+- [x] O16: All four built-in text chunkers (`LineChunker`, `MarkdownChunker`, `BracketChunker`, `IndentChunker`) implement `AppendAwareChunker` via the shared `appendByRechunkResume` helper, and all four implement `FileChunker` via the shared `fileChunksByRead` helper (R633, R636). The `DB.AppendChunks` silent-no-op guard (R623, `ErrAppendBoundary`) catches the case where a non-AppendAware custom chunker is used and produces no chunks for non-empty input.
+- T1: R308 retired by R309 (2026-05-04 BracketLang unification: StringDelim folded into BracketGroup via Escape+AllowedInner+AllowedParent)

@@ -66,9 +66,25 @@ func (ic *indentChunker) Chunks(path string, content []byte, yield func(Chunk) b
 	return emitIndentChunks(content, lines, groups, yield)
 }
 
+// FileChunks reads the file and delegates to Chunks via the shared
+// fileChunksByRead helper — supports stat-skip via the old-hash short-circuit.
+// R633, R636
+func (ic *indentChunker) FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) {
+	return fileChunksByRead(path, old, ic.Chunks, yield)
+}
+
 // GetChunk is the RandomAccessChunker fast path — slices data by line range. R531
 func (ic *indentChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
 	return sliceByLineRange(data, customData, chunk)
+}
+
+// AppendChunks delegates to appendByRechunkResume so indent-scope boundaries
+// (including leading-comment attachment and not-yet-closed scopes) are
+// recognised across the append boundary via re-chunking from the previous
+// last chunk's start through EOF.
+// R633, R637, R638
+func (ic *indentChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (bool, error) {
+	return appendByRechunkResume(path, lastLocator, newBytes, ic.Chunks, yield)
 }
 
 // measureIndent counts the leading whitespace columns. R328

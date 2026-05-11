@@ -158,9 +158,15 @@ func (cc *ChunkCache) ensureFile(fpath string) (*cachedFile, error) {
 		return nil, fmt.Errorf("chunker strategy %q not registered", frec.Strategy)
 	}
 
-	// R514: dispatch — FileChunker reads the file itself, Chunker needs os.ReadFile
+	// R514: dispatch — pre-read content for content-based chunkers. A chunker
+	// that implements only FileChunker (binary format) reads the file itself
+	// inside its callbacks; a chunker that implements both Chunker and
+	// FileChunker is a text chunker that still wants pre-read data for the
+	// random-access slicing fast path.
 	var data []byte
-	if _, ok := chunker.(FileChunker); !ok {
+	_, isFC := chunker.(FileChunker)
+	_, isContent := chunker.(Chunker)
+	if !isFC || isContent {
 		data, err = os.ReadFile(fpath)
 		if err != nil {
 			return nil, err
@@ -293,7 +299,16 @@ func (cc *ChunkCache) chunkFull(cf *cachedFile) {
 }
 
 // runChunker dispatches streaming chunking based on the chunker's interface.
+// Prefer Chunker when pre-read data is available (text chunker that also
+// implements FileChunker would otherwise re-read the file). Fall back to
+// FileChunker for binary-only chunkers.
 func (cc *ChunkCache) runChunker(cf *cachedFile, yield func(Chunk) bool) {
+	if cf.data != nil {
+		if ch, ok := cf.chunker.(Chunker); ok {
+			ch.Chunks(cf.path, cf.data, yield)
+			return
+		}
+	}
 	if fc, ok := cf.chunker.(FileChunker); ok {
 		fc.FileChunks(cf.path, [32]byte{}, yield)
 		return

@@ -2583,6 +2583,433 @@ func TestAppendChunksWithCallback(t *testing.T) {
 	}
 }
 
+// WithIndexedChunkCallback fires once per genuinely-new chunkid; dedup'd
+// chunks do not fire. CRecord carries the chunkid and a single-entry FileIDs.
+func TestAddFileWithIndexedChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "multi.txt", "alpha\nbeta\ngamma\n")
+
+	var ics []IndexedChunk
+	fileid, err := db.AddFile(fp, "line", WithIndexedChunkCallback(func(ic IndexedChunk) {
+		ics = append(ics, ic)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ics) != 3 {
+		t.Fatalf("expected 3 IndexedChunk fires, got %d", len(ics))
+	}
+	wantContent := []string{"alpha\n", "beta\n", "gamma\n"}
+	for i, ic := range ics {
+		if string(ic.Chunk.Content) != wantContent[i] {
+			t.Errorf("ics[%d].Chunk.Content = %q, want %q", i, string(ic.Chunk.Content), wantContent[i])
+		}
+		if ic.CRecord.ChunkID == 0 {
+			t.Errorf("ics[%d].CRecord.ChunkID is zero", i)
+		}
+		if len(ic.CRecord.FileIDs) != 1 || ic.CRecord.FileIDs[0].FileID != fileid || ic.CRecord.FileIDs[0].Count != 1 {
+			t.Errorf("ics[%d].CRecord.FileIDs = %v, want [{%d,1}]", i, ic.CRecord.FileIDs, fileid)
+		}
+	}
+}
+
+// Adding a second file with the same content as the first should NOT fire
+// the indexed callback for the dedup'd chunk — its C record already existed.
+func TestIndexedChunkCallbackSkipsDedup(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "first.txt", "shared one\nshared two\n")
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	fp2 := writeTestFile(t, dir, "second.txt", "shared one\nshared two\nuniq\n")
+	var ics []IndexedChunk
+	_, err := db.AddFile(fp2, "line", WithIndexedChunkCallback(func(ic IndexedChunk) {
+		ics = append(ics, ic)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ics) != 1 {
+		t.Fatalf("expected 1 fire for the unique chunk only, got %d", len(ics))
+	}
+	if string(ics[0].Chunk.Content) != "uniq\n" {
+		t.Errorf("fired chunk content = %q, want %q", string(ics[0].Chunk.Content), "uniq\n")
+	}
+}
+
+// WithIndexedChunkCallback and WithChunkCallback coexist: text-only fires for
+// every yielded chunk, indexed fires only for new chunkids.
+func TestIndexedChunkCallbackCoexistsWithChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "first.txt", "a\nb\n")
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+	fp2 := writeTestFile(t, dir, "second.txt", "a\nb\nc\n")
+
+	var allChunks []string
+	var newChunks []IndexedChunk
+	_, err := db.AddFile(fp2, "line",
+		WithChunkCallback(func(text string) { allChunks = append(allChunks, text) }),
+		WithIndexedChunkCallback(func(ic IndexedChunk) { newChunks = append(newChunks, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allChunks) != 3 {
+		t.Errorf("WithChunkCallback fires = %d, want 3", len(allChunks))
+	}
+	if len(newChunks) != 1 {
+		t.Errorf("WithIndexedChunkCallback fires = %d, want 1 (only \"c\")", len(newChunks))
+	}
+}
+
+// AppendChunks fires WithIndexedChunkCallback for genuinely-new tail chunks
+// and skips dedup'd ones.
+func TestAppendChunksWithIndexedCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "a.txt", "one\ntwo\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append "two\nthree\n" — "two" already exists (dedup), "three" is new.
+	var ics []IndexedChunk
+	err = db.AppendChunks(fileid, []byte("two\nthree\n"), "line",
+		WithIndexedChunkCallback(func(ic IndexedChunk) { ics = append(ics, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ics) != 1 {
+		t.Fatalf("expected 1 fire (only \"three\\n\"), got %d", len(ics))
+	}
+	if string(ics[0].Chunk.Content) != "three\n" {
+		t.Errorf("fired content = %q, want %q", string(ics[0].Chunk.Content), "three\n")
+	}
+}
+
+// Reindex of an unchanged file should not fire the indexed callback for
+// chunks that already existed — but content-dedup means the same hashes
+// resolve to the same chunkids, refcount-bumped on the new file's behalf.
+// (Note: Reindex first removes the file's old C-record references; on
+// re-add, the H records still exist for content seen by other files.)
+func TestReindexWithIndexedCallback(t *testing.T) {
+	db, dir := testDB(t)
+	// Two files with shared content so chunk H records survive removeFile.
+	fp1 := writeTestFile(t, dir, "first.txt", "x\ny\nz\n")
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+	fp2 := writeTestFile(t, dir, "second.txt", "x\ny\nz\n")
+	if _, err := db.AddFile(fp2, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reindex fp2 with no actual change — H records for x/y/z still exist.
+	var ics []IndexedChunk
+	_, err := db.Reindex(fp2, "line", WithIndexedChunkCallback(func(ic IndexedChunk) {
+		ics = append(ics, ic)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ics) != 0 {
+		t.Errorf("expected 0 fires (all dedup'd against fp1), got %d", len(ics))
+	}
+}
+
+// WithRemovedChunkCallback fires once per chunk being orphaned (refcount→0)
+// during the operation, regardless of which path triggered the orphan.
+func TestRemoveFileWithRemovedChunkCallback(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "solo.txt", "alpha\nbeta\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	err := db.RemoveFile(fp, WithRemovedChunkCallback(func(cr CRecord) {
+		removed = append(removed, cr)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("expected 2 orphans, got %d", len(removed))
+	}
+	for i, cr := range removed {
+		if cr.ChunkID == 0 {
+			t.Errorf("removed[%d].ChunkID is zero", i)
+		}
+		if cr.ContentLen == 0 {
+			t.Errorf("removed[%d].ContentLen is zero", i)
+		}
+	}
+}
+
+// Removing a file whose chunks are still referenced by another file should
+// NOT fire the removed callback for those chunks (they're not orphaned).
+func TestRemovedChunkCallbackSkipsSharedChunks(t *testing.T) {
+	db, dir := testDB(t)
+	fp1 := writeTestFile(t, dir, "first.txt", "shared\nuniq1\n")
+	fp2 := writeTestFile(t, dir, "second.txt", "shared\nuniq2\n")
+	if _, err := db.AddFile(fp1, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddFile(fp2, "line"); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	err := db.RemoveFile(fp1, WithRemovedChunkCallback(func(cr CRecord) {
+		removed = append(removed, cr)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected 1 orphan (uniq1), got %d", len(removed))
+	}
+}
+
+// AppendChunks with a chunker that triggers replacedLast should fire the
+// removed callback if the dropped tail chunk is orphaned.
+// AppendChunks with MarkdownChunker (AppendAwareChunker) extending the last
+// paragraph: the previous last chunk is orphaned and replaced with a merged
+// chunk covering both the old and the appended lines.
+func TestAppendChunksMarkdownExtendsLastParagraph(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := writeTestFile(t, dir, "doc.md", "para line one\npara line two\n")
+	fileid, err := db.AddFile(fp, "markdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a third line to the same paragraph (no blank-line separator).
+	appended := []byte("para line three\n")
+	if err := os.WriteFile(fp, []byte("para line one\npara line two\npara line three\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	var inserted []IndexedChunk
+	err = db.AppendChunks(fileid, appended, "markdown",
+		WithRemovedChunkCallback(func(cr CRecord) { removed = append(removed, cr) }),
+		WithIndexedChunkCallback(func(ic IndexedChunk) { inserted = append(inserted, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected 1 orphan (extended paragraph), got %d", len(removed))
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("expected 1 newly-inserted chunk (the merged paragraph), got %d", len(inserted))
+	}
+	want := "para line one\npara line two\npara line three\n"
+	if string(inserted[0].Chunk.Content) != want {
+		t.Errorf("merged chunk content = %q, want %q", string(inserted[0].Chunk.Content), want)
+	}
+}
+
+// AppendChunks across a clean blank-line boundary should NOT orphan the
+// previous last chunk — it stays intact and the appended content forms a
+// new chunk.
+func TestAppendChunksMarkdownCleanBoundary(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := writeTestFile(t, dir, "doc.md", "para one\n\npara two\n")
+	fileid, err := db.AddFile(fp, "markdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a brand-new paragraph after a blank-line separator.
+	appended := []byte("\npara three\n")
+	if err := os.WriteFile(fp, []byte("para one\n\npara two\n\npara three\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	var inserted []IndexedChunk
+	err = db.AppendChunks(fileid, appended, "markdown",
+		WithRemovedChunkCallback(func(cr CRecord) { removed = append(removed, cr) }),
+		WithIndexedChunkCallback(func(ic IndexedChunk) { inserted = append(inserted, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("expected 0 orphans (clean boundary), got %d", len(removed))
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("expected 1 newly-inserted chunk (\"para three\"), got %d", len(inserted))
+	}
+	if string(inserted[0].Chunk.Content) != "para three\n" {
+		t.Errorf("new chunk content = %q, want %q", string(inserted[0].Chunk.Content), "para three\n")
+	}
+}
+
+// AppendChunks must surface an ErrAppendBoundary when a non-AppendAware
+// chunker produces zero chunks from non-empty content — otherwise the bytes
+// are silently dropped and the F record is left stale forever. R623, R624
+func TestAppendChunksReturnsErrAppendBoundaryOnSilentNoOp(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddStrategyFunc("zero", func(_ string, _ []byte, _ func(Chunk) bool) error {
+		return nil // yield never called
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := writeTestFile(t, dir, "x.txt", "hello\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.AppendChunks(fileid, []byte("appended bytes\n"), "zero")
+	if !errors.Is(err, ErrAppendBoundary) {
+		t.Fatalf("expected ErrAppendBoundary for non-AppendAware zero-chunk fallback, got %v", err)
+	}
+}
+
+// AppendChunks with empty content stays a successful no-op even when the
+// chunker would have produced zero chunks. R625
+func TestAppendChunksEmptyContentIsNoOp(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddStrategyFunc("zero", func(_ string, _ []byte, _ func(Chunk) bool) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := writeTestFile(t, dir, "x.txt", "hello\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.AppendChunks(fileid, nil, "zero"); err != nil {
+		t.Fatalf("empty content should be a no-op, got %v", err)
+	}
+	if err := db.AppendChunks(fileid, []byte{}, "zero"); err != nil {
+		t.Fatalf("empty content should be a no-op, got %v", err)
+	}
+}
+
+// End-to-end through DB.AppendChunks: a Go file gains a new function after
+// a blank-line boundary. The previous chunk stays intact; only the new
+// function lands as a fresh chunk. R626, R627, R628
+func TestAppendChunksBracketCleanBoundary(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
+		t.Fatal(err)
+	}
+
+	initial := "func a() {\n\tone()\n}\n\nfunc b() {\n\ttwo()\n}\n"
+	fp := writeTestFile(t, dir, "code.go", initial)
+	fileid, err := db.AddFile(fp, "bracket-go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frecBefore, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunksBefore := len(frecBefore.Chunks)
+	if chunksBefore < 2 {
+		t.Fatalf("expected ≥2 chunks before append, got %d", chunksBefore)
+	}
+
+	appended := "\nfunc c() {\n\tthree()\n}\n"
+	full := initial + appended
+	if err := os.WriteFile(fp, []byte(full), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	var inserted []IndexedChunk
+	err = db.AppendChunks(fileid, []byte(appended), "bracket-go",
+		WithRemovedChunkCallback(func(cr CRecord) { removed = append(removed, cr) }),
+		WithIndexedChunkCallback(func(ic IndexedChunk) { inserted = append(inserted, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("clean boundary should not orphan the previous chunk, got %d orphans", len(removed))
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("expected exactly 1 new chunk (func c), got %d", len(inserted))
+	}
+	if !strings.Contains(string(inserted[0].Chunk.Content), "func c()") {
+		t.Errorf("new chunk content = %q, want it to contain \"func c()\"", string(inserted[0].Chunk.Content))
+	}
+
+	frecAfter, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(frecAfter.Chunks), chunksBefore+1; got != want {
+		t.Errorf("chunk count after append = %d, want %d", got, want)
+	}
+}
+
+// End-to-end through DB.AppendChunks: the appended bytes complete a
+// previously-partial bracket-block (the closing brace had not yet been
+// written). The previous open-group chunk is replaced by a single complete
+// group chunk. R626, R627, R628
+func TestAppendChunksBracketCompletesGroup(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initial file has an unclosed function — depth>0 at EOF.
+	initial := "func a() {\n\tone()\n"
+	fp := writeTestFile(t, dir, "code.go", initial)
+	fileid, err := db.AddFile(fp, "bracket-go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appended := "}\n"
+	full := initial + appended
+	if err := os.WriteFile(fp, []byte(full), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []CRecord
+	var inserted []IndexedChunk
+	err = db.AppendChunks(fileid, []byte(appended), "bracket-go",
+		WithRemovedChunkCallback(func(cr CRecord) { removed = append(removed, cr) }),
+		WithIndexedChunkCallback(func(ic IndexedChunk) { inserted = append(inserted, ic) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("completing a partial group should orphan the previous open-group chunk, got %d orphans", len(removed))
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("expected 1 new chunk (the completed group), got %d", len(inserted))
+	}
+	if want := "func a() {\n\tone()\n}\n"; string(inserted[0].Chunk.Content) != want {
+		t.Errorf("merged chunk content = %q, want %q", string(inserted[0].Chunk.Content), want)
+	}
+}
+
 // CRC: crc-DB.md | R479
 func TestRefreshStaleWithChunkCallback(t *testing.T) {
 	db, dir := testDB(t)

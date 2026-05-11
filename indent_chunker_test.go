@@ -18,12 +18,6 @@ x = 1
 `
 	lang := BracketLang{
 		LineComments: []string{"#"},
-		StringDelims: []StringDelim{
-			{Open: `"`, Close: `"`, Escape: `\`},
-			{Open: "'", Close: "'", Escape: `\`},
-			{Open: `"""`, Close: `"""`},
-			{Open: "'''", Close: "'''"},
-		},
 	}
 	ic := IndentChunker(lang, 4)
 	var chunks []Chunk

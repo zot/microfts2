@@ -33,17 +33,25 @@ var ErrNoChunks = errors.New("chunker produced no chunks")
 // has F records in the database. Use Reindex or AppendChunks instead. R215
 var ErrAlreadyIndexed = errors.New("file already indexed")
 
+// ErrAppendBoundary is returned by AppendChunks when the registered chunker is
+// not an AppendAwareChunker and produces zero chunks from non-empty content —
+// the appended bytes likely straddle a chunk boundary the chunker can't see
+// without prior context, so silently appending would lose them. Callers should
+// detect this with errors.Is and fall through to Reindex (or another full
+// refresh) instead. R623, R624
+var ErrAppendBoundary = errors.New("AppendChunks: non-AppendAware chunker produced zero chunks for non-empty content; appended bytes may straddle a chunk boundary — use Reindex")
+
 // CRC: crc-DB.md | Seq: seq-init.md, seq-add.md, seq-search.md, seq-score.md, seq-stale.md, seq-append.md, seq-chunks.md
 
 // collectedChunk holds processed chunk data between generator collection and DB write.
+// Embeds Chunk so the underlying yield (Range, Locator, Content, Attrs) is carried
+// alongside the derived index data (hash, triCounts, tokens). Content is nil'd after
+// the C record is written to release memory before the txn commits.
 type collectedChunk struct {
-	rangeStr   string
-	locator    []byte // per-occurrence opaque bytes from the chunker (R587, R590)
-	hash       [32]byte
-	contentLen int
-	triCounts  map[uint32]int
-	tokens     []TokenEntry
-	attrs      []Pair
+	Chunk
+	hash      [32]byte
+	triCounts map[uint32]int
+	tokens    []TokenEntry
 }
 
 type DB struct {
@@ -1120,9 +1128,9 @@ func (db *DB) ensureOverlay() *overlay {
 func (db *DB) AddTmpFile(path, strategy string, content []byte, opts ...IndexOption) (uint64, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	return db.ensureOverlay().addFile(path, strategy, content, db, cfg.chunkCallback)
+	return db.ensureOverlay().addFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
 // CRC: crc-DB.md | Seq: seq-tmp-add.md | R361, R362, R363, R481
@@ -1130,9 +1138,9 @@ func (db *DB) AddTmpFile(path, strategy string, content []byte, opts ...IndexOpt
 func (db *DB) UpdateTmpFile(path, strategy string, content []byte, opts ...IndexOption) error {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	return db.ensureOverlay().updateFile(path, strategy, content, db, cfg.chunkCallback)
+	return db.ensureOverlay().updateFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
 // CRC: crc-DB.md | R428-R442, R483
@@ -1333,9 +1341,9 @@ func (db *DB) InvalidateCaches() {
 func (db *DB) AddFile(fpath, strategy string, opts ...IndexOption) (uint64, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	fileid, _, err := db.addFileCore(fpath, strategy, cfg.chunkCallback)
+	fileid, _, err := db.addFileCore(fpath, strategy, cfg.chunkCallback, cfg.indexedChunkCallback)
 	return fileid, err
 }
 
@@ -1343,9 +1351,9 @@ func (db *DB) AddFile(fpath, strategy string, opts ...IndexOption) (uint64, erro
 func (db *DB) AddFileWithContent(fpath, strategy string, opts ...IndexOption) (uint64, []byte, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	return db.addFileCore(fpath, strategy, cfg.chunkCallback)
+	return db.addFileCore(fpath, strategy, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
 // collectChunks reads a file, runs the chunker, and returns the collected chunks.
@@ -1379,14 +1387,16 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:   string(c.Range),
-			locator:    append([]byte(nil), c.Locator...),
-			hash:       h,
-			contentLen: len(c.Content),
-			triCounts:  db.trigrams.TrigramCounts(c.Content),
-			tokens:     tokenizeCounts(c.Content),
+			Chunk: Chunk{
+				Range:   append([]byte(nil), c.Range...),
+				Locator: append([]byte(nil), c.Locator...),
+				Content: append([]byte(nil), c.Content...),
+				Attrs:   CopyPairs(c.Attrs),
+			},
+			hash:      h,
+			triCounts: db.trigrams.TrigramCounts(c.Content),
+			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = CopyPairs(c.Attrs)
 		chunks = append(chunks, cc)
 		return true
 	}
@@ -1394,13 +1404,11 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	var data []byte
 	var hash [32]byte
 
-	// R513: dispatch by chunker interface
-	if fc, ok := chunker.(FileChunker); ok {
-		hash, err = fc.FileChunks(fpath, [32]byte{}, yield)
-		if err != nil {
-			return nil, nil, 0, [32]byte{}, err
-		}
-	} else if ch, ok := chunker.(Chunker); ok {
+	// R513: dispatch by chunker interface. Prefer Chunker (content-based) when
+	// available so the caller gets `data` for FileLength and downstream use;
+	// fall back to FileChunker for binary-only formats that don't implement
+	// Chunker.
+	if ch, ok := chunker.(Chunker); ok {
 		data, err = os.ReadFile(fpath)
 		if err != nil {
 			return nil, nil, 0, [32]byte{}, err
@@ -1409,6 +1417,11 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 			return nil, nil, 0, [32]byte{}, err
 		}
 		hash = contentHash(data)
+	} else if fc, ok := chunker.(FileChunker); ok {
+		hash, err = fc.FileChunks(fpath, [32]byte{}, yield)
+		if err != nil {
+			return nil, nil, 0, [32]byte{}, err
+		}
 	} else {
 		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", strategy)
 	}
@@ -1424,7 +1437,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 }
 
 // Seq: seq-add.md | R118
-func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback) (uint64, []byte, error) {
+func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback, ich IndexedChunkCallback) (uint64, []byte, error) {
 	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
 		return 0, nil, err
@@ -1433,7 +1446,7 @@ func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback) (uint64, []b
 	var fileid uint64
 	err = db.env.Update(func(txn *lmdb.Txn) error {
 		var txnErr error
-		fileid, _, txnErr = db.addFileInTxn(txnWrap{txn}, fpath, strategy, chunks, modTime, hash, int64(len(data)))
+		fileid, _, txnErr = db.addFileInTxn(txnWrap{txn}, fpath, strategy, chunks, modTime, hash, int64(len(data)), ich)
 		return txnErr
 	})
 	if err == nil && db.pathCache != nil {
@@ -1466,8 +1479,10 @@ type newChunkTW struct {
 // count in the existing C record (inserting with count=1 if absent). On miss,
 // allocates new chunkid, creates H and C records (with [fileid, count=1]).
 // Returns chunkid and a newChunkTW pointer for new chunks (nil for dedup hits).
+// crec is the freshly-written C record on the new-chunk path (zero-value on
+// dedup hit) — used by WithIndexedChunkCallback delivery in the caller.
 // CRC: crc-DB.md | R596, R600
-func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64) (uint64, *newChunkTW, error) {
+func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64) (uint64, *newChunkTW, CRecord, error) {
 	txn := th.Txn()
 	hKey := makeHKey(ch.hash)
 
@@ -1477,32 +1492,32 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		cKey := makeCKey(chunkid)
 		cVal, err := txn.Get(db.dbi, cKey)
 		if err != nil {
-			return 0, nil, fmt.Errorf("read C record %d: %w", chunkid, err)
+			return 0, nil, CRecord{}, fmt.Errorf("read C record %d: %w", chunkid, err)
 		}
 		cData := make([]byte, len(cVal))
 		copy(cData, cVal)
 		crec, err := UnmarshalCValue(cData)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, CRecord{}, err
 		}
 		crec.IncFileID(fileid) // R596
 		if err := txn.Put(db.dbi, cKey, crec.MarshalValue(), 0); err != nil {
-			return 0, nil, err
+			return 0, nil, CRecord{}, err
 		}
-		return chunkid, nil, nil
+		return chunkid, nil, CRecord{}, nil
 	} else if !lmdb.IsNotFound(err) {
-		return 0, nil, err
+		return 0, nil, CRecord{}, err
 	}
 
 	chunkid, err := db.allocChunkID(th)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, CRecord{}, err
 	}
 
 	var hValBuf [binary.MaxVarintLen64]byte
 	hn := binary.PutUvarint(hValBuf[:], chunkid)
 	if err := txn.Put(db.dbi, hKey, hValBuf[:hn], 0); err != nil {
-		return 0, nil, err
+		return 0, nil, CRecord{}, err
 	}
 
 	triEntries := make([]TrigramEntry, 0, len(ch.triCounts))
@@ -1515,17 +1530,17 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 	crec := CRecord{
 		ChunkID:    chunkid,
 		Hash:       ch.hash,
-		ContentLen: ch.contentLen,
+		ContentLen: len(ch.Content),
 		Trigrams:   triEntries,
 		Tokens:     ch.tokens,
-		Attrs:      ch.attrs,
+		Attrs:      ch.Attrs,
 		FileIDs:    []FileIDCount{{FileID: fileid, Count: 1}}, // R600
 	}
 	if err := txn.Put(db.dbi, makeCKey(chunkid), crec.MarshalValue(), 0); err != nil {
-		return 0, nil, err
+		return 0, nil, CRecord{}, err
 	}
 
-	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, nil
+	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, crec, nil
 }
 
 // coalescedAppendT coalesces trigram→chunkids across all new chunks and does
@@ -1577,7 +1592,7 @@ func (db *DB) coalescedAppendAll(th TxnHolder, newChunks []newChunkTW) error {
 }
 
 // Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
-func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64) (uint64, []uint64, error) {
+func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64, ich IndexedChunkCallback) (uint64, []uint64, error) {
 	txn := th.Txn()
 	// Dedup guard: check for existing N records before allocating a fileid
 	finalKey := FinalKey(fpath)
@@ -1620,14 +1635,19 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 	var newChunks []newChunkTW
 
 	for i, ch := range chunks {
-		chunkid, nc, err := db.dedupOrCreateChunk(th, ch, fileid)
+		chunkid, nc, crec, err := db.dedupOrCreateChunk(th, ch, fileid)
 		if err != nil {
 			return 0, nil, err
 		}
 		if nc != nil {
 			newChunks = append(newChunks, *nc)
+			if ich != nil {
+				crec.attach(db, th.Txn())
+				ich(IndexedChunk{Chunk: ch.Chunk, CRecord: crec})
+			}
 		}
-		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr, Locator: ch.locator}
+		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: string(ch.Range), Locator: ch.Locator}
+		chunks[i].Content = nil // release content after C record write (and after callback fire)
 		chunkIDs[i] = chunkid
 		mergeTokenBag(fileBag, ch.tokens)
 	}
@@ -1658,14 +1678,22 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 
 // --- RemoveFile ---
 
-func (db *DB) RemoveFile(fpath string) error {
-	return db.RemoveFileWithCallback(fpath, nil)
+func (db *DB) RemoveFile(fpath string, opts ...RemoveOption) error {
+	var cfg removeConfig
+	for _, o := range opts {
+		o.applyRemove(&cfg)
+	}
+	return db.removeFileWithCallbackImpl(fpath, nil, cfg.removedChunkCallback)
 }
 
 // CRC: crc-DB.md | R547, R548, R549, R550, R551, R552, R553, R554
 func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error {
+	return db.removeFileWithCallbackImpl(fpath, fn, nil)
+}
+
+func (db *DB) removeFileWithCallbackImpl(fpath string, fn RemoveCallback, rcb RemovedChunkCallback) error {
 	err := db.env.Update(func(txn *lmdb.Txn) error {
-		orphans, err := db.removeFileInTxn(txnWrap{txn}, fpath)
+		orphans, err := db.removeFileInTxn(txnWrap{txn}, fpath, rcb)
 		if err != nil {
 			return err
 		}
@@ -1684,9 +1712,16 @@ func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error {
 }
 
 // cascadeOrphan deletes the C/H records and prunes T/W postings for an orphaned chunk.
-// Increments the removed counters. Caller has already ensured FileIDs is empty. // CRC: crc-DB.md | R598, R609
-func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64) error {
+// Increments the removed counters. Caller has already ensured FileIDs is empty.
+// rcb (if non-nil) fires before deletion with the orphaned C record (txn-attached).
+// CRC: crc-DB.md | R598, R609
+func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64, rcb RemovedChunkCallback) error {
 	txn := th.Txn()
+	if rcb != nil {
+		crec.attach(db, txn)
+		crec.ChunkID = chunkid
+		rcb(crec)
+	}
 	*removedChunks++
 	for _, te := range crec.Tokens {
 		*removedTokens += int64(te.Count)
@@ -1715,11 +1750,13 @@ func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedC
 // dropOccurrenceInline drops one occurrence of fileid from chunkid's C record
 // and subtracts the dropped chunk's tokens from fileBag in a single read.
 // AppendChunks uses this on its drop-and-replace path so bag bookkeeping and
-// the decrement share one C-record read. // CRC: crc-DB.md | R608
+// the decrement share one C-record read. rcb (if non-nil) fires before
+// orphan deletion. // CRC: crc-DB.md | R608
 func (db *DB) dropOccurrenceInline(
 	th TxnHolder, chunkid, fileid uint64,
 	fileBag map[string]int,
 	removedChunks, removedTokens *int64,
+	rcb RemovedChunkCallback,
 ) error {
 	txn := th.Txn()
 	cKey := makeCKey(chunkid)
@@ -1738,18 +1775,20 @@ func (db *DB) dropOccurrenceInline(
 	if len(crec.FileIDs) > 0 {
 		return txn.Put(db.dbi, cKey, crec.MarshalValue(), 0)
 	}
-	return db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens)
+	return db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // dropFromChunkRef applies mutate to the chunkid's C-record FileIDs slice and
 // either rewrites the record or cascades orphan cleanup if FileIDs is now empty.
 // Used by both whole-file removal (mutate=removeFileID, all occurrences) and
-// append-merge drop-and-replace (mutate=decFileID, one occurrence).
+// append-merge drop-and-replace (mutate=decFileID, one occurrence). rcb (if
+// non-nil) fires before orphan deletion.
 // Returns true when the chunk was orphaned. // CRC: crc-DB.md | R608, R609
 func (db *DB) dropFromChunkRef(
 	th TxnHolder, chunkid, fileid uint64,
 	mutate func([]FileIDCount, uint64) ([]FileIDCount, bool),
 	removedChunks, removedTokens *int64,
+	rcb RemovedChunkCallback,
 ) (bool, error) {
 	txn := th.Txn()
 	cKey := makeCKey(chunkid)
@@ -1767,11 +1806,11 @@ func (db *DB) dropFromChunkRef(
 	if len(crec.FileIDs) > 0 {
 		return false, txn.Put(db.dbi, cKey, crec.MarshalValue(), 0)
 	}
-	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens)
+	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // R254: Remove via F record → C records → T/W cleanup for orphaned chunks
-func (db *DB) removeFileInTxn(th TxnHolder, fpath string) ([]uint64, error) {
+func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallback) ([]uint64, error) {
 	txn := th.Txn()
 	fileid, frec, err := db.lookupFileByPath(th, fpath)
 	if err != nil {
@@ -1787,7 +1826,7 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) ([]uint64, error) {
 			continue
 		}
 		seen[fce.ChunkID] = true
-		orphaned, err := db.dropFromChunkRef(th, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens)
+		orphaned, err := db.dropFromChunkRef(th, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens, rcb)
 		if err != nil {
 			return nil, err
 		}
@@ -1821,9 +1860,9 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string) ([]uint64, error) {
 func (db *DB) Reindex(fpath, strategy string, opts ...IndexOption) (uint64, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	fileid, _, err := db.reindexCore(fpath, strategy, cfg.chunkCallback, nil)
+	fileid, _, err := db.reindexCore(fpath, strategy, cfg.chunkCallback, nil, cfg.indexedChunkCallback, cfg.removedChunkCallback)
 	return fileid, err
 }
 
@@ -1831,9 +1870,9 @@ func (db *DB) Reindex(fpath, strategy string, opts ...IndexOption) (uint64, erro
 func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	fileid, _, err := db.reindexCore(fpath, strategy, cfg.chunkCallback, fn)
+	fileid, _, err := db.reindexCore(fpath, strategy, cfg.chunkCallback, fn, cfg.indexedChunkCallback, cfg.removedChunkCallback)
 	return fileid, err
 }
 
@@ -1841,12 +1880,12 @@ func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, op
 func (db *DB) ReindexWithContent(fpath, strategy string, opts ...IndexOption) (uint64, []byte, error) {
 	var cfg indexConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyIndex(&cfg)
 	}
-	return db.reindexCore(fpath, strategy, cfg.chunkCallback, nil)
+	return db.reindexCore(fpath, strategy, cfg.chunkCallback, nil, cfg.indexedChunkCallback, cfg.removedChunkCallback)
 }
 
-func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexCallback) (uint64, []byte, error) {
+func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexCallback, ich IndexedChunkCallback, rmcb RemovedChunkCallback) (uint64, []byte, error) {
 	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
 		return 0, nil, err
@@ -1856,13 +1895,13 @@ func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexC
 	var fileid uint64
 	err = db.env.Update(func(txn *lmdb.Txn) error {
 		th := txnWrap{txn}
-		orphans, err := db.removeFileInTxn(th, fpath)
+		orphans, err := db.removeFileInTxn(th, fpath, rmcb)
 		if err != nil {
 			return err
 		}
 		var newChunkIDs []uint64
 		var txnErr error
-		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)))
+		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)), ich)
 		if txnErr != nil {
 			return txnErr
 		}
@@ -1898,64 +1937,194 @@ type RemoveCallback func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error
 // CRC: crc-DB.md | R555
 type ReindexCallback func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error
 
+// IndexedChunk pairs a yielded chunk with the freshly-written C record.
+// Delivered to WithIndexedChunkCallback only when the chunk's content was
+// genuinely new in this indexing call (the C record was created, not bumped).
+// On the persistent path the CRecord carries txn context, so callbacks may
+// call FileRecord and other DB lookups during the fire. On the overlay
+// (tmp://) path there is no LMDB transaction: CRecord.Txn() and CRecord.DB()
+// return nil, and only the chunkid / hash / attrs / fileIDs are meaningful.
+// Overlay chunkids count down from MaxUint64, so callers can distinguish
+// them from persistent chunkids by range.
+type IndexedChunk struct {
+	Chunk   Chunk
+	CRecord CRecord
+}
+
+// IndexedChunkCallback receives IndexedChunk values for newly-inserted chunkids.
+// Fires after the C record has been written. CRecord.FileIDs contains a
+// single entry: the file currently being indexed with Count=1.
+type IndexedChunkCallback func(IndexedChunk)
+
+// RemovedChunkCallback receives the CRecord of a chunk being orphaned
+// (refcount dropped to zero) during the current operation. Fires before the
+// C record is deleted, with txn context attached so callbacks can perform
+// reads. ark uses this to unindex chunkid-keyed external data (embeddings,
+// tag stores) without racing the deletion.
+type RemovedChunkCallback func(CRecord)
+
 // IndexOption configures indexing methods (AddFile, AddFileWithContent, RefreshStale, AddTmpFile, UpdateTmpFile).
 // CRC: crc-DB.md | R472
-type IndexOption func(*indexConfig)
+type IndexOption interface {
+	applyIndex(*indexConfig)
+}
+
+// AppendOption configures AppendChunks behavior.
+// R158
+type AppendOption interface {
+	applyAppend(*appendConfig)
+}
+
+// RemoveOption configures RemoveFile behavior.
+type RemoveOption interface {
+	applyRemove(*removeConfig)
+}
 
 type indexConfig struct {
-	chunkCallback ChunkCallback
+	chunkCallback        ChunkCallback
+	indexedChunkCallback IndexedChunkCallback
+	removedChunkCallback RemovedChunkCallback
 }
+
+type appendConfig struct {
+	contentHash          string
+	modTime              int64
+	fileLength           int64
+	hasFileLength        bool
+	baseLine             int
+	chunkCallback        ChunkCallback
+	indexedChunkCallback IndexedChunkCallback
+	removedChunkCallback RemovedChunkCallback
+}
+
+type removeConfig struct {
+	removedChunkCallback RemovedChunkCallback
+}
+
+// funcIndexOption wraps a func into an IndexOption.
+type funcIndexOption func(*indexConfig)
+
+func (f funcIndexOption) applyIndex(c *indexConfig) { f(c) }
+
+// funcAppendOption wraps a func into an AppendOption.
+type funcAppendOption func(*appendConfig)
+
+func (f funcAppendOption) applyAppend(c *appendConfig) { f(c) }
+
+// funcRemoveOption wraps a func into a RemoveOption.
+type funcRemoveOption func(*removeConfig)
+
+func (f funcRemoveOption) applyRemove(c *removeConfig) { f(c) }
+
+// dualOption is both an IndexOption and an AppendOption — used by options
+// that apply uniformly across indexing and append paths.
+type dualOption struct {
+	idx func(*indexConfig)
+	app func(*appendConfig)
+}
+
+func (d dualOption) applyIndex(c *indexConfig)   { d.idx(c) }
+func (d dualOption) applyAppend(c *appendConfig) { d.app(c) }
+
+// tripleOption applies to indexing, append, and remove paths uniformly.
+type tripleOption struct {
+	idx func(*indexConfig)
+	app func(*appendConfig)
+	rem func(*removeConfig)
+}
+
+func (t tripleOption) applyIndex(c *indexConfig)   { t.idx(c) }
+func (t tripleOption) applyAppend(c *appendConfig) { t.app(c) }
+func (t tripleOption) applyRemove(c *removeConfig) { t.rem(c) }
 
 // WithChunkCallback supplies a chunk callback for indexing methods.
 // CRC: crc-DB.md | R470
 func WithChunkCallback(fn ChunkCallback) IndexOption {
-	return func(c *indexConfig) { c.chunkCallback = fn }
+	return funcIndexOption(func(c *indexConfig) { c.chunkCallback = fn })
 }
 
 // --- AppendChunks ---
 
-// AppendOption configures AppendChunks behavior.
-// R158
-type AppendOption func(*appendConfig)
-
-type appendConfig struct {
-	contentHash   string
-	modTime       int64
-	fileLength    int64
-	hasFileLength bool
-	baseLine      int
-	chunkCallback ChunkCallback
-}
-
 // WithContentHash sets the full-file SHA-256 hash (caller pre-computed).
 // R159
 func WithContentHash(hash string) AppendOption {
-	return func(c *appendConfig) { c.contentHash = hash }
+	return funcAppendOption(func(c *appendConfig) { c.contentHash = hash })
 }
 
 // WithModTime sets the file modification time (Unix nanoseconds).
 // R160
 func WithModTime(t int64) AppendOption {
-	return func(c *appendConfig) { c.modTime = t }
+	return funcAppendOption(func(c *appendConfig) { c.modTime = t })
 }
 
 // WithFileLength sets the full file size after append.
 // R161
 func WithFileLength(n int64) AppendOption {
-	return func(c *appendConfig) { c.fileLength = n; c.hasFileLength = true }
+	return funcAppendOption(func(c *appendConfig) { c.fileLength = n; c.hasFileLength = true })
 }
 
 // WithBaseLine sets the 1-based line number offset for line-based chunker ranges.
 // When non-zero, "start-end" ranges are adjusted by adding this offset.
 // R162
 func WithBaseLine(n int) AppendOption {
-	return func(c *appendConfig) { c.baseLine = n }
+	return funcAppendOption(func(c *appendConfig) { c.baseLine = n })
 }
 
 // WithAppendChunkCallback supplies a chunk callback for append methods.
 // CRC: crc-DB.md | R471
+//
+// Deprecated: use WithIndexedChunkCallback for chunkid-aware callbacks, or
+// WithChunkCallback if only chunk text is needed (now accepted by both
+// indexing and append methods via dualOption — see WithChunkCallback).
 func WithAppendChunkCallback(fn ChunkCallback) AppendOption {
-	return func(c *appendConfig) { c.chunkCallback = fn }
+	return funcAppendOption(func(c *appendConfig) { c.chunkCallback = fn })
+}
+
+// WithIndexedChunkCallback supplies a chunkid-aware callback. Fires once per
+// genuinely newly-inserted chunkid (not per-emitted-chunk): chunks whose
+// content matches an existing C record (refcount bumped) do NOT fire. The
+// callback receives the chunk plus its freshly-written C record. The CRecord
+// is txn-attached, so callbacks may call FileRecord and other DB lookups
+// during the fire.
+//
+// Coexists with WithChunkCallback — the text-only callback fires for every
+// yielded chunk (vector-embedding path), the indexed callback only for
+// genuinely new ones.
+//
+// Fires from the LMDB indexing paths: AddFile, AddFileWithContent, Reindex
+// (and its variants), RefreshStale, AppendChunks. Does NOT fire for the
+// in-memory overlay paths (AddTmpFile / UpdateTmpFile / AppendTmpFile);
+// tmp:// documents don't have persistent CRecords to deliver.
+func WithIndexedChunkCallback(fn IndexedChunkCallback) interface {
+	IndexOption
+	AppendOption
+} {
+	return dualOption{
+		idx: func(c *indexConfig) { c.indexedChunkCallback = fn },
+		app: func(c *appendConfig) { c.indexedChunkCallback = fn },
+	}
+}
+
+// WithRemovedChunkCallback supplies a callback that fires once per chunk
+// being orphaned (refcount dropped to zero) by the current operation. Fires
+// before the C record is deleted, with txn context attached. The CRecord
+// carries hash, trigrams, tokens, and attrs — enough for ark and similar
+// consumers to clean up chunkid-keyed external state (embeddings, tag stores).
+//
+// Works as IndexOption (Reindex, RefreshStale — for chunks the file used to
+// reference but no longer does), AppendOption (AppendChunks — for the
+// replaced-last-chunk case under AppendAwareChunker), and RemoveOption
+// (RemoveFile — for chunks the removed file used to reference).
+func WithRemovedChunkCallback(fn RemovedChunkCallback) interface {
+	IndexOption
+	AppendOption
+	RemoveOption
+} {
+	return tripleOption{
+		idx: func(c *indexConfig) { c.removedChunkCallback = fn },
+		app: func(c *appendConfig) { c.removedChunkCallback = fn },
+		rem: func(c *removeConfig) { c.removedChunkCallback = fn },
+	}
 }
 
 // AppendChunks adds chunks to an existing file without full reindex.
@@ -1965,7 +2134,7 @@ func WithAppendChunkCallback(fn ChunkCallback) AppendOption {
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error {
 	var cfg appendConfig
 	for _, o := range opts {
-		o(&cfg)
+		o.applyAppend(&cfg)
 	}
 
 	resolved := db.resolveChunker(strategy)
@@ -2011,14 +2180,16 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		}
 		h := sha256.Sum256(c.Content)
 		cc := collectedChunk{
-			rangeStr:   string(c.Range),
-			locator:    append([]byte(nil), c.Locator...),
-			hash:       h,
-			contentLen: len(c.Content),
-			triCounts:  db.trigrams.TrigramCounts(c.Content),
-			tokens:     tokenizeCounts(c.Content),
+			Chunk: Chunk{
+				Range:   append([]byte(nil), c.Range...),
+				Locator: append([]byte(nil), c.Locator...),
+				Content: append([]byte(nil), c.Content...),
+				Attrs:   CopyPairs(c.Attrs),
+			},
+			hash:      h,
+			triCounts: db.trigrams.TrigramCounts(c.Content),
+			tokens:    tokenizeCounts(c.Content),
 		}
-		cc.attrs = CopyPairs(c.Attrs)
 		newChunks = append(newChunks, cc)
 		return true
 	}
@@ -2040,18 +2211,25 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		return utf8Err
 	}
 	if len(newChunks) == 0 && !replacedLast {
-		return nil // nothing to do
+		// Empty input is a legitimate no-op. Non-empty input with a non-AppendAware
+		// chunker that produced nothing means the appended bytes straddle a chunk
+		// boundary the chunker can't recognise in isolation — surface it instead
+		// of silently dropping data and leaving the F record stale. R623, R624, R625
+		if appendAware == nil && len(content) > 0 {
+			return fmt.Errorf("AppendChunks: chunker %q produced zero chunks from %d-byte content: %w", strategy, len(content), ErrAppendBoundary)
+		}
+		return nil
 	}
 
 	// Adjust ranges if baseLine is set (R165, R166). Only meaningful for default-path
 	// line-based chunkers — AppendAwareChunker is expected to emit absolute ranges itself.
 	if cfg.baseLine > 0 && appendAware == nil {
 		for i := range newChunks {
-			adjusted, err := adjustRange(newChunks[i].rangeStr, cfg.baseLine)
+			adjusted, err := adjustRange(string(newChunks[i].Range), cfg.baseLine)
 			if err != nil {
-				return fmt.Errorf("adjust range %q: %w", newChunks[i].rangeStr, err)
+				return fmt.Errorf("adjust range %q: %w", string(newChunks[i].Range), err)
 			}
-			newChunks[i].rangeStr = adjusted
+			newChunks[i].Range = []byte(adjusted)
 		}
 	}
 
@@ -2073,7 +2251,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		var droppedRemoved, droppedTokens int64
 		if replacedLast && len(frec.Chunks) > 0 {
 			last := frec.Chunks[len(frec.Chunks)-1]
-			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens); err != nil {
+			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
 				return err
 			}
 			frec.Chunks = frec.Chunks[:len(frec.Chunks)-1]
@@ -2081,16 +2259,22 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 
 		var newChunksTW []newChunkTW
 
-		for _, ch := range newChunks {
-			chunkid, nc, err := db.dedupOrCreateChunk(th, ch, fileid)
+		for i := range newChunks {
+			ch := newChunks[i]
+			chunkid, nc, crec, err := db.dedupOrCreateChunk(th, ch, fileid)
 			if err != nil {
 				return err
 			}
 			if nc != nil {
 				newChunksTW = append(newChunksTW, *nc)
+				if cfg.indexedChunkCallback != nil {
+					crec.attach(db, th.Txn())
+					cfg.indexedChunkCallback(IndexedChunk{Chunk: ch.Chunk, CRecord: crec})
+				}
 			}
-			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: ch.rangeStr, Locator: ch.locator})
+			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: string(ch.Range), Locator: ch.Locator})
 			mergeTokenBag(fileBag, ch.tokens)
+			newChunks[i].Content = nil // release content after C record write (and after callback fire)
 		}
 
 		// Coalesced T/W/B record updates
@@ -3189,16 +3373,19 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 		return idx <= hi // stop early once past window
 	}
 
-	if fc, ok := resolved.(FileChunker); ok {
-		if _, err := fc.FileChunks(fpath, [32]byte{}, yield); err != nil {
-			return nil, err
-		}
-	} else if ch, ok := resolved.(Chunker); ok {
+	// Prefer Chunker when available (text chunker) — avoids re-reading the
+	// file inside FileChunker delegation. Fall back to FileChunker for
+	// binary-only chunkers.
+	if ch, ok := resolved.(Chunker); ok {
 		data, err := os.ReadFile(fpath)
 		if err != nil {
 			return nil, err
 		}
 		if err := ch.Chunks(fpath, data, yield); err != nil {
+			return nil, err
+		}
+	} else if fc, ok := resolved.(FileChunker); ok {
+		if _, err := fc.FileChunks(fpath, [32]byte{}, yield); err != nil {
 			return nil, err
 		}
 	} else {
@@ -3212,8 +3399,15 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 // Reads all C records in one View txn (for stored Attrs), then dispatches
 // GetChunk for each entry sharing a transient customData.
 func (db *DB) getChunksFast(fpath string, frec FRecord, lo, hi int, chunker any, ra RandomAccessChunker) ([]ChunkResult, error) {
+	// Pre-read file content for content-based chunkers (those implementing
+	// Chunker). FileChunker-only chunkers (binary formats) read the file
+	// themselves inside GetChunk, so we skip the read for them. A chunker
+	// that implements both Chunker and FileChunker is a text chunker that
+	// still wants pre-read data for the random-access slicing fast path.
 	var data []byte
-	if _, isFC := chunker.(FileChunker); !isFC {
+	_, isFC := chunker.(FileChunker)
+	_, isContent := chunker.(Chunker)
+	if !isFC || isContent {
 		var err error
 		data, err = os.ReadFile(fpath)
 		if err != nil {

@@ -546,3 +546,125 @@ func TestAppendTmpFileWithChunkCallback(t *testing.T) {
 	}
 }
 
+// AddTmpFile fires WithIndexedChunkCallback once per genuinely-new chunk.
+// Overlay-fired IndexedChunks have no txn context (CRecord.Txn() / DB() == nil)
+// but carry chunkid, hash, and content for ark's chunkAccumulator pattern.
+func TestAddTmpFileWithIndexedChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	var fired []IndexedChunk
+	_, err := db.AddTmpFile("tmp://test/idx", "line", []byte("alpha\nbeta\ngamma\n"),
+		WithIndexedChunkCallback(func(ic IndexedChunk) {
+			fired = append(fired, ic)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 3 {
+		t.Fatalf("expected 3 IndexedChunk fires, got %d", len(fired))
+	}
+	for i, ic := range fired {
+		if ic.CRecord.ChunkID == 0 {
+			t.Errorf("fire %d has zero ChunkID", i)
+		}
+		if ic.CRecord.Txn() != nil || ic.CRecord.DB() != nil {
+			t.Errorf("fire %d: overlay IndexedChunk should have nil Txn/DB", i)
+		}
+		if len(ic.Chunk.Content) == 0 {
+			t.Errorf("fire %d has empty Chunk.Content", i)
+		}
+	}
+	if string(fired[0].Chunk.Content) != "alpha\n" {
+		t.Errorf("fire[0].Chunk.Content = %q, want %q", fired[0].Chunk.Content, "alpha\n")
+	}
+}
+
+// IndexedChunkCallback skips dedup'd chunks: a second AddTmpFile of the same
+// content into a different path reuses chunkids and the callback does not fire.
+func TestAddTmpFileIndexedChunkCallbackSkipsDedup(t *testing.T) {
+	db, _ := testDB(t)
+	if _, err := db.AddTmpFile("tmp://test/a", "line", []byte("shared\nunique-a\n")); err != nil {
+		t.Fatal(err)
+	}
+	var fired []IndexedChunk
+	_, err := db.AddTmpFile("tmp://test/b", "line", []byte("shared\nunique-b\n"),
+		WithIndexedChunkCallback(func(ic IndexedChunk) {
+			fired = append(fired, ic)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 1 {
+		t.Fatalf("expected 1 fire (only \"unique-b\\n\" is new), got %d", len(fired))
+	}
+	if string(fired[0].Chunk.Content) != "unique-b\n" {
+		t.Errorf("fire[0].Chunk.Content = %q, want %q", fired[0].Chunk.Content, "unique-b\n")
+	}
+}
+
+// UpdateTmpFile fires WithIndexedChunkCallback for new chunks introduced by
+// the update; old chunks are removed silently (no fire).
+func TestUpdateTmpFileWithIndexedChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	if _, err := db.AddTmpFile("tmp://test/upd", "line", []byte("old1\nold2\n")); err != nil {
+		t.Fatal(err)
+	}
+	var fired []IndexedChunk
+	err := db.UpdateTmpFile("tmp://test/upd", "line", []byte("new1\nnew2\nnew3\n"),
+		WithIndexedChunkCallback(func(ic IndexedChunk) {
+			fired = append(fired, ic)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 3 {
+		t.Fatalf("expected 3 fires (all-new content), got %d", len(fired))
+	}
+	if string(fired[0].Chunk.Content) != "new1\n" {
+		t.Errorf("fire[0].Chunk.Content = %q, want %q", fired[0].Chunk.Content, "new1\n")
+	}
+}
+
+// AppendTmpFile fires WithIndexedChunkCallback only for genuinely-new tail
+// chunks. Pre-existing chunks (already indexed by the prior AddTmpFile) do
+// not re-fire even though the underlying data is unchanged.
+func TestAppendTmpFileWithIndexedChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	if _, err := db.AddTmpFile("tmp://test/app", "line", []byte("first\nsecond\n")); err != nil {
+		t.Fatal(err)
+	}
+	var fired []IndexedChunk
+	_, err := db.AppendTmpFile("tmp://test/app", "line", []byte("third\nfourth\n"),
+		WithIndexedChunkCallback(func(ic IndexedChunk) {
+			fired = append(fired, ic)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 2 {
+		t.Fatalf("expected 2 fires (only appended chunks), got %d", len(fired))
+	}
+	if string(fired[0].Chunk.Content) != "third\n" {
+		t.Errorf("fire[0].Chunk.Content = %q, want %q", fired[0].Chunk.Content, "third\n")
+	}
+	if string(fired[1].Chunk.Content) != "fourth\n" {
+		t.Errorf("fire[1].Chunk.Content = %q, want %q", fired[1].Chunk.Content, "fourth\n")
+	}
+}
+
+// AppendTmpFile auto-creates via addFile when the path doesn't exist; the
+// indexed-chunk callback should fire for all chunks of the auto-created file.
+func TestAppendTmpFileAutoCreateFiresIndexedChunkCallback(t *testing.T) {
+	db, _ := testDB(t)
+	var fired []IndexedChunk
+	_, err := db.AppendTmpFile("tmp://test/auto", "line", []byte("a\nb\n"),
+		WithIndexedChunkCallback(func(ic IndexedChunk) {
+			fired = append(fired, ic)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 2 {
+		t.Fatalf("expected 2 fires from auto-create path, got %d", len(fired))
+	}
+}
+

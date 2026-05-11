@@ -1,54 +1,75 @@
 package microfts2
 
-// CRC: crc-BracketChunker.md | Seq: seq-bracket-chunk.md
-// R307, R308, R309, R310, R311, R312, R313, R314, R315, R316, R317, R318, R319, R320, R321, R322, R323, R324
+// CRC: crc-BracketChunker.md | Seq: seq-bracket-chunk.md | R307, R309, R310, R311, R312, R313, R314, R315, R316, R317, R318, R319, R320, R321, R322, R323, R324, R617, R618, R619, R620, R621, R622
 
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 )
 
 // BracketLang defines the lexical rules for one language. R307
+// Strings are expressed as scan-restricted bracket groups in Brackets;
+// no separate StringDelims field exists.
 type BracketLang struct {
 	LineComments  []string       // e.g. "//", "#", "--"
 	BlockComments [][2]string    // e.g. {{"/*", "*/"}, {"<!--", "-->"}}
-	StringDelims  []StringDelim  // e.g. {`"`, `"`, `\`}
-	Brackets      []BracketGroup // open/separator/close sets
+	Brackets      []BracketGroup // open/separator/close sets — includes strings and word brackets
 }
 
-// StringDelim defines a string delimiter and its escape character. R308
-type StringDelim struct {
-	Open   string // opening delimiter
-	Close  string // closing delimiter (same as Open for symmetric quotes)
-	Escape string // escape character (empty = no escaping)
-}
-
-// BracketGroup defines one set of matching brackets. R309
+// BracketGroup defines one set of matching brackets, code or string-like. R309
 // Separators are mid-group markers (e.g. "else" between "if"/"end").
+//
+// AllowedInner controls scanning inside the group (R618):
+//
+//	nil           → code mode: full scanning, all bracket groups recognized
+//	non-nil slice → scan-restricted mode: only Close, Escape, and listed openers
+//	                are recognized; everything else is literal text
+//	                (use []string{} for pure raw mode with no escape hatches)
+//
+// AllowedParent restricts where this bracket may be recognized (R619):
+//
+//	nil           → recognized in any context (default for top-level brackets)
+//	non-nil slice → only recognized when scanning is currently inside one of
+//	                the listed openers (e.g. "${" inside "`")
+//
+// Escape (R617) is consumed inside a scan-restricted group along with the byte
+// that follows it; empty means no escaping (raw strings).
+//
+// nil and []string{} are semantically distinct for AllowedInner and AllowedParent (R622).
 type BracketGroup struct {
-	Open       []string // openers: e.g. ["{"], ["if","while","for"]
-	Separators []string // optional: e.g. ["else","elif","then"]
-	Close      []string // closers: e.g. ["}"], ["end","done","fi"]
+	Open          []string
+	Separators    []string
+	Close         []string
+	Escape        string
+	AllowedInner  []string
+	AllowedParent []string
+}
+
+// isRestricted reports whether this group is in scan-restricted mode.
+// R618, R622: nil AllowedInner means code mode; non-nil (even empty) means restricted.
+func (g *BracketGroup) isRestricted() bool {
+	return g.AllowedInner != nil
 }
 
 // Token types for the scanner. R310
 const (
-	tokComment    = iota // R311: comments inside strings are not comments
-	tokString            // R311: strings inside comments are not strings
-	tokWhitespace        // R312: contiguous whitespace runs
+	tokComment    = iota // R311
+	tokWhitespace        // R312
 	tokBracketOpen
 	tokBracketClose
 	tokBracketSep
-	tokText // R315: any other contiguous non-whitespace
+	tokText // R315
 )
 
 type token struct {
 	kind      int
-	start     int // byte offset in content
-	end       int // byte offset past end
-	startLine int // 1-based
-	endLine   int // 1-based
+	start     int           // byte offset in content
+	end       int           // byte offset past end
+	startLine int           // 1-based
+	endLine   int           // 1-based
+	group     *BracketGroup // for bracket open/close/sep tokens; otherwise nil
 }
 
 // bracketChunker implements Chunker for bracket-delimited languages. R320
@@ -65,15 +86,31 @@ func (bc *bracketChunker) Chunks(path string, content []byte, yield func(Chunk) 
 	if len(content) == 0 {
 		return nil
 	}
-	tokens := tokenize(content, bc.lang)
+	tokens := tokenize(content, &bc.lang)
 	groups := findGroups(tokens)
 	groups = attachLeading(groups, tokens, content)
 	return emitChunks(content, groups, yield)
 }
 
+// FileChunks reads the file and delegates to Chunks via the shared
+// fileChunksByRead helper — supports stat-skip via the old-hash short-circuit.
+// R633, R636
+func (bc *bracketChunker) FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error) {
+	return fileChunksByRead(path, old, bc.Chunks, yield)
+}
+
 // GetChunk is the RandomAccessChunker fast path — slices data by line range. R531
 func (bc *bracketChunker) GetChunk(path string, data []byte, customData *any, chunk *Chunk) error {
 	return sliceByLineRange(data, customData, chunk)
+}
+
+// AppendChunks delegates to appendByRechunkResume so bracket-block boundaries
+// (including paragraph extension and leading-comment attachment) are
+// recognised across the append boundary via re-chunking from the previous
+// last chunk's start through EOF.
+// R626, R627, R628, R629, R630, R633
+func (bc *bracketChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (bool, error) {
+	return appendByRechunkResume(path, lastLocator, newBytes, bc.Chunks, yield)
 }
 
 // lineIndex builds a byte-offset-to-line-number lookup.
@@ -99,160 +136,308 @@ func lineAt(lineStarts []int, pos int) int {
 			hi = mid
 		}
 	}
-	return lo // 1-based: lineStarts[lo-1] <= pos < lineStarts[lo]
+	return lo
 }
 
-// tokenize scans content into a token stream. R310, R311
-func tokenize(content []byte, lang BracketLang) []token {
-	ls := lineIndex(content)
-	var tokens []token
-	pos := 0
+// stackEntry tracks an active bracket group on the mode stack.
+type stackEntry struct {
+	group  *BracketGroup
+	opener string // the actual opener string used (for AllowedParent matching)
+}
 
-	for pos < len(content) {
-		// Whitespace run. R312
-		if isWS(content[pos]) {
-			start := pos
-			for pos < len(content) && isWS(content[pos]) {
-				pos++
+// scanner is the mode-aware bracket-chunker tokenizer. R620
+type scanner struct {
+	content []byte
+	lang    *BracketLang
+	ls      []int
+	pos     int
+	tokens  []token
+	stack   []stackEntry
+}
+
+func tokenize(content []byte, lang *BracketLang) []token {
+	s := &scanner{content: content, lang: lang, ls: lineIndex(content)}
+	for s.pos < len(s.content) {
+		s.step()
+	}
+	return s.tokens
+}
+
+func (s *scanner) top() *stackEntry {
+	if len(s.stack) == 0 {
+		return nil
+	}
+	return &s.stack[len(s.stack)-1]
+}
+
+func (s *scanner) emit(kind, start, end int, g *BracketGroup) {
+	if end <= start {
+		return
+	}
+	s.tokens = append(s.tokens, token{
+		kind:      kind,
+		start:     start,
+		end:       end,
+		startLine: lineAt(s.ls, start),
+		endLine:   lineAt(s.ls, end-1),
+		group:     g,
+	})
+}
+
+func (s *scanner) step() {
+	if t := s.top(); t != nil && t.group.isRestricted() {
+		s.stepRestricted(t.group)
+		return
+	}
+	s.stepCode()
+}
+
+// stepRestricted scans inside a scan-restricted bracket group.
+// R617, R618, R620: only the group's own Close, its Escape sequence, and
+// openers in AllowedInner are recognized; all other bytes accumulate as
+// literal text.
+func (s *scanner) stepRestricted(g *BracketGroup) {
+	textStart := s.pos
+	for s.pos < len(s.content) {
+		// Try the group's own Close markers (innermost match wins).
+		if _, n := matchAnyAt(s.content, s.pos, g.Close); n > 0 {
+			s.emit(tokText, textStart, s.pos, nil)
+			s.emit(tokBracketClose, s.pos, s.pos+n, g)
+			s.pos += n
+			s.stack = s.stack[:len(s.stack)-1]
+			return
+		}
+		// Try the group's Escape sequence: consume escape + next byte as literal text.
+		if g.Escape != "" {
+			n := len(g.Escape)
+			if s.pos+n <= len(s.content) && string(s.content[s.pos:s.pos+n]) == g.Escape {
+				s.pos += n
+				if s.pos < len(s.content) {
+					s.pos++
+				}
+				continue
 			}
-			tokens = append(tokens, token{tokWhitespace, start, pos, lineAt(ls, start), lineAt(ls, pos - 1)})
+		}
+		// Try AllowedInner openers.
+		if op, inner, n := s.matchAllowedInner(g); n > 0 {
+			s.emit(tokText, textStart, s.pos, nil)
+			s.emit(tokBracketOpen, s.pos, s.pos+n, inner)
+			s.pos += n
+			s.stack = append(s.stack, stackEntry{group: inner, opener: op})
+			return
+		}
+		s.pos++
+	}
+	// Reached EOF inside restricted group — flush trailing text.
+	s.emit(tokText, textStart, s.pos, nil)
+}
+
+// matchAllowedInner finds the first opener listed in g.AllowedInner that
+// matches at the current position, returning the opener string, the bracket
+// group that owns it, and the matched length.
+func (s *scanner) matchAllowedInner(g *BracketGroup) (string, *BracketGroup, int) {
+	for _, op := range g.AllowedInner {
+		owner := s.findGroupByOpen(op)
+		if owner == nil {
 			continue
 		}
-
-		// Line comments. R311
-		if tok, end := tryLineComment(content, pos, lang.LineComments); end > pos {
-			tokens = append(tokens, token{tok, pos, end, lineAt(ls, pos), lineAt(ls, end - 1)})
-			pos = end
-			continue
-		}
-
-		// Block comments. R311
-		if tok, end := tryBlockComment(content, pos, lang.BlockComments); end > pos {
-			tokens = append(tokens, token{tok, pos, end, lineAt(ls, pos), lineAt(ls, end - 1)})
-			pos = end
-			continue
-		}
-
-		// Strings. R311
-		if tok, end := tryString(content, pos, lang.StringDelims); end > pos {
-			tokens = append(tokens, token{tok, pos, end, lineAt(ls, pos), lineAt(ls, end - 1)})
-			pos = end
-			continue
-		}
-
-		// Brackets (open, separator, close). R313, R314
-		if tok, end := tryBracket(content, pos, lang.Brackets); end > pos {
-			tokens = append(tokens, token{tok, pos, end, lineAt(ls, pos), lineAt(ls, end - 1)})
-			pos = end
-			continue
-		}
-
-		// Text: contiguous non-whitespace. R315
-		start := pos
-		for pos < len(content) && !isWS(content[pos]) {
-			// Stop if the next position would match a comment, string, or bracket
-			if _, end := tryLineComment(content, pos, lang.LineComments); end > pos {
-				break
-			}
-			if _, end := tryBlockComment(content, pos, lang.BlockComments); end > pos {
-				break
-			}
-			if _, end := tryString(content, pos, lang.StringDelims); end > pos {
-				break
-			}
-			if _, end := tryBracket(content, pos, lang.Brackets); end > pos {
-				break
-			}
-			pos++
-		}
-		if pos > start {
-			tokens = append(tokens, token{tokText, start, pos, lineAt(ls, start), lineAt(ls, pos - 1)})
+		if matchBracketAt(s.content, s.pos, op) {
+			return op, owner, len(op)
 		}
 	}
+	return "", nil, 0
+}
 
-	return tokens
+func (s *scanner) findGroupByOpen(op string) *BracketGroup {
+	for i := range s.lang.Brackets {
+		g := &s.lang.Brackets[i]
+		if slices.Contains(g.Open, op) {
+			return g
+		}
+	}
+	return nil
+}
+
+// stepCode scans in code mode (full lexical scanning). R310, R311, R312, R313, R314, R315
+func (s *scanner) stepCode() {
+	// Whitespace run. R312
+	if isWS(s.content[s.pos]) {
+		start := s.pos
+		for s.pos < len(s.content) && isWS(s.content[s.pos]) {
+			s.pos++
+		}
+		s.emit(tokWhitespace, start, s.pos, nil)
+		return
+	}
+	// Line comments. R311
+	if end := tryLineComment(s.content, s.pos, s.lang.LineComments); end > s.pos {
+		s.emit(tokComment, s.pos, end, nil)
+		s.pos = end
+		return
+	}
+	// Block comments. R311
+	if end := tryBlockComment(s.content, s.pos, s.lang.BlockComments); end > s.pos {
+		s.emit(tokComment, s.pos, end, nil)
+		s.pos = end
+		return
+	}
+	// Brackets — opens (subject to AllowedParent), then top's close, then top's separators.
+	if s.tryCodeBracket() {
+		return
+	}
+	// Text: contiguous non-whitespace, stopping when a recognized token would start.
+	start := s.pos
+	for s.pos < len(s.content) && !isWS(s.content[s.pos]) {
+		if end := tryLineComment(s.content, s.pos, s.lang.LineComments); end > s.pos {
+			break
+		}
+		if end := tryBlockComment(s.content, s.pos, s.lang.BlockComments); end > s.pos {
+			break
+		}
+		if s.peekCodeBracket() {
+			break
+		}
+		s.pos++
+	}
+	s.emit(tokText, start, s.pos, nil)
+}
+
+// tryCodeBracket attempts to recognize a bracket open/close/sep at s.pos in
+// code mode. Returns true if it consumed a bracket.
+// codeMatch describes a recognized code-mode bracket marker at s.pos.
+type codeMatch struct {
+	kind   int           // tokBracketOpen, tokBracketClose, or tokBracketSep
+	group  *BracketGroup // the group the marker belongs to
+	marker string        // the matched string
+	push   bool          // open → push group onto stack
+	pop    bool          // top-of-stack close → pop after emit
+}
+
+// findCodeBracket scans for the first bracket marker recognized at s.pos in
+// code mode. The lookup order encodes operator precedence:
+//  1. Opens of any group whose AllowedParent permits the current stack top
+//  2. Top-of-stack's own close markers (innermost match), then separators
+//  3. Fallback: any code-mode group's close, so depth tracking stays
+//     consistent even when the stack is unbalanced (stray "}" at top level)
+func (s *scanner) findCodeBracket() (codeMatch, bool) {
+	for i := range s.lang.Brackets {
+		g := &s.lang.Brackets[i]
+		if !s.parentAllowed(g) {
+			continue
+		}
+		for _, op := range g.Open {
+			if matchBracketAt(s.content, s.pos, op) {
+				return codeMatch{kind: tokBracketOpen, group: g, marker: op, push: true}, true
+			}
+		}
+	}
+	if t := s.top(); t != nil {
+		for _, cl := range t.group.Close {
+			if matchBracketAt(s.content, s.pos, cl) {
+				return codeMatch{kind: tokBracketClose, group: t.group, marker: cl, pop: true}, true
+			}
+		}
+		for _, sep := range t.group.Separators {
+			if matchBracketAt(s.content, s.pos, sep) {
+				return codeMatch{kind: tokBracketSep, group: t.group, marker: sep}, true
+			}
+		}
+	}
+	for i := range s.lang.Brackets {
+		g := &s.lang.Brackets[i]
+		if g.isRestricted() {
+			continue
+		}
+		for _, cl := range g.Close {
+			if matchBracketAt(s.content, s.pos, cl) {
+				return codeMatch{kind: tokBracketClose, group: g, marker: cl}, true
+			}
+		}
+	}
+	return codeMatch{}, false
+}
+
+func (s *scanner) tryCodeBracket() bool {
+	m, ok := s.findCodeBracket()
+	if !ok {
+		return false
+	}
+	end := s.pos + len(m.marker)
+	s.emit(m.kind, s.pos, end, m.group)
+	s.pos = end
+	switch {
+	case m.push:
+		s.stack = append(s.stack, stackEntry{group: m.group, opener: m.marker})
+	case m.pop:
+		s.stack = s.stack[:len(s.stack)-1]
+	}
+	return true
+}
+
+// peekCodeBracket reports whether tryCodeBracket would match at s.pos without
+// consuming. Used to terminate text runs.
+func (s *scanner) peekCodeBracket() bool {
+	_, ok := s.findCodeBracket()
+	return ok
+}
+
+// parentAllowed checks AllowedParent against the current stack top.
+// R619: nil AllowedParent means recognized anywhere; non-nil restricts to
+// scans currently inside one of the listed openers.
+func (s *scanner) parentAllowed(g *BracketGroup) bool {
+	if g.AllowedParent == nil {
+		return true
+	}
+	t := s.top()
+	if t == nil {
+		return false
+	}
+	return slices.Contains(g.AllowedParent, t.opener)
+}
+
+// matchAnyAt tries each marker at pos; returns the first match string and length.
+func matchAnyAt(content []byte, pos int, markers []string) (string, int) {
+	for _, m := range markers {
+		if matchBracketAt(content, pos, m) {
+			return m, len(m)
+		}
+	}
+	return "", 0
 }
 
 func isWS(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f'
 }
 
-func tryLineComment(content []byte, pos int, markers []string) (int, int) {
+func tryLineComment(content []byte, pos int, markers []string) int {
 	for _, m := range markers {
 		if pos+len(m) <= len(content) && string(content[pos:pos+len(m)]) == m {
 			end := bytes.IndexByte(content[pos:], '\n')
 			if end < 0 {
-				return tokComment, len(content)
+				return len(content)
 			}
-			return tokComment, pos + end + 1
+			return pos + end + 1
 		}
 	}
-	return 0, pos
+	return pos
 }
 
-func tryBlockComment(content []byte, pos int, markers [][2]string) (int, int) {
+func tryBlockComment(content []byte, pos int, markers [][2]string) int {
 	for _, m := range markers {
 		open, close := m[0], m[1]
 		if pos+len(open) <= len(content) && string(content[pos:pos+len(open)]) == open {
 			idx := bytes.Index(content[pos+len(open):], []byte(close))
 			if idx < 0 {
-				return tokComment, len(content) // unclosed — consume rest
+				return len(content)
 			}
-			return tokComment, pos + len(open) + idx + len(close)
+			return pos + len(open) + idx + len(close)
 		}
 	}
-	return 0, pos
-}
-
-func tryString(content []byte, pos int, delims []StringDelim) (int, int) {
-	for _, d := range delims {
-		if pos+len(d.Open) <= len(content) && string(content[pos:pos+len(d.Open)]) == d.Open {
-			closer := d.Close
-			if closer == "" {
-				closer = d.Open
-			}
-			i := pos + len(d.Open)
-			for i < len(content) {
-				if d.Escape != "" && i+len(d.Escape) <= len(content) && string(content[i:i+len(d.Escape)]) == d.Escape {
-					i += len(d.Escape) + 1 // skip escaped char
-					continue
-				}
-				if i+len(closer) <= len(content) && string(content[i:i+len(closer)]) == closer {
-					return tokString, i + len(closer)
-				}
-				i++
-			}
-			return tokString, len(content) // unclosed
-		}
-	}
-	return 0, pos
-}
-
-// tryBracket checks for word or symbol brackets at pos. R313
-// Word brackets only match at word boundaries.
-func tryBracket(content []byte, pos int, groups []BracketGroup) (int, int) {
-	for _, g := range groups {
-		for _, op := range g.Open {
-			if matchBracketAt(content, pos, op) {
-				return tokBracketOpen, pos + len(op)
-			}
-		}
-		for _, sep := range g.Separators {
-			if matchBracketAt(content, pos, sep) {
-				return tokBracketSep, pos + len(sep)
-			}
-		}
-		for _, cl := range g.Close {
-			if matchBracketAt(content, pos, cl) {
-				return tokBracketClose, pos + len(cl)
-			}
-		}
-	}
-	return 0, pos
+	return pos
 }
 
 // matchBracketAt checks if bracket b occurs at pos in content.
-// For word brackets (alphanumeric), requires word boundaries.
+// For word brackets (alphanumeric), requires word boundaries. R313
 func matchBracketAt(content []byte, pos int, b string) bool {
 	if pos+len(b) > len(content) {
 		return false
@@ -260,7 +445,6 @@ func matchBracketAt(content []byte, pos int, b string) bool {
 	if string(content[pos:pos+len(b)]) != b {
 		return false
 	}
-	// Word brackets need word boundary check
 	if isWordChar(b[0]) {
 		if pos > 0 && isWordChar(content[pos-1]) {
 			return false
@@ -283,20 +467,15 @@ type groupSpan struct {
 	endLine   int
 }
 
-// findGroups walks the token stream and identifies bracket groups. R316
-// Line-oriented: a group starts at the line containing an open bracket and
-// continues line by line until all brackets are closed. Depth is only checked
-// at line boundaries, so "func f() {" is one group start — the parens open
-// and close mid-line, but the brace keeps depth > 0 at end of line.
+// findGroups walks the token stream and identifies bracket groups.
+// R316, R621: only code-mode brackets (group.isRestricted() == false)
+// contribute to depth — strings and other scan-restricted spans never
+// open a chunk group.
 func findGroups(tokens []token) []groupSpan {
-	// Build per-line depth deltas from the token stream.
-	// For each line, track whether it contains any bracket open (while not in group)
-	// and what the depth is at end of line.
 	type lineState struct {
-		hasOpen bool // line contains an open bracket while depth was 0
-		endDepth int // depth at end of this line
+		hasOpen  bool
+		endDepth int
 	}
-
 	maxLine := 0
 	for _, t := range tokens {
 		if t.endLine > maxLine {
@@ -306,18 +485,22 @@ func findGroups(tokens []token) []groupSpan {
 	if maxLine == 0 {
 		return nil
 	}
-
-	// Process tokens, tracking depth and which lines have bracket opens
-	lines := make([]lineState, maxLine+1) // 1-indexed
+	lines := make([]lineState, maxLine+1)
 	depth := 0
 	for _, t := range tokens {
 		switch t.kind {
 		case tokBracketOpen:
+			if t.group != nil && t.group.isRestricted() {
+				continue // string-like brackets don't count toward chunk depth (R621)
+			}
 			if depth == 0 {
 				lines[t.startLine].hasOpen = true
 			}
 			depth++
 		case tokBracketClose:
+			if t.group != nil && t.group.isRestricted() {
+				continue
+			}
 			if depth > 0 {
 				depth--
 			}
@@ -325,11 +508,9 @@ func findGroups(tokens []token) []groupSpan {
 		lines[t.endLine].endDepth = depth
 	}
 
-	// Walk lines to build groups
 	var groups []groupSpan
 	inGroup := false
 	groupStart := 0
-
 	for lineNum := 1; lineNum <= maxLine; lineNum++ {
 		ls := lines[lineNum]
 		if !inGroup && ls.hasOpen {
@@ -341,13 +522,9 @@ func findGroups(tokens []token) []groupSpan {
 			inGroup = false
 		}
 	}
-
-	// Unclosed bracket — group extends to EOF
 	if inGroup {
 		groups = append(groups, groupSpan{groupStart, maxLine})
 	}
-
-	// Filter single-line groups — e.g. "x = f()" on one line
 	var filtered []groupSpan
 	for _, g := range groups {
 		if g.endLine > g.startLine {
@@ -362,12 +539,9 @@ func attachLeading(groups []groupSpan, tokens []token, content []byte) []groupSp
 	if len(groups) == 0 {
 		return groups
 	}
-
-	// Build a line→content-type map: for each line, what kind of tokens are on it
 	maxLine := tokens[len(tokens)-1].endLine
 	lineHasBlank := make([]bool, maxLine+1)
 
-	// Mark blank lines
 	lineNum := 0
 	pos := 0
 	for pos < len(content) {
@@ -388,7 +562,6 @@ func attachLeading(groups []groupSpan, tokens []token, content []byte) []groupSp
 		pos = lineEnd
 	}
 
-	// For each group, scan backward to attach leading lines
 	for i := range groups {
 		minLine := 1
 		if i > 0 {
@@ -406,9 +579,8 @@ func attachLeading(groups []groupSpan, tokens []token, content []byte) []groupSp
 
 // emitChunks walks content line by line, emitting group and paragraph chunks. R316, R318, R319
 func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) error {
-	// Build line boundaries
 	type lineBounds struct {
-		start, end int // byte offsets
+		start, end int
 	}
 	var lines []lineBounds
 	pos := 0
@@ -425,7 +597,7 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 		pos = lineEnd
 	}
 
-	gi := 0 // current group index
+	gi := 0
 	paraStart := -1
 	paraStartLine := 0
 
@@ -441,16 +613,13 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 	for lineIdx, lb := range lines {
 		lineNum := lineIdx + 1
 
-		// Check if this line starts a group
 		if gi < len(groups) && lineNum == groups[gi].startLine {
-			// Flush any pending paragraph
 			if paraStart >= 0 {
 				if !flush(paraStartLine, lineNum-1, paraStart, lines[lineIdx-1].end) {
 					return nil
 				}
 				paraStart = -1
 			}
-			// Emit the group chunk
 			gEnd := min(groups[gi].endLine, len(lines))
 			if !flush(groups[gi].startLine, gEnd, lb.start, lines[gEnd-1].end) {
 				return nil
@@ -459,7 +628,6 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 			continue
 		}
 
-		// Skip lines inside current group
 		if gi > 0 && lineNum <= groups[gi-1].endLine {
 			continue
 		}
@@ -469,7 +637,6 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 
 		blank := isBlankLine(content[lb.start:lb.end])
 		if blank {
-			// Flush paragraph
 			if paraStart >= 0 {
 				if !flush(paraStartLine, lineNum-1, paraStart, lines[lineIdx-1].end) {
 					return nil
@@ -484,7 +651,6 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 		}
 	}
 
-	// Flush trailing paragraph
 	if paraStart >= 0 {
 		lastLine := len(lines)
 		flush(paraStartLine, lastLine, paraStart, lines[lastLine-1].end)
@@ -499,15 +665,13 @@ func emitChunks(content []byte, groups []groupSpan, yield func(Chunk) bool) erro
 var LangGo = BracketLang{
 	LineComments:  []string{"//"},
 	BlockComments: [][2]string{{"/*", "*/"}},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-		{Open: "`", Close: "`"},
-		{Open: "'", Close: "'", Escape: `\`},
-	},
 	Brackets: []BracketGroup{
 		{Open: []string{"{"}, Close: []string{"}"}},
 		{Open: []string{"("}, Close: []string{")"}},
 		{Open: []string{"["}, Close: []string{"]"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"`"}, Close: []string{"`"}, AllowedInner: []string{}},
+		{Open: []string{"'"}, Close: []string{"'"}, Escape: `\`, AllowedInner: []string{}},
 	},
 }
 
@@ -515,14 +679,12 @@ var LangGo = BracketLang{
 var LangC = BracketLang{
 	LineComments:  []string{"//"},
 	BlockComments: [][2]string{{"/*", "*/"}},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-		{Open: "'", Close: "'", Escape: `\`},
-	},
 	Brackets: []BracketGroup{
 		{Open: []string{"{"}, Close: []string{"}"}},
 		{Open: []string{"("}, Close: []string{")"}},
 		{Open: []string{"["}, Close: []string{"]"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"'"}, Close: []string{"'"}, Escape: `\`, AllowedInner: []string{}},
 	},
 }
 
@@ -530,51 +692,44 @@ var LangC = BracketLang{
 var LangJava = LangC
 
 // LangJS is the bracket language config for JavaScript.
+// Backquote template literals permit ${...} interpolation back to code mode.
 var LangJS = BracketLang{
 	LineComments:  []string{"//"},
 	BlockComments: [][2]string{{"/*", "*/"}},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-		{Open: "'", Close: "'", Escape: `\`},
-		{Open: "`", Close: "`", Escape: `\`},
-	},
 	Brackets: []BracketGroup{
 		{Open: []string{"{"}, Close: []string{"}"}},
 		{Open: []string{"("}, Close: []string{")"}},
 		{Open: []string{"["}, Close: []string{"]"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"'"}, Close: []string{"'"}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"`"}, Close: []string{"`"}, Escape: `\`, AllowedInner: []string{"${"}},
+		{Open: []string{"${"}, Close: []string{"}"}, AllowedParent: []string{"`"}},
 	},
 }
 
 // LangLisp is the bracket language config for Lisp/Scheme/Clojure.
 var LangLisp = BracketLang{
 	LineComments: []string{";"},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-	},
 	Brackets: []BracketGroup{
 		{Open: []string{"("}, Close: []string{")"}},
 		{Open: []string{"["}, Close: []string{"]"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
 	},
 }
 
 // LangNginx is the bracket language config for nginx.
 var LangNginx = BracketLang{
 	LineComments: []string{"#"},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-		{Open: "'", Close: "'"},
-	},
 	Brackets: []BracketGroup{
 		{Open: []string{"{"}, Close: []string{"}"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"'"}, Close: []string{"'"}, AllowedInner: []string{}},
 	},
 }
 
 // LangPascal is the bracket language config for Pascal.
 var LangPascal = BracketLang{
 	BlockComments: [][2]string{{"{", "}"}, {"(*", "*)"}},
-	StringDelims: []StringDelim{
-		{Open: "'", Close: "'"},
-	},
 	Brackets: []BracketGroup{
 		{
 			Open:       []string{"begin", "record", "class"},
@@ -588,16 +743,13 @@ var LangPascal = BracketLang{
 		},
 		{Open: []string{"("}, Close: []string{")"}},
 		{Open: []string{"["}, Close: []string{"]"}},
+		{Open: []string{"'"}, Close: []string{"'"}, AllowedInner: []string{}},
 	},
 }
 
 // LangShell is the bracket language config for Bourne shell / bash.
 var LangShell = BracketLang{
 	LineComments: []string{"#"},
-	StringDelims: []StringDelim{
-		{Open: `"`, Close: `"`, Escape: `\`},
-		{Open: "'", Close: "'"},
-	},
 	Brackets: []BracketGroup{
 		{
 			Open:       []string{"if"},
@@ -615,21 +767,23 @@ var LangShell = BracketLang{
 		},
 		{Open: []string{"{"}, Close: []string{"}"}},
 		{Open: []string{"("}, Close: []string{")"}},
+		{Open: []string{`"`}, Close: []string{`"`}, Escape: `\`, AllowedInner: []string{}},
+		{Open: []string{"'"}, Close: []string{"'"}, AllowedInner: []string{}},
 	},
 }
 
 // langRegistry maps CLI language names to configs. R321
 var langRegistry = map[string]BracketLang{
-	"go":      LangGo,
-	"c":       LangC,
-	"cpp":     LangC,
-	"java":    LangJava,
-	"js":      LangJS,
-	"lisp":    LangLisp,
-	"nginx":   LangNginx,
-	"pascal":  LangPascal,
-	"shell":   LangShell,
-	"bash":    LangShell,
+	"go":     LangGo,
+	"c":      LangC,
+	"cpp":    LangC,
+	"java":   LangJava,
+	"js":     LangJS,
+	"lisp":   LangLisp,
+	"nginx":  LangNginx,
+	"pascal": LangPascal,
+	"shell":  LangShell,
+	"bash":   LangShell,
 }
 
 // LangByName returns a BracketLang config by name, or false if not found.
