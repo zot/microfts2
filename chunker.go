@@ -121,6 +121,16 @@ type RandomAccessChunker interface {
 	GetChunk(path string, data []byte, customData *any, chunk *Chunk) error
 }
 
+// ChunkerMetadata is the optional interface a chunker implements to expose
+// editability and the line-comment delimiter of its underlying language.
+// Callers (e.g. ark's curation workshop) type-assert against it; chunkers
+// that don't implement it are treated as IsWritable=true, CommentSyntax="".
+// CRC: crc-Chunker.md | R639
+type ChunkerMetadata interface {
+	IsWritable() bool      // true for editable text, false for binary / read-only formats
+	CommentSyntax() string // line-comment delimiter, "" when n/a
+}
+
 // sliceByLineRange is the shared fast-path helper for chunkers whose range
 // label is "startLine-endLine". Uses a lazy line-offset table in customData.
 // CRC: crc-Chunker.md | R531, R532
@@ -304,6 +314,10 @@ func (LineChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte
 	return appendByRechunkResume(path, lastLocator, newBytes, LineChunkFunc, yield)
 }
 
+// CRC: crc-Chunker.md | R640
+func (LineChunker) IsWritable() bool      { return true }
+func (LineChunker) CommentSyntax() string { return "" }
+
 // MarkdownChunker exposes MarkdownChunkFunc as a Chunker + FileChunker +
 // RandomAccessChunker + AppendAwareChunker. // CRC: crc-Chunker.md | R531, R601-R604, R610, R633, R636
 type MarkdownChunker struct{}
@@ -326,6 +340,10 @@ func (MarkdownChunker) GetChunk(path string, data []byte, customData *any, chunk
 func (MarkdownChunker) AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (bool, error) {
 	return appendByRechunkResume(path, lastLocator, newBytes, MarkdownChunkFunc, yield)
 }
+
+// CRC: crc-Chunker.md | R640
+func (MarkdownChunker) IsWritable() bool      { return true }
+func (MarkdownChunker) CommentSyntax() string { return "" }
 
 // ChunkFunc is a generator that yields chunks for a file.
 // Convenience type — wrap with FuncChunker to get a full Chunker.

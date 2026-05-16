@@ -104,6 +104,20 @@ func (bc *bracketChunker) GetChunk(path string, data []byte, customData *any, ch
 	return sliceByLineRange(data, customData, chunk)
 }
 
+// CRC: crc-BracketChunker.md | R641
+func (bc *bracketChunker) IsWritable() bool { return true }
+
+// CommentSyntax returns the language's first line-comment delimiter
+// (or "" when the language has none) for callers wrapping inline tag
+// annotations.
+// CRC: crc-BracketChunker.md | R641
+func (bc *bracketChunker) CommentSyntax() string {
+	if len(bc.lang.LineComments) == 0 {
+		return ""
+	}
+	return bc.lang.LineComments[0]
+}
+
 // AppendChunks delegates to appendByRechunkResume so bracket-block boundaries
 // (including paragraph extension and leading-comment attachment) are
 // recognised across the append boundary via re-chunking from the previous

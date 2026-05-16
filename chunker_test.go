@@ -394,6 +394,7 @@ func TestLineChunkerImplementsAllInterfaces(t *testing.T) {
 	var _ FileChunker = LineChunker{}
 	var _ RandomAccessChunker = LineChunker{}
 	var _ AppendAwareChunker = LineChunker{}
+	var _ ChunkerMetadata = LineChunker{}
 }
 
 func TestMarkdownChunkerImplementsAllInterfaces(t *testing.T) {
@@ -401,6 +402,7 @@ func TestMarkdownChunkerImplementsAllInterfaces(t *testing.T) {
 	var _ FileChunker = MarkdownChunker{}
 	var _ RandomAccessChunker = MarkdownChunker{}
 	var _ AppendAwareChunker = MarkdownChunker{}
+	var _ ChunkerMetadata = MarkdownChunker{}
 }
 
 func TestBracketChunkerImplementsAllInterfaces(t *testing.T) {
@@ -414,6 +416,9 @@ func TestBracketChunkerImplementsAllInterfaces(t *testing.T) {
 	if _, ok := bc.(AppendAwareChunker); !ok {
 		t.Fatal("BracketChunker should implement AppendAwareChunker")
 	}
+	if _, ok := bc.(ChunkerMetadata); !ok {
+		t.Fatal("BracketChunker should implement ChunkerMetadata")
+	}
 }
 
 func TestIndentChunkerImplementsAllInterfaces(t *testing.T) {
@@ -426,6 +431,40 @@ func TestIndentChunkerImplementsAllInterfaces(t *testing.T) {
 	}
 	if _, ok := ic.(AppendAwareChunker); !ok {
 		t.Fatal("IndentChunker should implement AppendAwareChunker")
+	}
+	if _, ok := ic.(ChunkerMetadata); !ok {
+		t.Fatal("IndentChunker should implement ChunkerMetadata")
+	}
+}
+
+// TestChunkerMetadata exercises ChunkerMetadata on each built-in chunker.
+// R640: LineChunker and MarkdownChunker return writable=true, comment="".
+// R641: bracketChunker and indentChunker return writable=true with
+// CommentSyntax pulled from BracketLang.LineComments (first entry; "" if empty).
+func TestChunkerMetadata(t *testing.T) {
+	cases := []struct {
+		name        string
+		c           ChunkerMetadata
+		wantWrite   bool
+		wantComment string
+	}{
+		{"LineChunker", LineChunker{}, true, ""},
+		{"MarkdownChunker", MarkdownChunker{}, true, ""},
+		{"BracketChunker/Go", BracketChunker(LangGo).(ChunkerMetadata), true, "//"},
+		{"BracketChunker/Shell", BracketChunker(LangShell).(ChunkerMetadata), true, "#"},
+		{"BracketChunker/Lisp", BracketChunker(LangLisp).(ChunkerMetadata), true, ";"},
+		{"IndentChunker/Python", IndentChunker(BracketLang{LineComments: []string{"#"}}, 4).(ChunkerMetadata), true, "#"},
+		{"IndentChunker/empty", IndentChunker(BracketLang{}, 4).(ChunkerMetadata), true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.c.IsWritable(); got != tc.wantWrite {
+				t.Errorf("IsWritable() = %v, want %v", got, tc.wantWrite)
+			}
+			if got := tc.c.CommentSyntax(); got != tc.wantComment {
+				t.Errorf("CommentSyntax() = %q, want %q", got, tc.wantComment)
+			}
+		})
 	}
 }
 

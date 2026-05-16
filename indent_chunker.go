@@ -87,6 +87,20 @@ func (ic *indentChunker) AppendChunks(path string, lastLocator []byte, newBytes 
 	return appendByRechunkResume(path, lastLocator, newBytes, ic.Chunks, yield)
 }
 
+// CRC: crc-IndentChunker.md | R641
+func (ic *indentChunker) IsWritable() bool { return true }
+
+// CommentSyntax returns the language's first line-comment delimiter
+// (or "" when the language has none) for callers wrapping inline tag
+// annotations.
+// CRC: crc-IndentChunker.md | R641
+func (ic *indentChunker) CommentSyntax() string {
+	if len(ic.lang.LineComments) == 0 {
+		return ""
+	}
+	return ic.lang.LineComments[0]
+}
+
 // measureIndent counts the leading whitespace columns. R328
 func measureIndent(line []byte, tabWidth int) int {
 	col := 0

@@ -951,3 +951,10 @@
 
 - **R637:** `IndentChunker` implements `AppendAwareChunker` so an append that extends an indent scope, attaches new leading comments, or completes a scope that ran to EOF is recognised across the append boundary
 - **R638:** `IndentChunker.AppendChunks` reuses the shared `appendByRechunkResume` resume protocol — indent chunk locators are already byte ranges (R594), so no per-chunker resume state is needed
+
+## Feature: ChunkerMetadata
+**Source:** specs/main.md
+
+- **R639:** Optional `ChunkerMetadata` interface — `IsWritable() bool` and `CommentSyntax() string` — exposes per-chunker editability and line-comment delimiter to callers (notably ark's curation workshop). Kept separate from `Chunker` so existing external implementations are unaffected; callers type-assert and apply the defaults `IsWritable=true, CommentSyntax=""` when the interface isn't satisfied
+- **R640:** `LineChunker` and `MarkdownChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax=""` (plain text and markdown carry no comment delimiter)
+- **R641:** `bracketChunker` and `indentChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax` set to the first entry of `BracketLang.LineComments` (or `""` when the slice is empty)

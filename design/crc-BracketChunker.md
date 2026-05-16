@@ -1,7 +1,7 @@
 # BracketChunker
-**Requirements:** R307, R309, R310, R311, R312, R313, R314, R315, R316, R317, R318, R319, R320, R321, R322, R323, R324, R617, R618, R619, R620, R621, R622, R626, R627, R628, R629, R630, R633, R636
+**Requirements:** R307, R309, R310, R311, R312, R313, R314, R315, R316, R317, R318, R319, R320, R321, R322, R323, R324, R617, R618, R619, R620, R621, R622, R626, R627, R628, R629, R630, R633, R636, R639, R641
 
-Configurable chunker that groups program text into chunks based on bracket structure. Table-driven — one BracketLang config per language. Strings, code brackets, and word brackets share one shape (`BracketGroup`); the string-vs-bracket distinction is replaced by a scan-mode flag (nil vs non-nil `AllowedInner`). Implements the full text-chunker quartet: Chunker, FileChunker (via fileChunksByRead), RandomAccessChunker, and AppendAwareChunker (via appendByRechunkResume).
+Configurable chunker that groups program text into chunks based on bracket structure. Table-driven — one BracketLang config per language. Strings, code brackets, and word brackets share one shape (`BracketGroup`); the string-vs-bracket distinction is replaced by a scan-mode flag (nil vs non-nil `AllowedInner`). Implements the full text-chunker quartet (Chunker, FileChunker via fileChunksByRead, RandomAccessChunker, AppendAwareChunker via appendByRechunkResume) plus ChunkerMetadata.
 
 ## Knows
 - BracketLang: language-specific lexical rules (line/block comments, bracket groups)
@@ -22,9 +22,11 @@ Configurable chunker that groups program text into chunks based on bracket struc
   - AllowedParent on a bracket: that bracket is only recognized when the current mode-stack top is one of the listed parent openers
 - findGroups(tokens): line-oriented — track depth across code-mode brackets only (string content never affects chunk depth); group starts at first open-bracket line, ends when depth returns to 0
 - attachLeading(groups, tokens): attach comment/text lines immediately before a group (no blank line gap)
+- IsWritable(): returns true — bracket-chunker languages are editable text (R641)
+- CommentSyntax(): returns the first entry of `BracketLang.LineComments` (or `""` when the slice is empty) so callers know how to wrap inline tag annotations in the chunker's language (R641)
 
 ## Collaborators
-- Chunker, FileChunker, RandomAccessChunker, AppendAwareChunker interfaces (implements them)
+- Chunker, FileChunker, RandomAccessChunker, AppendAwareChunker, ChunkerMetadata interfaces (implements them)
 - fileChunksByRead, appendByRechunkResume (shared helpers in chunker.go)
 
 ## Sequences

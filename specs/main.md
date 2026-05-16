@@ -784,6 +784,27 @@ LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 1 named
 
 `SearchResult` gains a `Score float64` field so the general search path also reports per-chunk scores.
 
+## ChunkerMetadata
+
+Optional metadata interface so callers (notably ark's curation workshop) can introspect a chunker's editability and the line-comment delimiter its underlying language uses for wrapping inline tag annotations:
+
+```go
+type ChunkerMetadata interface {
+    IsWritable() bool       // true for editable text, false for binary / read-only formats
+    CommentSyntax() string  // line-comment delimiter, "" when n/a
+}
+```
+
+`IsWritable` reports whether the chunker handles editable text (line-based text, markdown, bracket-chunker code, indent-chunker code) versus binary or read-only formats (e.g. PDF, which lives in ark and returns false). `CommentSyntax` returns the line-comment delimiter the underlying language uses — `"//"` for Go, `"#"` for Python, `"--"` for Lua, `""` for markdown or plain text where tags are authored without a comment wrapper.
+
+The interface is optional. Callers type-assert against it; chunkers that don't implement it have, from the caller's perspective, the defaults `IsWritable=true, CommentSyntax=""`.
+
+Built-in implementations:
+- `LineChunker`, `MarkdownChunker`: `true`, `""` — plain text and markdown carry no comment delimiter.
+- `bracketChunker`, `indentChunker`: `true`, first entry of `BracketLang.LineComments` (`""` when the slice is empty) — so Go's `bracketChunker` returns `"//"`, shell's returns `"#"`, lisp's returns `";"`, etc.
+
+`ChunkerMetadata` is kept separate from `Chunker` (rather than folded into it) so existing external `Chunker` implementations remain valid without change. This mirrors the same optional-interface pattern used for `FileChunker`, `RandomAccessChunker`, and `AppendAwareChunker`.
+
 # Dynamic Trigram Filtering
 
 ## Problem
