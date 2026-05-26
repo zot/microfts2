@@ -19,14 +19,14 @@ type ChunkCache struct {
 
 type cachedFile struct {
 	path       string
-	data       []byte             // nil for FileChunker-only (chunker reads file directly)
-	chunker    any                // Chunker, FileChunker, and/or RandomAccessChunker
-	fileChunks []FileChunkEntry   // R538: positional chunk list from frec.Chunks
-	rangeIds   map[string]uint64  // R539: Location → ChunkID
-	chunks     []cachedChunk      // R540: access-order, not positional
-	byRange    map[string]int     // Location → index into chunks
-	customData any                // R541: per-file scratch for RandomAccessChunker
-	complete   bool               // true once streaming path has exhausted the file
+	data       []byte            // nil for FileChunker-only (chunker reads file directly)
+	chunker    any               // Chunker, FileChunker, and/or RandomAccessChunker
+	fileChunks []FileChunkEntry  // R538: positional chunk list from frec.Chunks
+	rangeIds   map[string]uint64 // R539: Location → ChunkID
+	chunks     []cachedChunk     // R540: access-order, not positional
+	byRange    map[string]int    // Location → index into chunks
+	customData any               // R541: per-file scratch for RandomAccessChunker
+	complete   bool              // true once streaming path has exhausted the file
 }
 
 type cachedChunk struct {

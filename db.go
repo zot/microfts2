@@ -55,15 +55,15 @@ type collectedChunk struct {
 }
 
 type DB struct {
-	env         *lmdb.Env
-	dbi         lmdb.DBI
-	dbName      string
-	settings    Settings
-	trigrams    *Trigrams
-	chunkers    map[string]any // in-memory chunker strategies (Chunker, FileChunker, or both)
-	overlay     *overlay           // R349: in-memory tmp:// documents
-	overlayOnce sync.Once          // guards lazy overlay creation
-	pathCache    map[uint64]string   // R454: cached fileid→path, lazily loaded
+	env          *lmdb.Env
+	dbi          lmdb.DBI
+	dbName       string
+	settings     Settings
+	trigrams     *Trigrams
+	chunkers     map[string]any     // in-memory chunker strategies (Chunker, FileChunker, or both)
+	overlay      *overlay           // R349: in-memory tmp:// documents
+	overlayOnce  sync.Once          // guards lazy overlay creation
+	pathCache    map[uint64]string  // R454: cached fileid→path, lazily loaded
 	pathToID     map[string]uint64  // R455: cached path→fileid, built with pathCache
 	frecordCache map[uint64]FRecord // R456: opt-in FRecord cache, nil when inactive
 }
@@ -2202,6 +2202,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if aerr != nil {
 			return aerr
 		}
+		// @note: add FileChunks case here
 	} else {
 		if err := chunker.Chunks(filename, content, yield); err != nil {
 			return err
@@ -3265,6 +3266,26 @@ func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
 		return err
 	})
 	return frec, err
+}
+
+// SetFileLength rewrites only the FileLength field of a file's F
+// record. Intended for callers that need to advance the append
+// high-water mark without re-chunking — e.g. "checkpoint" operations
+// that skip processing of historical content. All other fields,
+// including Chunks, Tokens, ContentHash, and ModTime, are preserved.
+// Returns an error if the file is unknown.
+func (db *DB) SetFileLength(fileid uint64, length int64) error {
+	return db.env.Update(func(txn *lmdb.Txn) error {
+		frec, err := db.readFRecord(txnWrap{txn}, fileid)
+		if err != nil {
+			return err
+		}
+		frec.FileLength = length
+		if db.frecordCache != nil {
+			db.frecordCache[fileid] = frec
+		}
+		return txn.Put(db.dbi, makeFKey(fileid), frec.MarshalValue(), 0)
+	})
 }
 
 // --- ChunkContentLens ---
