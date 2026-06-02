@@ -7,7 +7,7 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
 
 - add/remove chunking strategies dynamically (external commands or Go functions)
   - external: `AddStrategy(name, cmd)` — command is persisted in I record
-  - function: `AddChunker(name, c)` — in-memory only, must re-register on Open
+  - function: `AddChunker(name, c, transform)` — in-memory only, must re-register on Open. `transform` is an optional per-chunker content hook (`nil` for none); see "Per-chunker content transform"
   - `Chunker` interface with two methods:
     - `Chunks(path string, content []byte, yield func(Chunk) bool) error` — producer: yields chunks for indexing
     - `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retriever: extracts a single chunk's content by its range label
@@ -168,7 +168,7 @@ We add a file to the database with a chosen chunking strategy:
 - chunk: call Chunker.Chunks, which yields {Range, Locator, Content, Attrs} per chunk
   - caller copies Range, Locator, Content, and Attrs before next yield
   - for external command strategies, RunChunkerFunc wraps the command as a Chunker
-- for each chunk: compute SHA-256 hash, extract trigrams on Content, tokenize Content, copy Attrs
+- for each chunk: compute the dedup hash (SHA-256 over Content, then the marshaled Attrs when present — see "Chunk identity includes Attrs"), extract trigrams on Content, tokenize Content, copy Attrs
   - look up H record by hash — if chunkid exists, increment this fileid's count in the existing C record's fileids list (insert with count=1 if absent)
   - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + [fileid, count=1]), append chunkid to T records for each trigram, append chunkid to W records for each token
 - update F record: append (chunkid, location, locator) entry, merge tokens into file-level token bag
@@ -358,8 +358,8 @@ func (db *DB) ChunkContentLens(fileid uint64) ([]int, error)
 
 // Strategies
 func (db *DB) AddStrategy(name, cmd string) error
-func (db *DB) AddChunker(name string, c Chunker) error
-func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error  // convenience: wraps fn in FuncChunker
+func (db *DB) AddChunker(name string, c any, transform ContentTransform) error  // transform optional, nil for none
+func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error  // convenience: wraps fn in FuncChunker, no transform
 func (db *DB) RemoveStrategy(name string) error
 ```
 
@@ -804,6 +804,42 @@ Built-in implementations:
 - `bracketChunker`, `indentChunker`: `true`, first entry of `BracketLang.LineComments` (`""` when the slice is empty) — so Go's `bracketChunker` returns `"//"`, shell's returns `"#"`, lisp's returns `";"`, etc.
 
 `ChunkerMetadata` is kept separate from `Chunker` (rather than folded into it) so existing external `Chunker` implementations remain valid without change. This mirrors the same optional-interface pattern used for `FileChunker`, `RandomAccessChunker`, and `AppendAwareChunker`.
+
+# Per-chunker content transform
+
+A chunker may be registered with an optional content-transform hook — the third argument to `AddChunker`:
+
+```go
+type ContentTransform func(c *Chunk)
+
+func (db *DB) AddChunker(name string, c any, transform ContentTransform) error
+```
+
+`transform` is `nil` for chunkers that need no transform (the common case). When present, it runs on every chunk the strategy produces and may mutate the chunk in place — rewriting `Content` and appending to `Attrs`.
+
+The motivating use: a caller (ark) annotates documents with inline `@tag: value` lines. It indexes and embeds those tags through its own records, so it wants them stripped from chunk `Content` before microfts2 trigram-indexes that content — otherwise the tags pollute the index. In the same pass the transform stashes the extracted tag values into the chunk's `Attrs`. The hook is registered per chunker, not globally, so markdown's transform can differ from others, binary chunkers like PDF get none, and the transform can carry chunker-specific context (e.g. markdown-ness, which fenced-code detection needs).
+
+## Files are the source of truth; the transform is a pure function of the file region
+
+The transform receives the chunk as the chunker produced it from the raw file region — `Content` is the verbatim bytes of that region, tags and all, because the tags physically live in the file. It rewrites `Content` into the FTS-indexable text and derives `Attrs` from that same region. Both outputs are pure functions of the file bytes, and the chunk's `Range` spans the raw region throughout, so the region can always be re-read and re-transformed.
+
+This is what lets the transform run consistently on both the index path and the retrieval path without storing anything new. At index time the transform strips `Content` and derives `Attrs`, which get indexed and stored. At retrieval time the same region is re-read from disk and re-transformed, reproducing identical `Content` and `Attrs`. The invariant the caller needs — content-as-indexed equals content-as-retrieved — holds by construction.
+
+## Where the transform fires
+
+The transform applies wherever a chunk is produced from raw file bytes:
+
+- **Index paths** — add, reindex, and append. The transform runs *before* hashing, trigram extraction, and tokenization, so the index sees the stripped content.
+- **Retrieval paths** — `GetChunks` and the `ChunkCache`, on both the streaming fallback and the `RandomAccessChunker` fast path.
+- **Overlay (`tmp://`)** — the transform applies on the index paths (add, update, append) and on `tmp://` retrieval, which re-chunks the stored raw bytes and re-applies the transform. Both run the same transform over the same bytes, so indexed and retrieved content cannot diverge.
+
+On the retrieval fast path, a chunk for a transform-carrying strategy starts with empty `Attrs` and the transform repopulates them, rather than pre-filling the stored C-record `Attrs`: the transform regenerates `Attrs` from the file region, and pre-filling would double the appended entries. Chunkers without a transform keep the existing behavior — stored `Attrs` pre-filled from the C record.
+
+## Chunk identity includes Attrs
+
+Chunk dedup is keyed on a hash. Because `Attrs` are indexed metadata derived from the file, two chunks with identical `Content` but different `Attrs` are not the same chunk — serving one for the other would lose the difference. The dedup hash therefore covers `Content` and then the marshaled `Attrs` when `Attrs` are present; a chunk with no `Attrs` hashes exactly as before (SHA-256 over `Content` alone), so existing indexes are unaffected and no rebuild is forced.
+
+This guarantees correct re-indexing on append. If a trailing paragraph gains a tag line — e.g. `@b: 2` appended to a paragraph that already read `@a: 1` / `maluba` — the stripped content (`maluba`) is unchanged, so a content-only hash would dedup back to the old chunkid and the new attribute would be silently dropped, especially when that chunkid is still referenced by another file. With `Attrs` in the hash the recomputed chunk hashes differently, gets a fresh chunkid, and the new-chunk delivery of `WithIndexedChunkCallback` fires on the append path, so the caller re-indexes every attribute. The cost — re-embedding text that did not change — is accepted in exchange for the guarantee.
 
 # Dynamic Trigram Filtering
 

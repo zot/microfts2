@@ -1843,7 +1843,7 @@ func TestGetChunksFastPath(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	// Register LineChunker (RandomAccessChunker-capable) under a new strategy name.
-	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
+	if err := db.AddChunker("fastline", LineChunker{}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1885,7 +1885,7 @@ func TestChunkCacheChunkTextWithId(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
+	if err := db.AddChunker("fastline", LineChunker{}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2782,7 +2782,7 @@ func TestRemovedChunkCallbackSkipsSharedChunks(t *testing.T) {
 // chunk covering both the old and the appended lines.
 func TestAppendChunksMarkdownExtendsLastParagraph(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
+	if err := db.AddChunker("markdown", MarkdownChunker{}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2824,7 +2824,7 @@ func TestAppendChunksMarkdownExtendsLastParagraph(t *testing.T) {
 // new chunk.
 func TestAppendChunksMarkdownCleanBoundary(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
+	if err := db.AddChunker("markdown", MarkdownChunker{}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2912,7 +2912,7 @@ func TestAppendChunksEmptyContentIsNoOp(t *testing.T) {
 // function lands as a fresh chunk. R626, R627, R628
 func TestAppendChunksBracketCleanBoundary(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2972,7 +2972,7 @@ func TestAppendChunksBracketCleanBoundary(t *testing.T) {
 // group chunk. R626, R627, R628
 func TestAppendChunksBracketCompletesGroup(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo), nil); err != nil {
 		t.Fatal(err)
 	}
 

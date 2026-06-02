@@ -1,5 +1,5 @@
 # ChunkCache
-**Requirements:** R297, R298, R299, R300, R301, R302, R303, R304, R305, R306, R370, R486, R514, R529, R535, R536, R537, R538, R539, R540, R541, R542, R543, R544, R545
+**Requirements:** R297, R298, R299, R300, R301, R302, R303, R304, R305, R306, R370, R486, R514, R529, R535, R536, R537, R538, R539, R540, R541, R542, R543, R544, R545, R646, R648, R651
 
 Per-query cache for file content and chunked data. Avoids redundant file reads and re-chunking when processing search results. Dispatches to RandomAccessChunker fast path when available; otherwise streams chunks from the start, caching what's encountered.
 
@@ -21,8 +21,8 @@ Per-query cache for file content and chunked data. Avoids redundant file reads a
 - ChunkTextWithId(fpath, chunkID): resolve file; find positional entry in fileChunks by ChunkID match; check byRange for cached content; on miss, read C record, pre-fill Chunk (Range from fileChunks[i].Location, Attrs from C record), dispatch to GetChunk (fast path) or streaming (chunkUntil by range); return content
 - ChunkText(fpath, rangeLabel): resolve file; look up chunkID := rangeIds[rangeLabel]; delegate to ChunkTextWithId
 - ensureFile(fpath): lookup path → fileid via DB (N records), read F record, snapshot fileChunks, build rangeIds from fileChunks, resolve chunker. For Chunker backends, os.ReadFile into data; for FileChunker-only backends, data stays nil. Allocate empty chunks slice, empty byRange map, nil customData.
-- retrieveFast(cf, chunkID, loc): RandomAccessChunker path — read C record by chunkID for Attrs; pre-fill Chunk{Range: loc, Attrs: stored}; call ra.GetChunk(cf.path, cf.data, &cf.customData, &chunk); deep-copy into chunks + byRange
-- retrieveStream(cf, rangeLabel): non-RandomAccessChunker fallback — run Chunker.Chunks or FileChunker.FileChunks from start, deep-copy each yielded chunk into chunks + byRange, stop when target range is found; for GetChunks-completion, run to end and set complete=true
+- retrieveFast(cf, chunkID, loc): RandomAccessChunker path — for a strategy without a transform, read C record by chunkID and pre-fill Chunk{Range: loc, Attrs: stored}; for a transform-carrying strategy, start with empty Attrs and skip the stored-Attrs pre-fill (R651). Call ra.GetChunk(cf.path, cf.data, &cf.customData, &chunk); apply the strategy transform to the filled chunk so retrieved Content == indexed Content (R646, R648); deep-copy into chunks + byRange
+- retrieveStream(cf, rangeLabel): non-RandomAccessChunker fallback — run Chunker.Chunks or FileChunker.FileChunks from start, apply the strategy transform to each yielded chunk before deep-copying (R646, R648), deep-copy into chunks + byRange, stop when target range is found; for GetChunks-completion, run to end and set complete=true
 - storeChunk(cf, chunk): deep-copy Range, Content, Attrs; append to chunks; record byRange[rangeStr] = idx
 
 ## Collaborators

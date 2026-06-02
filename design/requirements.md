@@ -958,3 +958,20 @@
 - **R639:** Optional `ChunkerMetadata` interface — `IsWritable() bool` and `CommentSyntax() string` — exposes per-chunker editability and line-comment delimiter to callers (notably ark's curation workshop). Kept separate from `Chunker` so existing external implementations are unaffected; callers type-assert and apply the defaults `IsWritable=true, CommentSyntax=""` when the interface isn't satisfied
 - **R640:** `LineChunker` and `MarkdownChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax=""` (plain text and markdown carry no comment delimiter)
 - **R641:** `bracketChunker` and `indentChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax` set to the first entry of `BracketLang.LineComments` (or `""` when the slice is empty)
+
+## Feature: Per-chunker content transform
+**Source:** specs/main.md
+
+- **R642:** `ContentTransform` type — `func(c *Chunk)` — an optional per-chunker hook that mutates a chunk in place, rewriting `Content` and optionally appending to `Attrs`
+- **R643:** `AddChunker(name, c, transform)` accepts a third argument `transform ContentTransform`; passing `nil` registers no transform (the common case)
+- **R644:** The transform is scoped per chunker/strategy — registered alongside the chunker, not globally; a strategy registered with a `nil` transform behaves exactly as before
+- **R645:** `AddStrategyFunc` registers its wrapping `FuncChunker` with a `nil` transform
+- **R646:** When a transform is registered for a strategy, it is applied to every chunk that strategy produces from raw file bytes, before that chunk's content is indexed or returned
+- **R647:** On index paths (add, reindex, append) the transform runs before the chunk's dedup hash, trigram extraction, and tokenization, so the index reflects the transformed `Content`
+- **R648:** On retrieval paths — `GetChunks` and `ChunkCache`, both the streaming fallback and the `RandomAccessChunker` fast path — the transform runs on the chunk produced from the re-read file region, so retrieved `Content` equals indexed `Content`
+- **R649:** The transform applies to overlay (`tmp://`) chunks on both the index paths (add, update, append) and the retrieval path, which re-chunks the stored raw bytes and re-applies the transform, so overlay indexed and retrieved content match
+- **R650:** The chunk's `Range` spans the raw file region, including any bytes the transform strips, so the region can be re-read and re-transformed identically at retrieval
+- **R651:** On the `RandomAccessChunker` retrieval fast path for a transform-carrying strategy, the chunk's `Attrs` start empty (stored C-record `Attrs` are not pre-filled) and the transform repopulates them; strategies without a transform pre-fill stored `Attrs` from the C record as before
+- **R652:** The chunk dedup hash is computed over `Content` followed by the marshaled `Attrs` when `Attrs` are non-empty; a chunk with empty `Attrs` hashes as SHA-256 over `Content` alone — unchanged from prior behavior, so existing indexes need no rebuild
+- **R653:** Two chunks with identical `Content` but differing `Attrs` receive distinct chunkids (no dedup), so each is indexed separately
+- **R654:** On append, when a recomputed trailing chunk has unchanged `Content` but changed `Attrs`, the Attrs-inclusive hash yields a new chunkid and `WithIndexedChunkCallback` fires for it on the append path, so the caller re-indexes the chunk's attributes even when the prior chunkid remains referenced by another file

@@ -358,6 +358,15 @@ func (fc FuncChunker) Chunks(path string, content []byte, yield func(Chunk) bool
 	return fc.Fn(path, content, yield)
 }
 
+// ContentTransform is an optional per-chunker hook registered via AddChunker.
+// It mutates a chunk in place — rewriting Content into the FTS-indexable text
+// and optionally appending derived metadata to Attrs. It must be a pure
+// function of the chunk's raw file region (the chunk's Range spans that region,
+// tags and all), so it reproduces identical Content and Attrs at both index and
+// retrieval time. nil registers no transform.
+// CRC: crc-Chunker.md | R642, R650
+type ContentTransform func(c *Chunk)
+
 // CRC: crc-Chunker.md | R116, R128, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R295, R296
 
 // MarkdownChunkFunc splits markdown content into paragraph-based chunks.

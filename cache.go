@@ -21,6 +21,7 @@ type cachedFile struct {
 	path       string
 	data       []byte            // nil for FileChunker-only (chunker reads file directly)
 	chunker    any               // Chunker, FileChunker, and/or RandomAccessChunker
+	transform  ContentTransform  // R648, R651: per-strategy content transform, nil for none
 	fileChunks []FileChunkEntry  // R538: positional chunk list from frec.Chunks
 	rangeIds   map[string]uint64 // R539: Location → ChunkID
 	chunks     []cachedChunk     // R540: access-order, not positional
@@ -182,6 +183,7 @@ func (cc *ChunkCache) ensureFile(fpath string) (*cachedFile, error) {
 		path:       fpath,
 		data:       data,
 		chunker:    chunker,
+		transform:  cc.db.transformFor(frec.Strategy),
 		fileChunks: frec.Chunks,
 		rangeIds:   rangeIds,
 		byRange:    make(map[string]int, len(frec.Chunks)),
@@ -201,22 +203,28 @@ func (cf *cachedFile) lookupLocation(chunkID uint64) (string, bool) {
 
 // retrieveFast runs the RandomAccessChunker path for a single chunk. R542
 func (cc *ChunkCache) retrieveFast(cf *cachedFile, chunkID uint64, loc string, ra RandomAccessChunker) bool {
+	// R651: a transform regenerates Attrs from the re-read region, so skip the C-record read.
 	var attrs []Pair
-	err := cc.db.env.View(func(txn *lmdb.Txn) error {
-		crec, err := cc.db.ReadCRecord(txn, chunkID)
+	if cf.transform == nil {
+		err := cc.db.env.View(func(txn *lmdb.Txn) error {
+			crec, err := cc.db.ReadCRecord(txn, chunkID)
+			if err != nil {
+				return err
+			}
+			attrs = crec.Attrs
+			return nil
+		})
 		if err != nil {
-			return err
+			return false
 		}
-		attrs = crec.Attrs
-		return nil
-	})
-	if err != nil {
-		return false
 	}
 
 	chunk := Chunk{Range: []byte(loc), Attrs: attrs}
 	if err := ra.GetChunk(cf.path, cf.data, &cf.customData, &chunk); err != nil {
 		return false
+	}
+	if cf.transform != nil {
+		cf.transform(&chunk) // R648: re-derive stripped Content and Attrs
 	}
 	cc.storeChunk(cf, chunk)
 	return true
@@ -240,25 +248,32 @@ func (cc *ChunkCache) populateFastWindow(cf *cachedFile, ra RandomAccessChunker,
 		return nil
 	}
 
-	attrsByID := make(map[uint64][]Pair, len(pending))
-	err := cc.db.env.View(func(txn *lmdb.Txn) error {
-		for _, t := range pending {
-			crec, err := cc.db.ReadCRecord(txn, t.chunkID)
-			if err != nil {
-				return fmt.Errorf("read C record %d: %w", t.chunkID, err)
+	// R651: a transform regenerates Attrs from the re-read region; skip the C-record reads.
+	var attrsByID map[uint64][]Pair
+	if cf.transform == nil {
+		attrsByID = make(map[uint64][]Pair, len(pending))
+		err := cc.db.env.View(func(txn *lmdb.Txn) error {
+			for _, t := range pending {
+				crec, err := cc.db.ReadCRecord(txn, t.chunkID)
+				if err != nil {
+					return fmt.Errorf("read C record %d: %w", t.chunkID, err)
+				}
+				attrsByID[t.chunkID] = crec.Attrs
 			}
-			attrsByID[t.chunkID] = crec.Attrs
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 
 	for _, t := range pending {
 		chunk := Chunk{Range: []byte(t.loc), Attrs: attrsByID[t.chunkID]}
 		if err := ra.GetChunk(cf.path, cf.data, &cf.customData, &chunk); err != nil {
 			return fmt.Errorf("GetChunk %s %s: %w", cf.path, t.loc, err)
+		}
+		if cf.transform != nil {
+			cf.transform(&chunk) // R648: re-derive stripped Content and Attrs
 		}
 		cc.storeChunk(cf, chunk)
 	}
@@ -303,6 +318,7 @@ func (cc *ChunkCache) chunkFull(cf *cachedFile) {
 // implements FileChunker would otherwise re-read the file). Fall back to
 // FileChunker for binary-only chunkers.
 func (cc *ChunkCache) runChunker(cf *cachedFile, yield func(Chunk) bool) {
+	yield = applyTransform(cf.transform, yield) // R648: transform on streaming retrieval
 	if cf.data != nil {
 		if ch, ok := cf.chunker.(Chunker); ok {
 			ch.Chunks(cf.path, cf.data, yield)

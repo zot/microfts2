@@ -3,7 +3,6 @@ package microfts2
 // CRC: crc-Overlay.md | Seq: seq-tmp-add.md, seq-tmp-search.md
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
@@ -75,7 +74,7 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb Chun
 	}
 
 	// Collect chunks outside the lock (chunking is CPU work).
-	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
+	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cb)
 	if err != nil {
 		return 0, err
 	}
@@ -116,7 +115,7 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb C
 	if !ok {
 		return fmt.Errorf("chunking strategy %q does not support content-based chunking", strategy)
 	}
-	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
+	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cb)
 	if err != nil {
 		return err
 	}
@@ -223,7 +222,7 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	}
 
 	// R483: fire callback for appended chunks
-	collected, err := collectChunksFromContent(path, content, chunker, db, cfg.chunkCallback)
+	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cfg.chunkCallback)
 	if err != nil {
 		return 0, err
 	}
@@ -389,10 +388,10 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) (uint64, 
 // collectChunksFromContent runs the chunker and extracts trigrams/tokens.
 // Pure computation — no overlay state accessed.
 // CRC: crc-Overlay.md | R485
-func collectChunksFromContent(path string, content []byte, chunker Chunker, db *DB, cb ChunkCallback) ([]collectedChunk, error) {
+func collectChunksFromContent(path string, content []byte, chunker Chunker, xf ContentTransform, db *DB, cb ChunkCallback) ([]collectedChunk, error) {
 	var chunks []collectedChunk
 	var utf8Err error
-	if err := chunker.Chunks(path, content, func(c Chunk) bool {
+	yield := func(c Chunk) bool {
 		if !utf8.Valid(c.Content) {
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, path)
 			return false
@@ -401,7 +400,7 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 		if cb != nil {
 			cb(string(c.Content))
 		}
-		h := sha256.Sum256(c.Content)
+		h := chunkDedupHash(c.Content, c.Attrs) // R652
 		cc := collectedChunk{
 			Chunk: Chunk{
 				Range:   append([]byte(nil), c.Range...),
@@ -415,7 +414,9 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, db *
 		}
 		chunks = append(chunks, cc)
 		return true
-	}); err != nil {
+	}
+	// R646, R649: apply the strategy transform before hashing/indexing.
+	if err := chunker.Chunks(path, content, applyTransform(xf, yield)); err != nil {
 		return nil, err
 	}
 	if utf8Err != nil {

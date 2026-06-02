@@ -52,6 +52,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
+- [x] test-ContentTransform.md → `content_transform_test.go`
 
 ## Gaps
 
@@ -76,3 +77,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O15: ~~resolveChunkText and chunkTextByRangeFile defined but not called~~ — resolved by removing ChunkTexter entirely; RandomAccessChunker (R524) supersedes it
 - [x] O16: All four built-in text chunkers (`LineChunker`, `MarkdownChunker`, `BracketChunker`, `IndentChunker`) implement `AppendAwareChunker` via the shared `appendByRechunkResume` helper, and all four implement `FileChunker` via the shared `fileChunksByRead` helper (R633, R636). The `DB.AppendChunks` silent-no-op guard (R623, `ErrAppendBoundary`) catches the case where a non-AppendAware custom chunker is used and produces no chunks for non-empty input.
 - T1: R308 retired by R309 (2026-05-04 BracketLang unification: StringDelim folded into BracketGroup via Escape+AllowedInner+AllowedParent)
+- [ ] O17: Content transform on tmp:// retrieval is applied in getChunksTmp (re-chunks raw bytes + re-applies the transform), but ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is LMDB-only — pre-existing), so the transform is moot on that path; if ChunkCache gains tmp:// support it must resolve and apply the strategy transform too. getChunksTmp also omits Attrs from ChunkResult (pre-existing).
+- A5: Per-chunker content transforms attach only via AddChunker; external-command (shell) strategies registered with AddStrategy carry no transform (transformFor returns nil for them). By design — matches ark's per-chunker request (R644).
