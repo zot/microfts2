@@ -1,7 +1,9 @@
 package microfts2
 
-// CRC: crc-Chunker.md, crc-DB.md, crc-ChunkCache.md, crc-Overlay.md | test-ContentTransform.md | R642, R643, R644, R645, R646, R647, R648, R649, R650, R651, R652, R653, R654
+// CRC: crc-Chunker.md, crc-DB.md, crc-ChunkCache.md, crc-Overlay.md | test-ContentTransform.md | R642, R643, R644, R645, R646, R647, R649, R650, R655, R656, R657, R658, R659
 // Tests for the per-chunker content transform. See design/test-ContentTransform.md.
+// The transform is index-only: it shapes the trigram/token index and the derived
+// Attrs, while retrieval returns the original chunker content.
 
 import (
 	"bytes"
@@ -51,9 +53,9 @@ func (paraChunker) Chunks(_ string, content []byte, yield func(Chunk) bool) erro
 	return nil
 }
 
-// R646, R647: the transform runs before hashing/indexing, so the index reflects
-// stripped Content — tag text is not trigram-indexed, body text is.
-func TestContentTransformStripsAtIndex(t *testing.T) {
+// R646, R647, R656: the transform's stripped Content feeds the trigram index, but
+// the C record stores the original Content (hashed over the original).
+func TestContentTransformStripsTheIndexNotTheStore(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("para", paraChunker{}, stripTags); err != nil {
 		t.Fatal(err)
@@ -70,21 +72,21 @@ func TestContentTransformStripsAtIndex(t *testing.T) {
 	}
 	// Stripped tag value is NOT indexed.
 	if got := mustSearchCount(t, db, "zorblax"); got != 0 {
-		t.Errorf("search %q: expected no hits (tag stripped), got %d", "zorblax", got)
+		t.Errorf("search %q: expected no hits (tag stripped from index), got %d", "zorblax", got)
 	}
 
-	// Stored content/attrs reflect the transform.
+	// Stored content is the ORIGINAL (tags intact); Attrs carry the derived value.
 	chunk := onlyChunk(t, db, fileid, f)
-	if chunk.Content != "the quick maluba" {
-		t.Errorf("indexed Content = %q, want %q", chunk.Content, "the quick maluba")
+	if chunk.Content != "@author: zorblax\nthe quick maluba" {
+		t.Errorf("stored Content = %q, want the original tag-bearing text", chunk.Content)
 	}
 	if v, ok := PairGet(chunk.Attrs, "author"); !ok || string(v) != "zorblax" {
 		t.Errorf("indexed Attrs author = %q,%v, want zorblax", v, ok)
 	}
 }
 
-// R648: streaming-fallback retrieval (non-RandomAccessChunker) re-derives the
-// same stripped Content and Attrs that were indexed.
+// R655: streaming-fallback retrieval (non-RandomAccessChunker) returns the
+// original chunker Content; Attrs come from the stored C record.
 func TestContentTransformRetrieveStreaming(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("para", paraChunker{}, stripTags); err != nil {
@@ -97,17 +99,16 @@ func TestContentTransformRetrieveStreaming(t *testing.T) {
 	}
 
 	chunk := onlyChunk(t, db, fileid, f)
-	if chunk.Content != "the quick maluba" {
-		t.Errorf("retrieved Content = %q, want %q", chunk.Content, "the quick maluba")
+	if chunk.Content != "@author: zorblax\nthe quick maluba" {
+		t.Errorf("retrieved Content = %q, want the original tag-bearing text", chunk.Content)
 	}
 	if v, ok := PairGet(chunk.Attrs, "author"); !ok || string(v) != "zorblax" {
 		t.Errorf("retrieved Attrs author = %q,%v, want zorblax", v, ok)
 	}
 }
 
-// R648, R651: RandomAccessChunker fast-path retrieval re-derives identical
-// Content and Attrs — the transform repopulates Attrs from the file region,
-// with no double-append from the stored C-record.
+// R655: RandomAccessChunker fast-path retrieval returns the original Content and
+// pre-fills Attrs from the stored C record — no transform, no double-append.
 func TestContentTransformRetrieveFastPath(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("md-strip", MarkdownChunker{}, stripTags); err != nil {
@@ -123,10 +124,11 @@ func TestContentTransformRetrieveFastPath(t *testing.T) {
 	if !bytes.Contains([]byte(chunk.Content), []byte("the quick maluba")) {
 		t.Errorf("fast-path Content = %q, want it to contain %q", chunk.Content, "the quick maluba")
 	}
-	if bytes.Contains([]byte(chunk.Content), []byte("zorblax")) {
-		t.Errorf("fast-path Content = %q, must not contain stripped tag value", chunk.Content)
+	// Retrieval returns the ORIGINAL content — the tag text is present, not stripped.
+	if !bytes.Contains([]byte(chunk.Content), []byte("zorblax")) {
+		t.Errorf("fast-path Content = %q, want it to contain the original tag text %q", chunk.Content, "zorblax")
 	}
-	// Attr present exactly once (no double-append).
+	// Attr present exactly once (from the C record, not double-appended).
 	count := 0
 	for _, p := range chunk.Attrs {
 		if string(p.Key) == "author" {
@@ -138,9 +140,41 @@ func TestContentTransformRetrieveFastPath(t *testing.T) {
 	}
 }
 
-// R652, R654: an append that adds a tag to the trailing paragraph leaves the
-// stripped Content unchanged but changes Attrs — the Attrs-inclusive hash yields
-// a fresh chunkid and WithIndexedChunkCallback fires on the append path.
+// R655, R656: a chunk that is entirely @tag lines indexes to empty body text, yet
+// retrieves as its original (non-empty) tag text. This is the regression guard:
+// before the index-only fix, retrieval pre-stripped and handed back empty content.
+func TestContentTransformAllTagChunkRetrievesOriginal(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("para", paraChunker{}, stripTags); err != nil {
+		t.Fatal(err)
+	}
+	f := writeTestFile(t, dir, "req.txt", "@from: ark\n@to: microfts2")
+	fileid, err := db.AddFile(f, "para")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Tag values are not in the trigram index.
+	if got := mustSearchCount(t, db, "microfts2"); got != 0 {
+		t.Errorf("search %q: expected no hits (all-tag body stripped from index), got %d", "microfts2", got)
+	}
+
+	// Retrieval hands back the original tag text — never empty.
+	chunk := onlyChunk(t, db, fileid, f)
+	if chunk.Content != "@from: ark\n@to: microfts2" {
+		t.Errorf("retrieved Content = %q, want the original all-tag text (not empty)", chunk.Content)
+	}
+	if v, ok := PairGet(chunk.Attrs, "from"); !ok || string(v) != "ark" {
+		t.Errorf("Attrs from = %q,%v, want ark", v, ok)
+	}
+	if v, ok := PairGet(chunk.Attrs, "to"); !ok || string(v) != "microfts2" {
+		t.Errorf("Attrs to = %q,%v, want microfts2", v, ok)
+	}
+}
+
+// R658: an append that adds a tag to the trailing paragraph changes that chunk's
+// ORIGINAL content, so it hashes to a fresh chunkid and WithIndexedChunkCallback
+// fires on the append path — natural re-index, no Attrs-in-hash workaround.
 func TestContentTransformAppendNewChunkID(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("md-strip", MarkdownChunker{}, stripTags); err != nil {
@@ -164,7 +198,7 @@ func TestContentTransformAppendNewChunkID(t *testing.T) {
 
 	newID := onlyChunkID(t, db, fileid)
 	if newID == origID {
-		t.Errorf("chunkid unchanged (%d) after attr-changing append; expected a fresh chunkid", newID)
+		t.Errorf("chunkid unchanged (%d) after a tag-adding append; expected a fresh chunkid", newID)
 	}
 	if len(fired) == 0 {
 		t.Fatal("WithIndexedChunkCallback did not fire on append")
@@ -178,13 +212,16 @@ func TestContentTransformAppendNewChunkID(t *testing.T) {
 	}
 }
 
-// R652, R653: identical Content with differing Attrs are not deduplicated —
-// each gets its own chunkid.
-func TestContentTransformIdentityIncludesAttrs(t *testing.T) {
+// R656, R657: dedup identity is the original content. Files whose tags differ have
+// different original content and get distinct chunkids; files with identical
+// original content (tags and all) dedup to one chunkid.
+func TestContentTransformIdentityIsOriginalContent(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("para", paraChunker{}, stripTags); err != nil {
 		t.Fatal(err)
 	}
+
+	// Differing tags → differing original content → distinct chunkids.
 	fx := writeTestFile(t, dir, "x.txt", "@a: 1\nshared body text")
 	fy := writeTestFile(t, dir, "y.txt", "@b: 2\nshared body text")
 	idx, err := db.AddFile(fx, "para")
@@ -196,13 +233,28 @@ func TestContentTransformIdentityIncludesAttrs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if onlyChunkID(t, db, idx) == onlyChunkID(t, db, idy) {
-		t.Error("chunks with identical Content but differing Attrs were deduplicated; expected distinct chunkids")
+		t.Error("chunks whose tags differ share a chunkid; expected distinct chunkids (different original content)")
+	}
+
+	// Identical original content (same tags) → dedup to one chunkid.
+	fp := writeTestFile(t, dir, "p.txt", "@a: 1\nshared body text")
+	fq := writeTestFile(t, dir, "q.txt", "@a: 1\nshared body text")
+	idp, err := db.AddFile(fp, "para")
+	if err != nil {
+		t.Fatal(err)
+	}
+	idq, err := db.AddFile(fq, "para")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyChunkID(t, db, idp) != onlyChunkID(t, db, idq) {
+		t.Error("identical original content did not dedup to one chunkid")
 	}
 }
 
-// R652: a chunk with no Attrs hashes as SHA-256 over Content alone, so identical
-// content still deduplicates exactly as before (no rebuild forced).
-func TestContentTransformEmptyAttrsStillDedup(t *testing.T) {
+// R656: a chunk produced without a transform hashes as SHA-256 over Content, so
+// identical content still deduplicates exactly as before.
+func TestContentTransformNoTransformStillDedup(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddChunker("para-plain", paraChunker{}, nil); err != nil {
 		t.Fatal(err)
@@ -218,7 +270,7 @@ func TestContentTransformEmptyAttrsStillDedup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if onlyChunkID(t, db, idx) != onlyChunkID(t, db, idy) {
-		t.Error("identical no-attr content did not deduplicate to one chunkid")
+		t.Error("identical no-transform content did not deduplicate to one chunkid")
 	}
 }
 

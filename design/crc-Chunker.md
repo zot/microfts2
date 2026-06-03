@@ -13,7 +13,7 @@ Provides the chunking interfaces (Chunker, FileChunker, RandomAccessChunker), th
 - Pair struct: Key []byte, Value []byte — opaque key-value pair
 - ChunkFunc type: convenience function type for simple chunkers
 - FuncChunker: adapter wrapping ChunkFunc into Chunker
-- ContentTransform type: func(c *Chunk) — optional per-chunker hook registered via AddChunker; mutates a chunk in place (rewrites Content to FTS-indexable text, may append derived Attrs). A pure function of the chunk's raw file region — the chunk's Range spans that region (tags and all), so the transform reproduces identical Content and Attrs at both index and retrieval time. R642, R650
+- ContentTransform type: func(c *Chunk) — optional per-chunker hook registered via AddChunker; runs ONLY while indexing, mutating a copy of the chunk in place (rewrites Content to FTS-indexable text for the trigram/token index, may append derived Attrs). The original chunker Content is what gets hashed, stored, and returned by retrieval — the transform never runs on retrieval. The chunk's Range spans the raw file region (tags and all), so retrieval re-reads that region and returns the original content. R642, R650
 
 ## Does
 - FuncChunker.Chunks(path, content, yield): delegate to wrapped ChunkFunc

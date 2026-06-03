@@ -79,3 +79,8 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T1: R308 retired by R309 (2026-05-04 BracketLang unification: StringDelim folded into BracketGroup via Escape+AllowedInner+AllowedParent)
 - [ ] O17: Content transform on tmp:// retrieval is applied in getChunksTmp (re-chunks raw bytes + re-applies the transform), but ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is LMDB-only — pre-existing), so the transform is moot on that path; if ChunkCache gains tmp:// support it must resolve and apply the strategy transform too. getChunksTmp also omits Attrs from ChunkResult (pre-existing).
 - A5: Per-chunker content transforms attach only via AddChunker; external-command (shell) strategies registered with AddStrategy carry no transform (transformFor returns nil for them). By design — matches ark's per-chunker request (R644).
+- T2: R648 retired by R655 (2026-06-03 content-transform-index-only: retrieval no longer transforms; returns original content)
+- T3: R651 retired by R655 (2026-06-03 content-transform-index-only: fast path reads stored C-record Attrs, no transform repopulation)
+- T4: R652 retired by R656 (2026-06-03 content-transform-index-only: dedup hash over original Content only, Attrs dropped from hash)
+- T5: R653 retired by R657 (2026-06-03 content-transform-index-only: dedup identity is original Content)
+- T6: R654 retired by R658 (2026-06-03 content-transform-index-only: tag edit changes original Content, re-indexes naturally)

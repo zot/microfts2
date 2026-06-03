@@ -396,27 +396,15 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, xf C
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, path)
 			return false
 		}
-		// R473: fire callback after UTF-8 validation, before hashing
+		// R473: fire callback with the original content after UTF-8 validation
 		if cb != nil {
 			cb(string(c.Content))
 		}
-		h := chunkDedupHash(c.Content, c.Attrs) // R652
-		cc := collectedChunk{
-			Chunk: Chunk{
-				Range:   append([]byte(nil), c.Range...),
-				Locator: append([]byte(nil), c.Locator...),
-				Content: append([]byte(nil), c.Content...),
-				Attrs:   CopyPairs(c.Attrs),
-			},
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
-		}
-		chunks = append(chunks, cc)
+		// R646, R647, R649, R656: transform shapes the index; original Content is hashed and stored.
+		chunks = append(chunks, db.indexChunk(c, xf))
 		return true
 	}
-	// R646, R649: apply the strategy transform before hashing/indexing.
-	if err := chunker.Chunks(path, content, applyTransform(xf, yield)); err != nil {
+	if err := chunker.Chunks(path, content, yield); err != nil {
 		return nil, err
 	}
 	if utf8Err != nil {
@@ -647,6 +635,22 @@ func (o *overlay) chunkContentLens(fileid uint64) ([]int, bool) {
 		}
 	}
 	return lens, true
+}
+
+// chunkAttrs returns the stored (index-time) Attrs for chunks[lo..hi], keyed by
+// chunkid — the overlay equivalent of DB.chunkAttrs. tmp:// retrieval re-chunks
+// for Content but reads these stored Attrs, never re-running the transform. R655
+func (o *overlay) chunkAttrs(chunks []FileChunkEntry, lo, hi int) map[uint64][]Pair {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	attrsByID := make(map[uint64][]Pair, hi-lo+1)
+	for i := lo; i <= hi; i++ {
+		cid := chunks[i].ChunkID
+		if oc, ok := o.chunks[cid]; ok {
+			attrsByID[cid] = CopyPairs(oc.attrs)
+		}
+	}
+	return attrsByID
 }
 
 // TmpChunkInfo holds info about one chunk of a tmp:// document.

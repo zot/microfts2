@@ -2,42 +2,49 @@
 **Source:** crc-Chunker.md, crc-DB.md, crc-ChunkCache.md, crc-Overlay.md
 
 A registered transform strips `@tag:` lines from a markdown-ish paragraph and
-appends the extracted tag values to `Attrs`. Tests use a small deterministic
-transform so they assert exact Content and Attrs.
+appends the extracted tag values to `Attrs`. The transform shapes only the
+index and the derived `Attrs`; retrieval returns the original chunker content.
+Tests use a small deterministic transform so they assert exact Content and Attrs.
 
-## Test: transform strips content and derives attrs at index time
-**Purpose:** R646, R647 — the transform runs before hashing/trigram extraction, so the index reflects stripped Content.
-**Input:** AddChunker("md-strip", MarkdownChunker{}, stripTags); index a file whose paragraph is `@a: 1` / `maluba`.
-**Expected:** the chunk's C record stores Content `maluba` and Attrs containing `a=1`; a search for the tag literal `@a` finds nothing (tags not trigram-indexed); a search for `maluba` finds the chunk.
+## Test: transform strips the index but stores original content
+**Purpose:** R646, R647, R656 — the transform's stripped Content feeds the trigram index while the C record stores the original Content (hashed over the original).
+**Input:** AddChunker("md-strip", MarkdownChunker{}, stripTags); index a file whose paragraph is `@author: zorblax` / `the quick maluba`.
+**Expected:** a search for `maluba` finds the chunk (body indexed); a search for `zorblax` finds nothing (tag value not trigram-indexed); the chunk's stored Content is the ORIGINAL `@author: zorblax` / `the quick maluba`, and its Attrs contain `author=zorblax`.
 **Refs:** crc-DB.md, seq-chunker-dispatch.md
 
-## Test: retrieved content equals indexed content — streaming fallback
-**Purpose:** R648 — non-RandomAccessChunker retrieval re-derives identical Content.
+## Test: retrieval returns original content — streaming fallback
+**Purpose:** R655 — non-RandomAccessChunker retrieval returns the original chunker Content (transform not applied).
 **Input:** register a transform-carrying Chunker that is NOT a RandomAccessChunker; index, then GetChunks the chunk.
-**Expected:** returned Content is `maluba` (stripped), Attrs contains `a=1` — identical to indexed.
+**Expected:** returned Content is the ORIGINAL `@author: zorblax` / `the quick maluba` (tags intact); Attrs (from the stored C record) contains `author=zorblax`.
 **Refs:** crc-ChunkCache.md, crc-DB.md
 
-## Test: retrieved content equals indexed content — RandomAccessChunker fast path
-**Purpose:** R648, R651 — fast-path retrieval starts with empty Attrs and the transform repopulates; no double-append.
+## Test: retrieval returns original content — RandomAccessChunker fast path
+**Purpose:** R655 — fast-path retrieval pre-fills Attrs from the stored C record and returns the original Content; no transform, no double-append.
 **Input:** transform-carrying RandomAccessChunker; index, then GetChunks / ChunkCache.ChunkText the chunk.
-**Expected:** Content `maluba`; Attrs contains exactly one `a=1` (not duplicated); equals the streaming-path result.
+**Expected:** Content contains `the quick maluba` AND the original tag text `zorblax` (original, not stripped); Attrs contains exactly one `author=zorblax` (from the C record, not duplicated).
 **Refs:** crc-ChunkCache.md
 
+## Test: all-tag chunk retrieves its original text, not empty (regression guard)
+**Purpose:** R655, R656 — a chunk that is entirely `@tag:` lines strips to empty for the index but must retrieve as its original non-empty text.
+**Input:** transform-carrying chunker; index a file whose only chunk is `@from: ark` / `@to: microfts2` (all tag lines).
+**Expected:** the chunk indexes with empty body (no body trigrams; searching a tag value finds nothing), yet GetChunks returns the ORIGINAL `@from: ark` / `@to: microfts2` text (non-empty); Attrs contains `from=ark` and `to=microfts2`.
+**Refs:** crc-DB.md, crc-ChunkCache.md
+
 ## Test: append adding a tag yields a new chunkid and fires the indexed callback
-**Purpose:** R652, R654 — Attrs change with unchanged Content produces a fresh chunkid; WithIndexedChunkCallback fires on append.
-**Input:** index `@a: 1` / `maluba` as the file's last paragraph; AppendChunks bytes that add `@b: 2` to that paragraph, with WithIndexedChunkCallback recording fired chunkids.
-**Expected:** the recomputed tail has Content `maluba` but a different chunkid than before; the indexed callback fires once carrying Attrs `a=1, b=2`; a later retrieval returns both attributes.
+**Purpose:** R658 — a tag added to the trailing chunk changes its original Content, producing a fresh chunkid; WithIndexedChunkCallback fires on append.
+**Input:** index `@author: zorblax` / `maluba body` as the file's last paragraph; AppendChunks bytes that add `@extra: nine` to that paragraph, with WithIndexedChunkCallback recording fired chunks.
+**Expected:** the recomputed tail has a different chunkid than before (its original Content gained the tag line); the indexed callback fires carrying Attrs `author=zorblax, extra=nine`; a later retrieval returns the original text with both tag lines.
 **Refs:** crc-DB.md
 
-## Test: identical content, differing attrs are not deduplicated
-**Purpose:** R652, R653 — chunk identity includes Attrs across files.
-**Input:** index file X (`@a: 1` / `maluba`) and file Y (`@b: 2` / `maluba`) with the transform.
-**Expected:** the two `maluba` chunks have distinct chunkids; each C record carries its own Attrs.
+## Test: dedup identity is the original content
+**Purpose:** R656, R657 — identical original Content dedups to one chunkid; differing tags give different original Content and distinct chunkids.
+**Input:** with the transform, index file X (`@a: 1` / `shared body`) and file Y (`@b: 2` / `shared body`); separately index file P and file Q both holding identical `@a: 1` / `shared body`.
+**Expected:** X and Y receive distinct chunkids (their original Content differs by the tag line); P and Q dedup to one chunkid (identical original Content).
 **Refs:** crc-DB.md, crc-Overlay.md
 
-## Test: empty-attrs hash is unchanged — no rebuild, dedup still works
-**Purpose:** R652 — a chunk with no Attrs hashes as SHA-256 over Content alone.
-**Input:** a chunker with no transform (Attrs empty) indexing identical content in two files.
+## Test: no-transform dedup is unchanged
+**Purpose:** R656 — a chunk produced without a transform hashes as SHA-256 over Content, exactly as before.
+**Input:** a chunker with no transform indexing identical content in two files.
 **Expected:** the two chunks dedup to one chunkid (hash equals the historical content-only hash); behavior identical to before the change.
 **Refs:** crc-DB.md
 

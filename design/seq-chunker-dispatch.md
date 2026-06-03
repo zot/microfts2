@@ -1,5 +1,5 @@
 # Sequence: Chunker Dispatch
-**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544, R646, R647, R648, R651
+**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544, R646, R647, R655, R656
 
 How DB and ChunkCache dispatch to the right chunking interface at each call site.
 
@@ -124,32 +124,37 @@ ChunkCache.GetChunks(fpath, targetRange, before, after)
 ## Content transform (cross-cutting)
 
 A strategy registered with a `ContentTransform` (via `AddChunker`) has the
-transform applied wherever a chunk is produced from raw file bytes (R646). It
-is a pure function of the chunk's raw file region, so index and retrieval
-reproduce identical Content and Attrs.
+transform applied ONLY while indexing (R646). It shapes the trigram/token
+index and the derived Attrs; it never runs on retrieval, and the C record
+stores the original chunker Content.
 
-Index sites — transform runs BEFORE hash/trigram/token:
+Index sites — transform feeds the index; original Content is hashed and stored:
 
 ```
-collectChunks / AppendChunks  yield(c):
-  transform(&c)                                    # strip Content, derive Attrs   R647
-  hash = sha256(c.Content + marshaledAttrs(c.Attrs))                            # R652
-  trigrams/tokens computed on c.Content, dedup keyed on hash
+collectChunks / AppendChunks / collectChunksFromContent  yield(c):
+  hash = sha256(c.Content)                          # ORIGINAL content, Attrs not in hash   R656
+  indexed := copy(c); transform(&indexed)           # strip Content, derive Attrs           R647
+  trigrams/tokens computed on indexed.Content                                              # R647
+  store collectedChunk{ Content: c.Content (ORIGINAL), Attrs: indexed.Attrs, hash }
+  dedup keyed on hash; identical original Content dedups, differing tags differ            R657
+  WithIndexedChunkCallback carries original Content + derived Attrs                         R659
 ```
 
-Retrieval sites — transform runs AFTER the chunk is produced from the re-read
-region, so retrieved Content == indexed Content (R648):
+Retrieval sites — NO transform; Content is re-read (original), Attrs are read from
+the stored C record via db.chunkAttrs (the index-time transform output), R655:
 
 ```
 RandomAccessChunker fast path (DB.getChunksFast, ChunkCache.retrieveFast / populateFastWindow):
-  if transform present: chunk.Attrs starts EMPTY (no C-record pre-fill)         # R651
-  ra.GetChunk(path, data, &customData, &chunk)
-  transform(&chunk)                                # re-strip Content, re-derive Attrs
+  chunk.Attrs pre-filled from the stored C record (no transform)
+  ra.GetChunk(path, data, &customData, &chunk)      # Content is the re-read region, original
 
-streaming fallback (DB.GetChunks, ChunkCache.runChunker):
-  wrap yield → transform(&c) before the consumer sees c                         # R648
+streaming fallback (DB.GetChunks, ChunkCache.GetChunks):
+  re-chunk for Content; Attrs read from the stored C record via db.chunkAttrs(frec.Chunks, lo, hi)
+
+tmp:// (DB.getChunksTmp):
+  re-chunk ofile.content for Content; Attrs from overlay.chunkAttrs (stored overlayChunk.attrs)
 ```
 
 Overlay (tmp://): index paths (add/update/append) apply the transform via
 collectChunksFromContent; retrieval (getChunksTmp) re-chunks the stored raw
-bytes and re-applies the transform (R648, R649).
+bytes and returns the original content WITHOUT the transform (R649, R655).

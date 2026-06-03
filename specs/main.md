@@ -815,31 +815,30 @@ type ContentTransform func(c *Chunk)
 func (db *DB) AddChunker(name string, c any, transform ContentTransform) error
 ```
 
-`transform` is `nil` for chunkers that need no transform (the common case). When present, it runs on every chunk the strategy produces and may mutate the chunk in place — rewriting `Content` and appending to `Attrs`.
+`transform` is `nil` for chunkers that need no transform (the common case). When present, it runs on every chunk the strategy produces **while indexing** and may mutate the chunk in place — rewriting `Content` for the trigram/token index and appending derived values to `Attrs`. It never runs on retrieval.
 
 The motivating use: a caller (ark) annotates documents with inline `@tag: value` lines. It indexes and embeds those tags through its own records, so it wants them stripped from chunk `Content` before microfts2 trigram-indexes that content — otherwise the tags pollute the index. In the same pass the transform stashes the extracted tag values into the chunk's `Attrs`. The hook is registered per chunker, not globally, so markdown's transform can differ from others, binary chunkers like PDF get none, and the transform can carry chunker-specific context (e.g. markdown-ness, which fenced-code detection needs).
 
-## Files are the source of truth; the transform is a pure function of the file region
+## Files are the source of truth; the transform is a pure index-time function
 
-The transform receives the chunk as the chunker produced it from the raw file region — `Content` is the verbatim bytes of that region, tags and all, because the tags physically live in the file. It rewrites `Content` into the FTS-indexable text and derives `Attrs` from that same region. Both outputs are pure functions of the file bytes, and the chunk's `Range` spans the raw region throughout, so the region can always be re-read and re-transformed.
+The transform receives the chunk as the chunker produced it from the raw file region — `Content` is the verbatim bytes of that region, tags and all, because the tags physically live in the file. On the index path it rewrites `Content` into the FTS-indexable text and derives `Attrs` from that same region.
 
-This is what lets the transform run consistently on both the index path and the retrieval path without storing anything new. At index time the transform strips `Content` and derives `Attrs`, which get indexed and stored. At retrieval time the same region is re-read from disk and re-transformed, reproducing identical `Content` and `Attrs`. The invariant the caller needs — content-as-indexed equals content-as-retrieved — holds by construction.
+The transform is **purely for indexing**. It shapes what microfts2 trigram-indexes and the `Attrs` it records; it never changes what retrieval hands back. The *original* chunker content is what gets stored — the C record's `ContentLen` and dedup hash reflect it — and what every retrieval path returns. Retrieval re-reads the raw region from disk and hands it back unchanged; the transform does not run on retrieval. So an all-`@tag:` chunk indexes as empty body text (its tags are searchable only as `Attrs`) yet retrieves as its original tag text, never as empty.
 
 ## Where the transform fires
 
-The transform applies wherever a chunk is produced from raw file bytes:
+The transform fires only on the **index path** — the single step that feeds microfts2's trigram/token index and extracts `Attrs`:
 
-- **Index paths** — add, reindex, and append. The transform runs *before* hashing, trigram extraction, and tokenization, so the index sees the stripped content.
-- **Retrieval paths** — `GetChunks` and the `ChunkCache`, on both the streaming fallback and the `RandomAccessChunker` fast path.
-- **Overlay (`tmp://`)** — the transform applies on the index paths (add, update, append) and on `tmp://` retrieval, which re-chunks the stored raw bytes and re-applies the transform. Both run the same transform over the same bytes, so indexed and retrieved content cannot diverge.
+- **Index paths** — add, reindex, and append. The transform runs over a copy of the chunk: its stripped `Content` feeds trigram extraction and tokenization, and its derived `Attrs` are recorded on the chunk and delivered to `WithIndexedChunkCallback`. The chunk's dedup hash and stored `Content` use the *original* chunker bytes; `WithIndexedChunkCallback` carries that original `Content` alongside the derived `Attrs`.
+- **Overlay (`tmp://`)** — the transform applies on the overlay index paths (add, update, append) only.
 
-On the retrieval fast path, a chunk for a transform-carrying strategy starts with empty `Attrs` and the transform repopulates them, rather than pre-filling the stored C-record `Attrs`: the transform regenerates `Attrs` from the file region, and pre-filling would double the appended entries. Chunkers without a transform keep the existing behavior — stored `Attrs` pre-filled from the C record.
+It does **not** fire on any retrieval path. `GetChunks`, the `ChunkCache` (streaming fallback and `RandomAccessChunker` fast path), and `tmp://` retrieval all return the original chunker content. Retrieval `Attrs` come from the stored C record, exactly as a non-transforming strategy has always behaved.
 
-## Chunk identity includes Attrs
+## Chunk identity is the original content
 
-Chunk dedup is keyed on a hash. Because `Attrs` are indexed metadata derived from the file, two chunks with identical `Content` but different `Attrs` are not the same chunk — serving one for the other would lose the difference. The dedup hash therefore covers `Content` and then the marshaled `Attrs` when `Attrs` are present; a chunk with no `Attrs` hashes exactly as before (SHA-256 over `Content` alone), so existing indexes are unaffected and no rebuild is forced.
+Chunk dedup is keyed on a hash over the chunk's **original** `Content` alone — the verbatim file region, tags included. Derived `Attrs` do not enter the hash. A chunk with no transform hashes exactly as it always has (SHA-256 over `Content`), so existing indexes are unaffected and no rebuild is forced.
 
-This guarantees correct re-indexing on append. If a trailing paragraph gains a tag line — e.g. `@b: 2` appended to a paragraph that already read `@a: 1` / `maluba` — the stripped content (`maluba`) is unchanged, so a content-only hash would dedup back to the old chunkid and the new attribute would be silently dropped, especially when that chunkid is still referenced by another file. With `Attrs` in the hash the recomputed chunk hashes differently, gets a fresh chunkid, and the new-chunk delivery of `WithIndexedChunkCallback` fires on the append path, so the caller re-indexes every attribute. The cost — re-embedding text that did not change — is accepted in exchange for the guarantee.
+This re-indexes correctly on append without any Attrs-in-hash workaround. Because the tags physically live in the original content, a tag edit changes that content: if a trailing paragraph gains a tag line — e.g. `@b: 2` appended to a paragraph that already read `@a: 1` / `maluba` — the original content the hash covers is now different, so the recomputed chunk hashes differently, gets a fresh chunkid, and the new-chunk delivery of `WithIndexedChunkCallback` fires, even when the old chunkid is still referenced by another file. Two chunks with identical original content (tags and all) dedup to one chunkid; chunks whose tags differ have different original content and so receive distinct chunkids.
 
 # Dynamic Trigram Filtering
 

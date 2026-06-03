@@ -1377,6 +1377,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	}
 
 	// Yield callback shared by both paths: validates UTF-8, fires callback, collects chunk data.
+	xf := db.transformFor(strategy)
 	var chunks []collectedChunk
 	var utf8Err error
 	yield := func(c Chunk) bool {
@@ -1384,27 +1385,13 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
 		}
-		// R473: fire callback after UTF-8 validation, before hashing
+		// R473: fire callback with the original content after UTF-8 validation
 		if cb != nil {
 			cb(string(c.Content))
 		}
-		h := chunkDedupHash(c.Content, c.Attrs) // R652
-		cc := collectedChunk{
-			Chunk: Chunk{
-				Range:   append([]byte(nil), c.Range...),
-				Locator: append([]byte(nil), c.Locator...),
-				Content: append([]byte(nil), c.Content...),
-				Attrs:   CopyPairs(c.Attrs),
-			},
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
-		}
-		chunks = append(chunks, cc)
+		chunks = append(chunks, db.indexChunk(c, xf)) // R646, R647, R656
 		return true
 	}
-	// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647 -- transform before hash/trigram/token
-	yield = applyTransform(db.transformFor(strategy), yield)
 
 	var data []byte
 	var hash [32]byte
@@ -2173,6 +2160,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	}
 
 	// Yield closure shared by both dispatch paths
+	xf := db.transformFor(strategy)
 	var newChunks []collectedChunk
 	var utf8Err error
 	yield := func(c Chunk) bool {
@@ -2183,23 +2171,12 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if cfg.chunkCallback != nil {
 			cfg.chunkCallback(string(c.Content))
 		}
-		h := chunkDedupHash(c.Content, c.Attrs) // R652
-		cc := collectedChunk{
-			Chunk: Chunk{
-				Range:   append([]byte(nil), c.Range...),
-				Locator: append([]byte(nil), c.Locator...),
-				Content: append([]byte(nil), c.Content...),
-				Attrs:   CopyPairs(c.Attrs),
-			},
-			hash:      h,
-			triCounts: db.trigrams.TrigramCounts(c.Content),
-			tokens:    tokenizeCounts(c.Content),
-		}
-		newChunks = append(newChunks, cc)
+		// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647, R658 -- transform shapes
+		// the index; the dedup hash is over the original Content, so a tag edit (changed original
+		// Content) yields a fresh chunkid that fires WithIndexedChunkCallback on the new-chunk path.
+		newChunks = append(newChunks, db.indexChunk(c, xf))
 		return true
 	}
-	// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647, R654 -- transform before hash; an Attrs-changed tail gets a fresh chunkid (via chunkDedupHash) that fires WithIndexedChunkCallback on the new-chunk path
-	yield = applyTransform(db.transformFor(strategy), yield)
 
 	// Dispatch: AppendAwareChunker fast path or default Chunker (R605, R606)
 	var replacedLast bool
@@ -3385,6 +3362,12 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	}
 
 	// R530: streaming fallback.
+	// R655: retrieval re-reads the original chunker content but surfaces the stored
+	// C-record Attrs (the index-time transform output is read, not re-run).
+	attrsByID, err := db.chunkAttrs(frec.Chunks, lo, hi)
+	if err != nil {
+		return nil, err
+	}
 	var results []ChunkResult
 	idx := 0
 	yield := func(c Chunk) bool {
@@ -3394,14 +3377,12 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 				Range:   string(c.Range),
 				Content: string(c.Content),
 				Index:   idx,
-				Attrs:   CopyPairs(c.Attrs),
+				Attrs:   CopyPairs(attrsByID[frec.Chunks[idx].ChunkID]),
 			})
 		}
 		idx++
 		return idx <= hi // stop early once past window
 	}
-	// R648: apply the strategy transform so retrieved Content == indexed Content.
-	yield = applyTransform(db.transformFor(frec.Strategy), yield)
 
 	// Prefer Chunker when available (text chunker) — avoids re-reading the
 	// file inside FileChunker delegation. Fall back to FileChunker for
@@ -3425,6 +3406,29 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	return results, nil
 }
 
+// chunkAttrs reads the stored Attrs for chunks[lo..hi] in one View txn, keyed by
+// chunkid. Retrieval surfaces these stored, index-time Attrs (the transform's
+// output) without re-running the transform — Content is re-read, Attrs are read.
+// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R655
+func (db *DB) chunkAttrs(chunks []FileChunkEntry, lo, hi int) (map[uint64][]Pair, error) {
+	attrsByID := make(map[uint64][]Pair, hi-lo+1)
+	err := db.env.View(func(txn *lmdb.Txn) error {
+		for i := lo; i <= hi; i++ {
+			cid := chunks[i].ChunkID
+			crec, err := db.ReadCRecord(txn, cid)
+			if err != nil {
+				return fmt.Errorf("read C record for chunkid %d: %w", cid, err)
+			}
+			attrsByID[cid] = crec.Attrs
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return attrsByID, nil
+}
+
 // getChunksFast runs the RandomAccessChunker path for a positional window. R544
 // Reads all C records in one View txn (for stored Attrs), then dispatches
 // GetChunk for each entry sharing a transient customData.
@@ -3445,27 +3449,11 @@ func (db *DB) getChunksFast(fpath string, frec FRecord, lo, hi int, chunker any,
 		}
 	}
 
-	// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R648, R651 -- a transform-carrying
-	// strategy regenerates Attrs from the re-read region, so skip the stored-Attrs
-	// pre-fill and its C-record reads.
-	xf := db.transformFor(frec.Strategy)
-	var attrsByID map[uint64][]Pair
-	if xf == nil {
-		attrsByID = make(map[uint64][]Pair, hi-lo+1)
-		err := db.env.View(func(txn *lmdb.Txn) error {
-			for i := lo; i <= hi; i++ {
-				cid := frec.Chunks[i].ChunkID
-				crec, err := db.ReadCRecord(txn, cid)
-				if err != nil {
-					return fmt.Errorf("read C record for chunkid %d: %w", cid, err)
-				}
-				attrsByID[cid] = crec.Attrs
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
+	// R655: retrieval returns the original chunker content (re-read region) with the
+	// stored C-record Attrs — the index-time transform output is read, not re-run.
+	attrsByID, err := db.chunkAttrs(frec.Chunks, lo, hi)
+	if err != nil {
+		return nil, err
 	}
 
 	var customData any
@@ -3475,9 +3463,6 @@ func (db *DB) getChunksFast(fpath string, frec FRecord, lo, hi int, chunker any,
 		chunk := Chunk{Range: []byte(fce.Location), Attrs: attrsByID[fce.ChunkID]}
 		if err := ra.GetChunk(fpath, data, &customData, &chunk); err != nil {
 			return nil, fmt.Errorf("GetChunk %s %s: %w", fpath, fce.Location, err)
-		}
-		if xf != nil {
-			xf(&chunk) // R648: re-derive stripped Content and Attrs
 		}
 		results = append(results, ChunkResult{
 			Path:    fpath,
@@ -3520,6 +3505,10 @@ func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]Chun
 		return nil, fmt.Errorf("chunking strategy %q does not support content-based chunking", ofile.strategy)
 	}
 
+	// R649, R655: tmp retrieval re-chunks the stored raw bytes for the original
+	// Content, but surfaces the overlay's stored (index-time) Attrs — never re-running
+	// the transform.
+	attrsByID := db.overlay.chunkAttrs(ofile.chunks, lo, hi)
 	var results []ChunkResult
 	idx := 0
 	yield := func(c Chunk) bool {
@@ -3529,13 +3518,13 @@ func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]Chun
 				Range:   string(c.Range),
 				Content: string(c.Content),
 				Index:   idx,
+				Attrs:   attrsByID[ofile.chunks[idx].ChunkID],
 			})
 		}
 		idx++
 		return idx <= hi
 	}
-	// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R648, R649 -- transform so tmp retrieval matches the index
-	chunker.Chunks(fpath, ofile.content, applyTransform(db.transformFor(ofile.strategy), yield))
+	chunker.Chunks(fpath, ofile.content, yield)
 
 	return results, nil
 }
@@ -3687,42 +3676,31 @@ func (db *DB) transformFor(strategy string) ContentTransform {
 	return db.transforms[strategy]
 }
 
-// applyTransform wraps a chunk-yield so the transform (if any) runs on each
-// chunk in place before the consumer sees it. nil transform returns yield
-// unchanged. // CRC: crc-DB.md | R646
-func applyTransform(xf ContentTransform, yield func(Chunk) bool) func(Chunk) bool {
-	if xf == nil {
-		return yield
+// indexChunk builds a collectedChunk from a yielded chunk. The dedup hash and
+// stored Content are the ORIGINAL chunker bytes (R656); the transform, if any,
+// runs on a copy so its stripped Content feeds trigram/token extraction and its
+// derived Attrs are recorded for the chunk — and carried on its
+// WithIndexedChunkCallback delivery (R646, R647, R659). A nil transform leaves
+// Content and Attrs untouched, hashing as SHA-256 over Content as it always has.
+// The hash is the dedup identity, so identical original Content dedups and
+// differing tags (differing original Content) do not (R657).
+// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647, R656, R657, R659
+func (db *DB) indexChunk(c Chunk, xf ContentTransform) collectedChunk {
+	indexed := c
+	if xf != nil {
+		xf(&indexed)
 	}
-	return func(c Chunk) bool {
-		xf(&c)
-		return yield(c)
+	return collectedChunk{
+		Chunk: Chunk{
+			Range:   append([]byte(nil), c.Range...),
+			Locator: append([]byte(nil), c.Locator...),
+			Content: append([]byte(nil), c.Content...),
+			Attrs:   CopyPairs(indexed.Attrs),
+		},
+		hash:      sha256.Sum256(c.Content),
+		triCounts: db.trigrams.TrigramCounts(indexed.Content),
+		tokens:    tokenizeCounts(indexed.Content),
 	}
-}
-
-// chunkDedupHash computes the chunk identity/dedup hash. With no Attrs it is
-// SHA-256 over Content alone, so chunks indexed before transforms existed keep
-// their hashes and need no rebuild. With Attrs present it covers Content
-// followed by the length-prefixed Attr pairs in order, so identical Content
-// with differing Attrs hashes differently. // CRC: crc-DB.md | R652, R653
-func chunkDedupHash(content []byte, attrs []Pair) [32]byte {
-	if len(attrs) == 0 {
-		return sha256.Sum256(content)
-	}
-	h := sha256.New()
-	h.Write(content)
-	var lenbuf [binary.MaxVarintLen64]byte
-	for _, p := range attrs {
-		n := binary.PutUvarint(lenbuf[:], uint64(len(p.Key)))
-		h.Write(lenbuf[:n])
-		h.Write(p.Key)
-		n = binary.PutUvarint(lenbuf[:], uint64(len(p.Value)))
-		h.Write(lenbuf[:n])
-		h.Write(p.Value)
-	}
-	var out [32]byte
-	h.Sum(out[:0])
-	return out
 }
 
 func (db *DB) RemoveStrategy(name string) error {
