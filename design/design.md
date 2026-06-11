@@ -52,7 +52,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
-- [x] test-ContentTransform.md → `content_transform_test.go`
+- [x] test-ChunkAttrs.md → `chunk_attrs_test.go`
 
 ## Gaps
 
@@ -77,10 +77,19 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O15: ~~resolveChunkText and chunkTextByRangeFile defined but not called~~ — resolved by removing ChunkTexter entirely; RandomAccessChunker (R524) supersedes it
 - [x] O16: All four built-in text chunkers (`LineChunker`, `MarkdownChunker`, `BracketChunker`, `IndentChunker`) implement `AppendAwareChunker` via the shared `appendByRechunkResume` helper, and all four implement `FileChunker` via the shared `fileChunksByRead` helper (R633, R636). The `DB.AppendChunks` silent-no-op guard (R623, `ErrAppendBoundary`) catches the case where a non-AppendAware custom chunker is used and produces no chunks for non-empty input.
 - T1: R308 retired by R309 (2026-05-04 BracketLang unification: StringDelim folded into BracketGroup via Escape+AllowedInner+AllowedParent)
-- [ ] O17: Content transform on tmp:// retrieval is applied in getChunksTmp (re-chunks raw bytes + re-applies the transform), but ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is LMDB-only — pre-existing), so the transform is moot on that path; if ChunkCache gains tmp:// support it must resolve and apply the strategy transform too. getChunksTmp also omits Attrs from ChunkResult (pre-existing).
-- A5: Per-chunker content transforms attach only via AddChunker; external-command (shell) strategies registered with AddStrategy carry no transform (transformFor returns nil for them). By design — matches ark's per-chunker request (R644).
+- [ ] O17: ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is LMDB-only — pre-existing); tmp:// retrieval goes through getChunksTmp instead, which surfaces overlay-stored Attrs (R655). If ChunkCache gains tmp:// support it must read overlay Attrs the same way.
 - T2: R648 retired by R655 (2026-06-03 content-transform-index-only: retrieval no longer transforms; returns original content)
 - T3: R651 retired by R655 (2026-06-03 content-transform-index-only: fast path reads stored C-record Attrs, no transform repopulation)
 - T4: R652 retired by R656 (2026-06-03 content-transform-index-only: dedup hash over original Content only, Attrs dropped from hash)
 - T5: R653 retired by R657 (2026-06-03 content-transform-index-only: dedup identity is original Content)
 - T6: R654 retired by R658 (2026-06-03 content-transform-index-only: tag edit changes original Content, re-indexes naturally)
+- T7: R642 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T8: R643 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T9: R644 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T10: R645 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T11: R646 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T12: R647 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T13: R649 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T14: R650 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T15: R658 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)
+- T16: R659 retired (2026-06-03 retire-content-transform: ContentTransform hook rolled back; trigram index keeps tags (full-text), stripping moves ark-side)

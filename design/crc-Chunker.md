@@ -1,5 +1,5 @@
 # Chunker
-**Requirements:** R10, R11, R12, R13, R116, R128, R129, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R293, R294, R295, R296, R465, R466, R467, R468, R502, R505, R506, R507, R508, R509, R510, R511, R512, R518, R519, R520, R524, R525, R526, R527, R528, R529, R530, R531, R532, R533, R534, R563, R564, R565, R566, R567, R568, R569, R570, R587, R588, R589, R590, R591, R593, R601, R602, R603, R607, R610, R631, R632, R633, R634, R635, R636, R637, R638, R639, R640, R642, R650
+**Requirements:** R10, R11, R12, R13, R116, R128, R129, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R293, R294, R295, R296, R465, R466, R467, R468, R502, R505, R506, R507, R508, R509, R510, R511, R512, R518, R519, R520, R524, R525, R526, R527, R528, R529, R530, R531, R532, R533, R534, R563, R564, R565, R566, R567, R568, R569, R570, R587, R588, R589, R590, R591, R593, R601, R602, R603, R607, R610, R631, R632, R633, R634, R635, R636, R637, R638, R639, R640
 
 Provides the chunking interfaces (Chunker, FileChunker, RandomAccessChunker), the FuncChunker adapter, the Pair type, and built-in chunker implementations. A chunking strategy is a name mapped to a chunker (any combination of interfaces) or a shell command.
 
@@ -13,7 +13,6 @@ Provides the chunking interfaces (Chunker, FileChunker, RandomAccessChunker), th
 - Pair struct: Key []byte, Value []byte — opaque key-value pair
 - ChunkFunc type: convenience function type for simple chunkers
 - FuncChunker: adapter wrapping ChunkFunc into Chunker
-- ContentTransform type: func(c *Chunk) — optional per-chunker hook registered via AddChunker; runs ONLY while indexing, mutating a copy of the chunk in place (rewrites Content to FTS-indexable text for the trigram/token index, may append derived Attrs). The original chunker Content is what gets hashed, stored, and returned by retrieval — the transform never runs on retrieval. The chunk's Range spans the raw file region (tags and all), so retrieval re-reads that region and returns the original content. R642, R650
 
 ## Does
 - FuncChunker.Chunks(path, content, yield): delegate to wrapped ChunkFunc

@@ -60,13 +60,12 @@ type DB struct {
 	dbName       string
 	settings     Settings
 	trigrams     *Trigrams
-	chunkers     map[string]any              // in-memory chunker strategies (Chunker, FileChunker, or both)
-	transforms   map[string]ContentTransform // R643, R644: per-strategy content transforms (nil/absent = none)
-	overlay      *overlay                    // R349: in-memory tmp:// documents
-	overlayOnce  sync.Once                   // guards lazy overlay creation
-	pathCache    map[uint64]string           // R454: cached fileid→path, lazily loaded
-	pathToID     map[string]uint64           // R455: cached path→fileid, built with pathCache
-	frecordCache map[uint64]FRecord          // R456: opt-in FRecord cache, nil when inactive
+	chunkers     map[string]any     // in-memory chunker strategies (Chunker, FileChunker, or both)
+	overlay      *overlay           // R349: in-memory tmp:// documents
+	overlayOnce  sync.Once          // guards lazy overlay creation
+	pathCache    map[uint64]string  // R454: cached fileid→path, lazily loaded
+	pathToID     map[string]uint64  // R455: cached path→fileid, built with pathCache
+	frecordCache map[uint64]FRecord // R456: opt-in FRecord cache, nil when inactive
 }
 
 // Settings holds the in-memory representation of I records.
@@ -998,13 +997,11 @@ func Create(path string, opts Options) (*DB, error) {
 
 	dbName := opts.dbNameOrDefault()
 	db := &DB{
-		env:        env,
-		dbName:     dbName,
-		trigrams:   NewTrigrams(opts.CaseInsensitive, opts.Aliases),
-		settings:   settings,
-		chunkers:   make(map[string]any),
-		transforms: make(map[string]ContentTransform),
-	}
+		env:      env,
+		dbName:   dbName,
+		trigrams: NewTrigrams(opts.CaseInsensitive, opts.Aliases),
+		settings: settings,
+		chunkers: make(map[string]any)}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
 		dbi, err := txn.OpenDBI(dbName, lmdb.Create)
@@ -1059,11 +1056,9 @@ func Open(path string, opts Options) (*DB, error) {
 
 	dbName := opts.dbNameOrDefault()
 	db := &DB{
-		env:        env,
-		dbName:     dbName,
-		chunkers:   make(map[string]any),
-		transforms: make(map[string]ContentTransform),
-	}
+		env:      env,
+		dbName:   dbName,
+		chunkers: make(map[string]any)}
 
 	err = env.Update(func(txn *lmdb.Txn) error {
 		dbi, err := txn.OpenDBI(dbName, 0)
@@ -1377,7 +1372,6 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	}
 
 	// Yield callback shared by both paths: validates UTF-8, fires callback, collects chunk data.
-	xf := db.transformFor(strategy)
 	var chunks []collectedChunk
 	var utf8Err error
 	yield := func(c Chunk) bool {
@@ -1385,11 +1379,11 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
 			return false
 		}
-		// R473: fire callback with the original content after UTF-8 validation
+		// R473: fire callback with the chunk content after UTF-8 validation
 		if cb != nil {
 			cb(string(c.Content))
 		}
-		chunks = append(chunks, db.indexChunk(c, xf)) // R646, R647, R656
+		chunks = append(chunks, db.indexChunk(c)) // R656
 		return true
 	}
 
@@ -2160,7 +2154,6 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	}
 
 	// Yield closure shared by both dispatch paths
-	xf := db.transformFor(strategy)
 	var newChunks []collectedChunk
 	var utf8Err error
 	yield := func(c Chunk) bool {
@@ -2171,10 +2164,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if cfg.chunkCallback != nil {
 			cfg.chunkCallback(string(c.Content))
 		}
-		// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647, R658 -- transform shapes
-		// the index; the dedup hash is over the original Content, so a tag edit (changed original
-		// Content) yields a fresh chunkid that fires WithIndexedChunkCallback on the new-chunk path.
-		newChunks = append(newChunks, db.indexChunk(c, xf))
+		newChunks = append(newChunks, db.indexChunk(c)) // R656
 		return true
 	}
 
@@ -3642,64 +3632,44 @@ func (db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error) {
 	return crec, nil
 }
 
-// CRC: crc-DB.md | R293, R518, R519, R533, R643, R644
+// CRC: crc-DB.md | R293, R518, R519, R533
 // c may additionally implement RandomAccessChunker for fast-path retrieval;
-// detection happens at dispatch time via type assertion. transform is an
-// optional per-chunker content hook (nil for none) — see ContentTransform.
-func (db *DB) AddChunker(name string, c any, transform ContentTransform) error {
+// detection happens at dispatch time via type assertion.
+func (db *DB) AddChunker(name string, c any) error {
 	_, isChunker := c.(Chunker)
 	_, isFileChunker := c.(FileChunker)
 	if !isChunker && !isFileChunker {
 		return fmt.Errorf("chunker %q must implement Chunker or FileChunker", name)
 	}
 	db.chunkers[name] = c
-	if transform != nil {
-		db.transforms[name] = transform
-	} else {
-		delete(db.transforms, name)
-	}
 	db.settings.ChunkingStrategies[name] = "" // empty cmd marks chunker strategy
 	return db.env.Update(func(txn *lmdb.Txn) error {
 		return iPut(txnWrap{txn}, db.dbi, "strategy:"+name, "")
 	})
 }
 
-// CRC: crc-DB.md | R294, R645
+// CRC: crc-DB.md | R294
 func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
-	return db.AddChunker(name, FuncChunker{Fn: fn}, nil)
+	return db.AddChunker(name, FuncChunker{Fn: fn})
 }
 
-// transformFor returns the registered content transform for a strategy, or nil
-// (also nil for external-command strategies, which carry no transform).
-// CRC: crc-DB.md | R646
-func (db *DB) transformFor(strategy string) ContentTransform {
-	return db.transforms[strategy]
-}
-
-// indexChunk builds a collectedChunk from a yielded chunk. The dedup hash and
-// stored Content are the ORIGINAL chunker bytes (R656); the transform, if any,
-// runs on a copy so its stripped Content feeds trigram/token extraction and its
-// derived Attrs are recorded for the chunk — and carried on its
-// WithIndexedChunkCallback delivery (R646, R647, R659). A nil transform leaves
-// Content and Attrs untouched, hashing as SHA-256 over Content as it always has.
-// The hash is the dedup identity, so identical original Content dedups and
-// differing tags (differing original Content) do not (R657).
-// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R646, R647, R656, R657, R659
-func (db *DB) indexChunk(c Chunk, xf ContentTransform) collectedChunk {
-	indexed := c
-	if xf != nil {
-		xf(&indexed)
-	}
+// indexChunk builds a collectedChunk from a yielded chunk: the dedup hash is
+// SHA-256 over the chunk's Content (R656, R657), the trigram/token index is
+// built from that same Content (full-text — nothing is stripped), and the
+// chunk's native Attrs are stored. Shared by collectChunks, AppendChunks, and
+// the overlay's collectChunksFromContent.
+// CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R656, R657
+func (db *DB) indexChunk(c Chunk) collectedChunk {
 	return collectedChunk{
 		Chunk: Chunk{
 			Range:   append([]byte(nil), c.Range...),
 			Locator: append([]byte(nil), c.Locator...),
 			Content: append([]byte(nil), c.Content...),
-			Attrs:   CopyPairs(indexed.Attrs),
+			Attrs:   CopyPairs(c.Attrs),
 		},
 		hash:      sha256.Sum256(c.Content),
-		triCounts: db.trigrams.TrigramCounts(indexed.Content),
-		tokens:    tokenizeCounts(indexed.Content),
+		triCounts: db.trigrams.TrigramCounts(c.Content),
+		tokens:    tokenizeCounts(c.Content),
 	}
 }
 

@@ -1,5 +1,5 @@
 # Sequence: Chunker Dispatch
-**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544, R646, R647, R655, R656
+**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544, R655, R656
 
 How DB and ChunkCache dispatch to the right chunking interface at each call site.
 
@@ -121,32 +121,29 @@ ChunkCache.GetChunks(fpath, targetRange, before, after)
   assemble []ChunkResult in positional order                      # R544
 ```
 
-## Content transform (cross-cutting)
+## Content and Attrs across index/retrieval (cross-cutting)
 
-A strategy registered with a `ContentTransform` (via `AddChunker`) has the
-transform applied ONLY while indexing (R646). It shapes the trigram/token
-index and the derived Attrs; it never runs on retrieval, and the C record
-stores the original chunker Content.
+The trigram/token index is full-text — chunks are indexed verbatim, nothing is
+stripped. The dedup hash is over the chunk's Content; native chunker Attrs are
+stored in the C record at index time. Retrieval re-reads Content from the file
+but reads Attrs from storage.
 
-Index sites — transform feeds the index; original Content is hashed and stored:
+Index sites — content hashed and indexed verbatim; native Attrs stored:
 
 ```
-collectChunks / AppendChunks / collectChunksFromContent  yield(c):
-  hash = sha256(c.Content)                          # ORIGINAL content, Attrs not in hash   R656
-  indexed := copy(c); transform(&indexed)           # strip Content, derive Attrs           R647
-  trigrams/tokens computed on indexed.Content                                              # R647
-  store collectedChunk{ Content: c.Content (ORIGINAL), Attrs: indexed.Attrs, hash }
-  dedup keyed on hash; identical original Content dedups, differing tags differ            R657
-  WithIndexedChunkCallback carries original Content + derived Attrs                         R659
+collectChunks / AppendChunks / collectChunksFromContent  yield(c) -> db.indexChunk(c):
+  hash = sha256(c.Content)                          # dedup identity                R656, R657
+  trigrams/tokens computed on c.Content             # full-text, nothing stripped   R656
+  store collectedChunk{ Content: c.Content, Attrs: c.Attrs (native), hash }
 ```
 
-Retrieval sites — NO transform; Content is re-read (original), Attrs are read from
-the stored C record via db.chunkAttrs (the index-time transform output), R655:
+Retrieval sites — Content re-read from the file; Attrs read from the stored C
+record via db.chunkAttrs (overlay.chunkAttrs for tmp://), R655:
 
 ```
 RandomAccessChunker fast path (DB.getChunksFast, ChunkCache.retrieveFast / populateFastWindow):
-  chunk.Attrs pre-filled from the stored C record (no transform)
-  ra.GetChunk(path, data, &customData, &chunk)      # Content is the re-read region, original
+  chunk.Attrs pre-filled from the stored C record
+  ra.GetChunk(path, data, &customData, &chunk)      # Content is the re-read region
 
 streaming fallback (DB.GetChunks, ChunkCache.GetChunks):
   re-chunk for Content; Attrs read from the stored C record via db.chunkAttrs(frec.Chunks, lo, hi)
@@ -154,7 +151,3 @@ streaming fallback (DB.GetChunks, ChunkCache.GetChunks):
 tmp:// (DB.getChunksTmp):
   re-chunk ofile.content for Content; Attrs from overlay.chunkAttrs (stored overlayChunk.attrs)
 ```
-
-Overlay (tmp://): index paths (add/update/append) apply the transform via
-collectChunksFromContent; retrieval (getChunksTmp) re-chunks the stored raw
-bytes and returns the original content WITHOUT the transform (R649, R655).

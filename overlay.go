@@ -74,7 +74,7 @@ func (o *overlay) addFile(path, strategy string, content []byte, db *DB, cb Chun
 	}
 
 	// Collect chunks outside the lock (chunking is CPU work).
-	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cb)
+	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
 	if err != nil {
 		return 0, err
 	}
@@ -115,7 +115,7 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb C
 	if !ok {
 		return fmt.Errorf("chunking strategy %q does not support content-based chunking", strategy)
 	}
-	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cb)
+	collected, err := collectChunksFromContent(path, content, chunker, db, cb)
 	if err != nil {
 		return err
 	}
@@ -222,7 +222,7 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 	}
 
 	// R483: fire callback for appended chunks
-	collected, err := collectChunksFromContent(path, content, chunker, db.transformFor(strategy), db, cfg.chunkCallback)
+	collected, err := collectChunksFromContent(path, content, chunker, db, cfg.chunkCallback)
 	if err != nil {
 		return 0, err
 	}
@@ -388,7 +388,7 @@ func (o *overlay) dedupOrCreateChunk(cc collectedChunk, fileID uint64) (uint64, 
 // collectChunksFromContent runs the chunker and extracts trigrams/tokens.
 // Pure computation — no overlay state accessed.
 // CRC: crc-Overlay.md | R485
-func collectChunksFromContent(path string, content []byte, chunker Chunker, xf ContentTransform, db *DB, cb ChunkCallback) ([]collectedChunk, error) {
+func collectChunksFromContent(path string, content []byte, chunker Chunker, db *DB, cb ChunkCallback) ([]collectedChunk, error) {
 	var chunks []collectedChunk
 	var utf8Err error
 	yield := func(c Chunk) bool {
@@ -396,12 +396,12 @@ func collectChunksFromContent(path string, content []byte, chunker Chunker, xf C
 			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, path)
 			return false
 		}
-		// R473: fire callback with the original content after UTF-8 validation
+		// R473: fire callback with the chunk content after UTF-8 validation
 		if cb != nil {
 			cb(string(c.Content))
 		}
-		// R646, R647, R649, R656: transform shapes the index; original Content is hashed and stored.
-		chunks = append(chunks, db.indexChunk(c, xf))
+		// R656: full-text index over the chunk's content; native Attrs stored.
+		chunks = append(chunks, db.indexChunk(c))
 		return true
 	}
 	if err := chunker.Chunks(path, content, yield); err != nil {

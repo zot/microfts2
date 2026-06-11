@@ -134,8 +134,6 @@ func TestDBRemoveFile(t *testing.T) {
 	}
 }
 
-
-
 func TestRemoveFileWithCallback(t *testing.T) {
 	db, dir := testDB(t)
 
@@ -587,7 +585,6 @@ func TestDBSearchReturnsIndexStatus(t *testing.T) {
 		t.Error("SearchResults.Status.Built should be true")
 	}
 }
-
 
 func TestDBEnv(t *testing.T) {
 	db, _ := testDB(t)
@@ -1180,7 +1177,6 @@ func TestSearchWithVerify(t *testing.T) {
 	db.AddFile(fp3, "line")
 	db.AddFile(fp4, "line")
 
-
 	// Without verify: should find candidates
 	sr, err := db.Search("daneel")
 	if err != nil {
@@ -1220,7 +1216,6 @@ func TestSearchWithVerifyQuotedTerms(t *testing.T) {
 	db.AddFile(fp1, "line")
 	db.AddFile(fp2, "line")
 
-
 	// "quick brown" as a quoted phrase — must appear as substring
 	sr, err := db.Search(`"quick brown"`, WithVerify())
 	if err != nil {
@@ -1241,7 +1236,6 @@ func TestSearchRegexVerifies(t *testing.T) {
 
 	db.AddFile(fp1, "line")
 	db.AddFile(fp2, "line")
-
 
 	// regex `\bcat\b` should only match whole word "cat"
 	sr, err := db.SearchRegex(`\bcat\b`)
@@ -1843,7 +1837,7 @@ func TestGetChunksFastPath(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	// Register LineChunker (RandomAccessChunker-capable) under a new strategy name.
-	if err := db.AddChunker("fastline", LineChunker{}, nil); err != nil {
+	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1885,7 +1879,7 @@ func TestChunkCacheChunkTextWithId(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	if err := db.AddChunker("fastline", LineChunker{}, nil); err != nil {
+	if err := db.AddChunker("fastline", LineChunker{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2782,7 +2776,7 @@ func TestRemovedChunkCallbackSkipsSharedChunks(t *testing.T) {
 // chunk covering both the old and the appended lines.
 func TestAppendChunksMarkdownExtendsLastParagraph(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("markdown", MarkdownChunker{}, nil); err != nil {
+	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2824,7 +2818,7 @@ func TestAppendChunksMarkdownExtendsLastParagraph(t *testing.T) {
 // new chunk.
 func TestAppendChunksMarkdownCleanBoundary(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("markdown", MarkdownChunker{}, nil); err != nil {
+	if err := db.AddChunker("markdown", MarkdownChunker{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2912,7 +2906,7 @@ func TestAppendChunksEmptyContentIsNoOp(t *testing.T) {
 // function lands as a fresh chunk. R626, R627, R628
 func TestAppendChunksBracketCleanBoundary(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("bracket-go", BracketChunker(LangGo), nil); err != nil {
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2972,7 +2966,7 @@ func TestAppendChunksBracketCleanBoundary(t *testing.T) {
 // group chunk. R626, R627, R628
 func TestAppendChunksBracketCompletesGroup(t *testing.T) {
 	db, dir := testDB(t)
-	if err := db.AddChunker("bracket-go", BracketChunker(LangGo), nil); err != nil {
+	if err := db.AddChunker("bracket-go", BracketChunker(LangGo)); err != nil {
 		t.Fatal(err)
 	}
 

@@ -358,15 +358,6 @@ func (fc FuncChunker) Chunks(path string, content []byte, yield func(Chunk) bool
 	return fc.Fn(path, content, yield)
 }
 
-// ContentTransform is an optional per-chunker hook registered via AddChunker.
-// It mutates a chunk in place — rewriting Content into the FTS-indexable text
-// and optionally appending derived metadata to Attrs. It must be a pure
-// function of the chunk's raw file region (the chunk's Range spans that region,
-// tags and all), so it reproduces identical Content and Attrs at both index and
-// retrieval time. nil registers no transform.
-// CRC: crc-Chunker.md | R642, R650
-type ContentTransform func(c *Chunk)
-
 // CRC: crc-Chunker.md | R116, R128, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R295, R296
 
 // MarkdownChunkFunc splits markdown content into paragraph-based chunks.
@@ -383,19 +374,19 @@ func MarkdownChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 		return nil
 	}
 
-	lineNum := 0       // 1-indexed current line (after increment)
-	startLine := -1    // 1-indexed start of current chunk
-	startByte := 0     // byte offset of current chunk start
-	endLine := 0       // 1-indexed end of most recent content line
-	endByte := 0       // byte offset past end of most recent content line
-	pos := 0           // current byte position
+	lineNum := 0         // 1-indexed current line (after increment)
+	startLine := -1      // 1-indexed start of current chunk
+	startByte := 0       // byte offset of current chunk start
+	endLine := 0         // 1-indexed end of most recent content line
+	endByte := 0         // byte offset past end of most recent content line
+	pos := 0             // current byte position
 	fenceChar := byte(0) // backtick or tilde when inside a fence
 	fenceLen := 0        // number of fence characters in the opening fence
 
 	chunkIsHeading := false // current chunk was started by a heading line
 	chunkAllTags := true    // all lines in current chunk start with '@'
 
-	merging := false     // buffering a heading chunk for merge
+	merging := false // buffering a heading chunk for merge
 	mStartLine := 0
 	mStartByte := 0
 	mEndLine := 0
