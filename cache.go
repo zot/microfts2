@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bmatsuo/lmdb-go/lmdb"
+	"go.etcd.io/bbolt"
 )
 
 // ChunkCache is a per-query cache for file content and chunked data.
@@ -155,8 +155,12 @@ func (cc *ChunkCache) ensureFile(fpath string) (*cachedFile, error) {
 	}
 
 	var frec FRecord
-	err := cc.db.env.View(func(txn *lmdb.Txn) error {
-		_, f, err := cc.db.lookupFileByPath(txnWrap{txn}, fpath)
+	err := cc.db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(cc.db.dbName))
+		if b == nil {
+			return fmt.Errorf("bucket %q not found", cc.db.dbName)
+		}
+		_, f, err := cc.db.lookupFileByPath(bucketWrap{b}, fpath)
 		if err != nil {
 			return err
 		}
@@ -218,8 +222,8 @@ func (cc *ChunkCache) retrieveFast(cf *cachedFile, chunkID uint64, loc string, r
 	// R655: retrieval returns the original chunker content — no transform. Pre-fill
 	// Attrs from the stored C record, then re-read the region.
 	var attrs []Pair
-	err := cc.db.env.View(func(txn *lmdb.Txn) error {
-		crec, err := cc.db.ReadCRecord(txn, chunkID)
+	err := cc.db.bolt.View(func(tx *bbolt.Tx) error {
+		crec, err := cc.db.ReadCRecord(tx, chunkID)
 		if err != nil {
 			return err
 		}
@@ -259,9 +263,9 @@ func (cc *ChunkCache) populateFastWindow(cf *cachedFile, ra RandomAccessChunker,
 	// R655: retrieval returns the original chunker content — no transform. Pre-fill
 	// each chunk's Attrs from its stored C record, then re-read the region.
 	attrsByID := make(map[uint64][]Pair, len(pending))
-	err := cc.db.env.View(func(txn *lmdb.Txn) error {
+	err := cc.db.bolt.View(func(tx *bbolt.Tx) error {
 		for _, t := range pending {
-			crec, err := cc.db.ReadCRecord(txn, t.chunkID)
+			crec, err := cc.db.ReadCRecord(tx, t.chunkID)
 			if err != nil {
 				return fmt.Errorf("read C record %d: %w", t.chunkID, err)
 			}

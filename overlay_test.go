@@ -566,8 +566,8 @@ func TestAddTmpFileWithIndexedChunkCallback(t *testing.T) {
 		if ic.CRecord.ChunkID == 0 {
 			t.Errorf("fire %d has zero ChunkID", i)
 		}
-		if ic.CRecord.Txn() != nil || ic.CRecord.DB() != nil {
-			t.Errorf("fire %d: overlay IndexedChunk should have nil Txn/DB", i)
+		if ic.CRecord.Tx() != nil || ic.CRecord.DB() != nil {
+			t.Errorf("fire %d: overlay IndexedChunk should have nil Tx/DB", i)
 		}
 		if len(ic.Chunk.Content) == 0 {
 			t.Errorf("fire %d has empty Chunk.Content", i)
@@ -667,4 +667,3 @@ func TestAppendTmpFileAutoCreateFiresIndexedChunkCallback(t *testing.T) {
 		t.Fatalf("expected 2 fires from auto-create path, got %d", len(fired))
 	}
 }
-

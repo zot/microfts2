@@ -650,47 +650,47 @@
 - **R441:** Double-check after acquiring write lock: if file was removed between RLock and Lock, return error
 - **R442:** Empty chunk result from chunking is a no-op — returns fileid, nil
 
-## Feature: Bigram Index
-**Source:** specs/bigram.md
+## Feature: Bigram Index (removed)
+**Source:** BIGRAM.md
 
-- **R379:** Bigram indexing is on by default; `--no-bigrams` flag at `init` disables it
-- **R380:** Bigram enabled/disabled setting stored in an I record; checked at index time to gate B record writes and C record bigram section
-- **R381:** DB format version bumped from v2 to v3 for C record bigram extension
-- **R382:** Bigram extraction uses the same byte-level approach as trigrams: raw bytes, whitespace boundaries collapsed, case-insensitive when DB is case-insensitive
-- **R383:** Character-internal bigrams (both bytes inside a single multibyte character) are skipped — same principle as trigram character-internal skipping
-- **R384:** Word-boundary padding: each token gets a leading `_` and trailing `_` before bigram extraction (e.g. "cat" -> `_c`, `ca`, `at`, `t_`)
-- **R385:** Byte aliases apply before bigram extraction, same as trigrams
-- **R386:** `B` records: `B[bigram:2] → [chunkid:varint]...` — packed list of chunkids per bigram, same format as T records but 2-byte key
-- **R387:** One B record per distinct bigram; document frequency derived from B record value length (same as T records)
-- **R388:** C record bigram section (when enabled): `[n-bigrams:varint] [[bigram:2] [count:varint]]...` — appended after existing trigram counts
-- **R389:** I record bigram flag determines whether C record marshal/unmarshal includes the bigram section
-- **R390:** Bigram B record updates coalesced alongside T/W updates during AddFile — one read-modify-write per unique bigram across all chunks
-- **R391:** For single-strategy `Search`, bigrams are scoring-only — candidates come from trigram intersection
-- **R392:** `ScoreBigramOverlap` score function: matching query bigrams / total query bigrams per chunk; fits `ScoreFunc` signature
-- **R393:** `WithBigramOverlap() SearchOption` — sugar for `WithScoring(ScoreBigramOverlap)`
-- **R394:** Score function extracts bigrams from the query at call time using the same extraction as indexing
-- **R395:** B records exist for DF lookups (future BM25-style bigram scoring)
-- **R396:** CLI `init -db <path> --no-bigrams` — create DB without bigram index
-- **R397:** CLI `search -db <path> -score bigram <query>` — search using bigram overlap scoring
-- **R398:** Overlay (tmp://) includes bigram data when DB has bigrams enabled: chunks store bigram counts, overlay maintains B-record equivalent maps
-- **R399:** `searchOverlay` includes bigram data in overlay candidates when bigrams enabled
-- **R400:** RemoveFile updates B records alongside T/W records — same orphan-cleanup logic for B record chunkid removal
-- **R401:** Reindex updates B records alongside T/W records
-- **R402:** AppendChunks includes bigram extraction and B record updates when bigrams enabled
-- **R403:** (inferred) `BRecord` struct: `Bigram uint16, ChunkIDs []uint64` — marshal/unmarshal same pattern as TRecord
-- **R404:** (inferred) `CRecord` gains `Bigrams []BigramEntry` field; `BigramEntry` struct: `Bigram uint16, Count int`
-- **R405:** (inferred) `extractBigrams` function: takes normalized byte slice, returns `map[uint16]int` of bigram counts with word-boundary padding
-- **R406:** (inferred) Bigram extraction reuses `CharSet.normalize` for case folding and alias application before extracting 2-byte windows
-- **R407:** `SearchStrategy` struct: `{Score ScoreFunc, UseBigrams bool}` — wraps a ScoreFunc with metadata about what candidate data it needs
-- **R408:** `SearchMulti` accepts `map[string]SearchStrategy` instead of `map[string]ScoreFunc`
-- **R409:** When any strategy in the map has `UseBigrams = true`, `collectCandidates` populates bigram counts for all candidates
-- **R410:** `scoreAndResolve` passes bigram counts (instead of trigram counts) to strategies with `UseBigrams = true`
-- **R411:** `StrategyFunc(fn ScoreFunc) SearchStrategy` — wraps a plain ScoreFunc with `UseBigrams = false`
-- **R412:** `StrategyBigramOverlap(queryBigrams map[uint16]int) SearchStrategy` — returns `SearchStrategy{Score: ScoreBigramOverlap(queryBigrams), UseBigrams: true}`
-- **R413:** `SearchMulti` candidate expansion: when any strategy has `UseBigrams`, collect additional candidates via trigram OR-union (union of T record posting lists for query trigrams) — surviving trigrams catch typo queries that AND-intersection misses
-- **R414:** OR-union candidate chunkIDs merged into trigram-intersection candidate set before `collectCandidates` — all strategies see the merged set
-- **R415:** `collectTrigramUnion` helper: reads T records for query trigrams, returns union of posting lists (OR semantics). Called from `SearchMulti` only
-- **R416:** Overlay candidate expansion: when `expandCandidates` is true, overlay `searchOverlay` unions its trigram index entries for all active trigrams into the candidate set
+- **~~R379:~~** (Retired T17 — no replacement) Bigram indexing is on by default; `--no-bigrams` flag at `init` disables it
+- **~~R380:~~** (Retired T18 — no replacement) Bigram enabled/disabled setting stored in an I record; checked at index time to gate B record writes and C record bigram section
+- **~~R381:~~** (Retired T19 — no replacement) DB format version bumped from v2 to v3 for C record bigram extension
+- **~~R382:~~** (Retired T20 — no replacement) Bigram extraction uses the same byte-level approach as trigrams: raw bytes, whitespace boundaries collapsed, case-insensitive when DB is case-insensitive
+- **~~R383:~~** (Retired T21 — no replacement) Character-internal bigrams (both bytes inside a single multibyte character) are skipped — same principle as trigram character-internal skipping
+- **~~R384:~~** (Retired T22 — no replacement) Word-boundary padding: each token gets a leading `_` and trailing `_` before bigram extraction (e.g. "cat" -> `_c`, `ca`, `at`, `t_`)
+- **~~R385:~~** (Retired T23 — no replacement) Byte aliases apply before bigram extraction, same as trigrams
+- **~~R386:~~** (Retired T24 — no replacement) `B` records: `B[bigram:2] → [chunkid:varint]...` — packed list of chunkids per bigram, same format as T records but 2-byte key
+- **~~R387:~~** (Retired T25 — no replacement) One B record per distinct bigram; document frequency derived from B record value length (same as T records)
+- **~~R388:~~** (Retired T26 — no replacement) C record bigram section (when enabled): `[n-bigrams:varint] [[bigram:2] [count:varint]]...` — appended after existing trigram counts
+- **~~R389:~~** (Retired T27 — no replacement) I record bigram flag determines whether C record marshal/unmarshal includes the bigram section
+- **~~R390:~~** (Retired T28 — no replacement) Bigram B record updates coalesced alongside T/W updates during AddFile — one read-modify-write per unique bigram across all chunks
+- **~~R391:~~** (Retired T29 — no replacement) For single-strategy `Search`, bigrams are scoring-only — candidates come from trigram intersection
+- **~~R392:~~** (Retired T30 — no replacement) `ScoreBigramOverlap` score function: matching query bigrams / total query bigrams per chunk; fits `ScoreFunc` signature
+- **~~R393:~~** (Retired T31 — no replacement) `WithBigramOverlap() SearchOption` — sugar for `WithScoring(ScoreBigramOverlap)`
+- **~~R394:~~** (Retired T32 — no replacement) Score function extracts bigrams from the query at call time using the same extraction as indexing
+- **~~R395:~~** (Retired T33 — no replacement) B records exist for DF lookups (future BM25-style bigram scoring)
+- **~~R396:~~** (Retired T34 — no replacement) CLI `init -db <path> --no-bigrams` — create DB without bigram index
+- **~~R397:~~** (Retired T35 — no replacement) CLI `search -db <path> -score bigram <query>` — search using bigram overlap scoring
+- **~~R398:~~** (Retired T36 — no replacement) Overlay (tmp://) includes bigram data when DB has bigrams enabled: chunks store bigram counts, overlay maintains B-record equivalent maps
+- **~~R399:~~** (Retired T37 — no replacement) `searchOverlay` includes bigram data in overlay candidates when bigrams enabled
+- **~~R400:~~** (Retired T38 — no replacement) RemoveFile updates B records alongside T/W records — same orphan-cleanup logic for B record chunkid removal
+- **~~R401:~~** (Retired T39 — no replacement) Reindex updates B records alongside T/W records
+- **~~R402:~~** (Retired T40 — no replacement) AppendChunks includes bigram extraction and B record updates when bigrams enabled
+- **~~R403:~~** (Retired T41 — no replacement) (inferred) `BRecord` struct: `Bigram uint16, ChunkIDs []uint64` — marshal/unmarshal same pattern as TRecord
+- **~~R404:~~** (Retired T42 — no replacement) (inferred) `CRecord` gains `Bigrams []BigramEntry` field; `BigramEntry` struct: `Bigram uint16, Count int`
+- **~~R405:~~** (Retired T43 — no replacement) (inferred) `extractBigrams` function: takes normalized byte slice, returns `map[uint16]int` of bigram counts with word-boundary padding
+- **~~R406:~~** (Retired T44 — no replacement) (inferred) Bigram extraction reuses `CharSet.normalize` for case folding and alias application before extracting 2-byte windows
+- **~~R407:~~** (Retired T45 — no replacement) `SearchStrategy` struct: `{Score ScoreFunc, UseBigrams bool}` — wraps a ScoreFunc with metadata about what candidate data it needs
+- **~~R408:~~** (Retired T46 — no replacement) `SearchMulti` accepts `map[string]SearchStrategy` instead of `map[string]ScoreFunc`
+- **~~R409:~~** (Retired T47 — no replacement) When any strategy in the map has `UseBigrams = true`, `collectCandidates` populates bigram counts for all candidates
+- **~~R410:~~** (Retired T48 — no replacement) `scoreAndResolve` passes bigram counts (instead of trigram counts) to strategies with `UseBigrams = true`
+- **~~R411:~~** (Retired T49 — no replacement) `StrategyFunc(fn ScoreFunc) SearchStrategy` — wraps a plain ScoreFunc with `UseBigrams = false`
+- **~~R412:~~** (Retired T50 — no replacement) `StrategyBigramOverlap(queryBigrams map[uint16]int) SearchStrategy` — returns `SearchStrategy{Score: ScoreBigramOverlap(queryBigrams), UseBigrams: true}`
+- **~~R413:~~** (Retired T51 — no replacement) `SearchMulti` candidate expansion: when any strategy has `UseBigrams`, collect additional candidates via trigram OR-union (union of T record posting lists for query trigrams) — surviving trigrams catch typo queries that AND-intersection misses
+- **~~R414:~~** (Retired T52 — no replacement) OR-union candidate chunkIDs merged into trigram-intersection candidate set before `collectCandidates` — all strategies see the merged set
+- **~~R415:~~** (Retired T53 — no replacement) `collectTrigramUnion` helper: reads T records for query trigrams, returns union of posting lists (OR semantics). Called from `SearchMulti` only
+- **~~R416:~~** (Retired T54 — no replacement) Overlay candidate expansion: when `expandCandidates` is true, overlay `searchOverlay` unions its trigram index entries for all active trigrams into the candidate set
 - ~~**R417:** (inferred) Bigram OR-union may produce a larger candidate set than trigram intersection — no cap initially, measure and add filtering if needed~~
 
 ## Feature: Fuzzy Trigram Search
@@ -980,3 +980,19 @@
 - **R657:** Chunk dedup identity is the content hash: chunks with identical `Content` dedup to one chunkid; chunks with differing `Content` receive distinct chunkids
 - **~~R658:~~** (Retired T15 — no replacement) On append, a chunk whose original `Content` changed (e.g. a tag line added or edited) hashes differently, producing a fresh chunkid and firing `WithIndexedChunkCallback` — a tag edit re-indexes naturally because the tag text is part of the original `Content`
 - **~~R659:~~** (Retired T16 — no replacement) `WithIndexedChunkCallback` delivers the original chunker `Content` together with the derived `Attrs` (matching the C record), consistent with the retrieval paths
+
+## Feature: LMDB→BBolt Migration
+**Source:** specs/migrations/lmdb-to-bbolt.md
+
+- **R660:** microfts2 binds `go.etcd.io/bbolt` (pure Go) instead of `github.com/bmatsuo/lmdb-go` (CGO); the package builds with `CGO_ENABLED=0`. The single-writer/multi-reader concurrency model is unchanged.
+- **R661:** microfts2 owns a single `*bbolt.DB` and exposes it via `func (db *DB) DB() *bbolt.DB` (replaces `Env() *lmdb.Env`, R91); the host process opens microfts2 first and shares this handle with other libraries in the same process.
+- **R662:** The single subdatabase (`Options.DBName`, default `fts`) becomes a bbolt bucket of the same name; a `bbolt.Tx` spans all buckets, so a host (ark) opening its own bucket in the same file shares one atomic transaction scope (the shared-env linchpin, preserved).
+- **R663:** `TxnHolder`'s accessor is `Tx() *bbolt.Tx` (replaces `Txn() *lmdb.Txn`, R264); `txnWrap` wraps a raw `*bbolt.Tx`, and `CRecord` carries `*bbolt.Tx` in its unexported field and `Tx()` accessor.
+- **R664:** `func (db *DB) ReadCRecord(tx *bbolt.Tx, chunkID uint64) (CRecord, error)` (replaces the `*lmdb.Txn` signature, R571); the returned CRecord attaches db/tx so `Tx()`, `DB()`, and `FileRecord()` work on the result.
+- **R665:** `RemoveCallback` and `ReindexCallback` carry `*bbolt.Tx` instead of `*lmdb.Txn`.
+- **R666:** `Options.MaxDBs` (R101) and `Options.MapSize` are removed — bbolt has no named-DB limit and grows the file automatically; `Options` retains `CaseInsensitive`, `Aliases`, and `DBName`.
+- **R667:** Internal helpers that took a `(TxnHolder, lmdb.DBI)` pair obtain the bucket from the transaction (`tx.Bucket([]byte(name))`) and operate on it; the `lmdb.DBI` parameter is dropped throughout — the txn+dbi pair collapses to a single bucket.
+- **R668:** Storage operations map to bbolt: `OpenDBI(name, lmdb.Create)`→`tx.CreateBucketIfNotExists`; `env.Update`/`env.View`→`db.Update`/`db.View`; `txn.Get`+`lmdb.IsNotFound`→`bucket.Get` returning nil for absent keys; `txn.Del` (+IsNotFound guard)→`bucket.Delete` (no error on missing key, guard dropped); `txn.Put(…,0)`→`bucket.Put`; cursor `First`/`SetRange`/`Next`→bbolt `Cursor.First`/`Seek`/`Next`.
+- **R669:** The value/transaction lifetime contract is unchanged — a value is valid only within its transaction; the existing copy-out discipline (`make+copy`, `string(v)`, decode-to-struct) is preserved.
+- **R670:** `cmd/bigram-estimate` is removed (dead tooling reaching through `Env()` with its own DBI opens and cursors); `cmd/microfts` is unchanged (goes through the DB API).
+- **R671:** `db_test.go` validates the port: the standalone-env test helper uses `bbolt.Open` on a temp file, and the `Env()`-non-nil assertion becomes a `DB()`-non-nil check; create/open, add+search, remove/reindex (incl. raw-tx callbacks), record-counts, stale scans, and fileid/path-cache coverage must pass.

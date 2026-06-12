@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bmatsuo/lmdb-go/lmdb"
+	"go.etcd.io/bbolt"
 )
 
 // CRC: crc-DB.md
@@ -144,8 +144,8 @@ func TestRemoveFileWithCallback(t *testing.T) {
 
 	var callbackTxn bool
 	var gotOrphans []uint64
-	err := db.RemoveFileWithCallback(f1, func(txn *lmdb.Txn, orphans []uint64) error {
-		callbackTxn = txn != nil
+	err := db.RemoveFileWithCallback(f1, func(tx *bbolt.Tx, orphans []uint64) error {
+		callbackTxn = tx != nil
 		gotOrphans = append(gotOrphans, orphans...)
 		return nil
 	})
@@ -176,7 +176,7 @@ func TestRemoveFileWithCallbackError(t *testing.T) {
 	db.AddFile(fp, "line")
 
 	sentinel := errors.New("abort")
-	err := db.RemoveFileWithCallback(fp, func(txn *lmdb.Txn, orphans []uint64) error {
+	err := db.RemoveFileWithCallback(fp, func(tx *bbolt.Tx, orphans []uint64) error {
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -249,7 +249,7 @@ func TestReindexWithCallback(t *testing.T) {
 
 	var gotOrphans []uint64
 	var gotNew []uint64
-	fileid, err := db.ReindexWithCallback(fp, "fixed10", func(txn *lmdb.Txn, orphans, newIDs []uint64) error {
+	fileid, err := db.ReindexWithCallback(fp, "fixed10", func(tx *bbolt.Tx, orphans, newIDs []uint64) error {
 		gotOrphans = append(gotOrphans, orphans...)
 		gotNew = append(gotNew, newIDs...)
 		return nil
@@ -281,7 +281,7 @@ func TestReindexWithCallbackError(t *testing.T) {
 	db.AddFile(fp, "line")
 
 	sentinel := errors.New("abort reindex")
-	_, err := db.ReindexWithCallback(fp, "fixed10", func(txn *lmdb.Txn, orphans, newIDs []uint64) error {
+	_, err := db.ReindexWithCallback(fp, "fixed10", func(tx *bbolt.Tx, orphans, newIDs []uint64) error {
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -588,9 +588,9 @@ func TestDBSearchReturnsIndexStatus(t *testing.T) {
 
 func TestDBEnv(t *testing.T) {
 	db, _ := testDB(t)
-	env := db.Env()
-	if env == nil {
-		t.Fatal("Env() returned nil")
+	boltDB := db.DB()
+	if boltDB == nil {
+		t.Fatal("DB() returned nil")
 	}
 }
 
@@ -2122,10 +2122,10 @@ func TestIRecordCounters(t *testing.T) {
 	db.AddFile(fp, "line")
 
 	var totalChunks, totalTokens uint64
-	db.env.View(func(txn *lmdb.Txn) error {
-		th := txnWrap{txn}
-		totalChunks, _ = iCounter(th, db.dbi, "totalChunks")
-		totalTokens, _ = iCounter(th, db.dbi, "totalTokens")
+	db.bolt.View(func(tx *bbolt.Tx) error {
+		th := bucketWrap{tx.Bucket([]byte(db.dbName))}
+		totalChunks, _ = iCounter(th, "totalChunks")
+		totalTokens, _ = iCounter(th, "totalTokens")
 		return nil
 	})
 
@@ -2138,10 +2138,10 @@ func TestIRecordCounters(t *testing.T) {
 
 	db.RemoveFile(fp)
 
-	db.env.View(func(txn *lmdb.Txn) error {
-		th := txnWrap{txn}
-		totalChunks, _ = iCounter(th, db.dbi, "totalChunks")
-		totalTokens, _ = iCounter(th, db.dbi, "totalTokens")
+	db.bolt.View(func(tx *bbolt.Tx) error {
+		th := bucketWrap{tx.Bucket([]byte(db.dbName))}
+		totalChunks, _ = iCounter(th, "totalChunks")
+		totalTokens, _ = iCounter(th, "totalTokens")
 		return nil
 	})
 
@@ -2433,8 +2433,8 @@ func TestDBCopy(t *testing.T) {
 	cp := db.Copy()
 
 	// Shared fields.
-	if cp.Env() != db.Env() {
-		t.Error("copy should share env")
+	if cp.DB() != db.DB() {
+		t.Error("copy should share the bbolt handle")
 	}
 	if len(cp.chunkers) != len(db.chunkers) {
 		t.Error("copy should share chunkers")

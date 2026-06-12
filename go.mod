@@ -1,7 +1,10 @@
 module github.com/zot/microfts2
 
-go 1.21
+go 1.23
 
-require github.com/bmatsuo/lmdb-go v1.8.0
+require (
+	github.com/google/codesearch v1.2.0
+	go.etcd.io/bbolt v1.4.3
+)
 
-require github.com/google/codesearch v1.2.0
+require golang.org/x/sys v0.29.0 // indirect

@@ -6,19 +6,19 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/bmatsuo/lmdb-go/lmdb"
+	"go.etcd.io/bbolt"
 )
 
-// TxnHolder is anything that carries an LMDB transaction.
-// CRecord implements it; txnWrap wraps raw transactions from View/Update blocks.
+// TxnHolder carries a bbolt transaction's fts bucket. R667
+// CRecord implements it; bucketWrap wraps raw buckets from View/Update blocks.
 type TxnHolder interface {
-	Txn() *lmdb.Txn
+	Bucket() *bbolt.Bucket
 }
 
-// txnWrap wraps a raw *lmdb.Txn into a TxnHolder.
-type txnWrap struct{ txn *lmdb.Txn }
+// bucketWrap wraps a raw *bbolt.Bucket into a TxnHolder. R667
+type bucketWrap struct{ b *bbolt.Bucket }
 
-func (w txnWrap) Txn() *lmdb.Txn { return w.txn }
+func (w bucketWrap) Bucket() *bbolt.Bucket { return w.b }
 
 // TrigramEntry pairs a trigram code with its per-chunk occurrence count.
 type TrigramEntry struct {
@@ -51,7 +51,7 @@ type FileIDCount struct {
 
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
-// Carries unexported db/txn — the chunk is tied to the transaction that read it.
+// Carries unexported db/bkt — the chunk is tied to the bucket that read it.
 type CRecord struct {
 	ChunkID    uint64
 	Hash       [32]byte
@@ -61,7 +61,7 @@ type CRecord struct {
 	Attrs      []Pair
 	FileIDs    []FileIDCount // refcounted: per-fileid occurrence count // CRC: crc-DB.md | R595
 	db         *DB
-	txn        *lmdb.Txn
+	bkt        *bbolt.Bucket
 }
 
 // FileIDCountFor returns the occurrence count for the given fileid, or 0 if absent.
@@ -113,14 +113,22 @@ func removeFileID(s []FileIDCount, fileid uint64) ([]FileIDCount, bool) {
 	return s, false
 }
 
-// attach sets the db and txn context for a CRecord.
-func (c *CRecord) attach(db *DB, txn *lmdb.Txn) {
+// attach sets the db and bkt context for a CRecord. R664
+func (c *CRecord) attach(db *DB, b *bbolt.Bucket) {
 	c.db = db
-	c.txn = txn
+	c.bkt = b
 }
 
-// Txn returns the transaction this record was read from. Implements TxnHolder.
-func (c *CRecord) Txn() *lmdb.Txn { return c.txn }
+// Bucket returns the bbolt bucket this record was read from. Implements TxnHolder. R664
+func (c *CRecord) Bucket() *bbolt.Bucket { return c.bkt }
+
+// Tx returns the bbolt transaction this record is part of. R663, R664
+func (c *CRecord) Tx() *bbolt.Tx {
+	if c.bkt == nil {
+		return nil
+	}
+	return c.bkt.Tx()
+}
 
 // DB returns the database this record belongs to.
 func (c *CRecord) DB() *DB { return c.db }
@@ -233,8 +241,8 @@ func (c *CRecord) MarshalValue() []byte {
 	for _, p := range c.Attrs {
 		size += binary.MaxVarintLen64 + len(p.Key) + binary.MaxVarintLen64 + len(p.Value)
 	}
-	size += binary.MaxVarintLen64                             // n-fileids
-	size += len(c.FileIDs) * (2 * binary.MaxVarintLen64)      // [fileid, count] pairs
+	size += binary.MaxVarintLen64                        // n-fileids
+	size += len(c.FileIDs) * (2 * binary.MaxVarintLen64) // [fileid, count] pairs
 
 	buf := make([]byte, size)
 	off := 0
@@ -402,9 +410,9 @@ func (f *FRecord) MarshalValue() []byte {
 	}
 	size += binary.MaxVarintLen64 // chunkcount
 	for _, ch := range f.Chunks {
-		size += binary.MaxVarintLen64                       // chunkid
-		size += binary.MaxVarintLen64 + len(ch.Location)    // location
-		size += binary.MaxVarintLen64 + len(ch.Locator)     // locator
+		size += binary.MaxVarintLen64                    // chunkid
+		size += binary.MaxVarintLen64 + len(ch.Location) // location
+		size += binary.MaxVarintLen64 + len(ch.Locator)  // locator
 	}
 	size += binary.MaxVarintLen64 // tokencount
 	for _, t := range f.Tokens {
@@ -670,4 +678,3 @@ func makeTKey(trigram uint32) []byte {
 func makeWKey(tokenHash uint32) []byte {
 	return []byte{prefixW, byte(tokenHash >> 24), byte(tokenHash >> 16), byte(tokenHash >> 8), byte(tokenHash)}
 }
-
