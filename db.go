@@ -1867,7 +1867,7 @@ type ReindexCallback func(tx *bbolt.Tx, orphanedChunkIDs, newChunkIDs []uint64) 
 // genuinely new in this indexing call (the C record was created, not bumped).
 // On the persistent path the CRecord carries txn context, so callbacks may
 // call FileRecord and other DB lookups during the fire. On the overlay
-// (tmp://) path there is no LMDB transaction: CRecord.Txn() and CRecord.DB()
+// (tmp://) path there is no bbolt transaction: CRecord.Tx() and CRecord.DB()
 // return nil, and only the chunkid / hash / attrs / fileIDs are meaningful.
 // Overlay chunkids count down from MaxUint64, so callers can distinguish
 // them from persistent chunkids by range.

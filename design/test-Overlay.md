@@ -2,7 +2,7 @@
 **Source:** crc-Overlay.md
 
 ## Test: add and search tmp file
-**Purpose:** Verify tmp:// documents are searchable alongside LMDB documents
+**Purpose:** Verify tmp:// documents are searchable alongside indexed documents
 **Input:** DB with one disk file indexed, then AddTmpFile with different content
 **Expected:** Search returns results from both disk and tmp:// documents
 **Refs:** crc-Overlay.md, crc-DB.md, seq-tmp-search.md
@@ -68,7 +68,7 @@
 **Refs:** crc-Overlay.md
 
 ## Test: BM25 includes overlay counters
-**Purpose:** BM25Func sums LMDB and overlay counters for corpus size
+**Purpose:** BM25Func sums index and overlay counters for corpus size
 **Input:** DB with disk files, add tmp file, call BM25Func
 **Expected:** Corpus size reflects both disk and tmp chunks
 **Refs:** crc-Overlay.md, crc-DB.md, seq-tmp-search.md

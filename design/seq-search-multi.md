@@ -4,10 +4,10 @@
 ## SearchMulti(query, strategies, k, opts)
 
 ```
-Caller               DB                      LMDB
+Caller               DB                      index
   |                   |                        |
   |--SearchMulti()--->|                        |
-  |                   |--env.View()----------->|
+  |                   |--bolt.View()---------->|
   |                   |                        |
   |                   |  -- candidate collection (once) --
   |                   |                        |

@@ -47,7 +47,7 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 - Returns *SearchResults (same type as Search) for API compatibility
 
 Overlay (tmp://) documents participate: overlay trigram maps are
-OR-unioned into the tally alongside LMDB T records.
+OR-unioned into the tally alongside index T records.
 
 ## CLI
 

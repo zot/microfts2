@@ -4,7 +4,7 @@
 **Source:** specs/main.md
 
 - **R1:** Go CLI command, also usable as a Go library
-- **R2:** LMDB-backed storage using a single named subdatabase with prefix-distinguished records
+- **~~R2:~~** (Retired T59 — see R660) LMDB-backed storage using a single named subdatabase with prefix-distinguished records
 
 ## Feature: Raw Byte Trigrams
 **Source:** specs/main.md
@@ -50,7 +50,7 @@
 
 - **R14:** ~~removed: two-tree content/index split replaced by single subdatabase~~
 - **R15:** ~~removed: two-tree content/index split replaced by single subdatabase~~
-- **R218:** All records live in one LMDB named subdatabase, distinguished by prefix byte (I, H, C, F, N, T, W)
+- **~~R218:~~** (Retired T60 — see R662) All records live in one LMDB named subdatabase, distinguished by prefix byte (I, H, C, F, N, T, W)
 - **R219:** Subdatabase name is a parameter: default `fts`, settable via CLI (`-db-name`) and library (`Options.DBName`)
 
 ## Feature: Encoding Conventions
@@ -99,7 +99,7 @@
 **Source:** specs/main.md
 
 - **R20:** `N` records: filename → fileid mapping using key chains for names exceeding 511 bytes
-- **R25:** Filenames exceeding LMDB's 511-byte key limit use multiple chained N keys
+- **R25:** Filenames exceeding 511 bytes use multiple chained N keys (a legacy threshold; bbolt's key limit is 32 KB, so the chains are retained but rarely triggered — see migration Out of scope)
 - **R26:** `N` records use chain-byte to chain: `N[0-254][name:str] → empty` for prefix, `N[255][name:str] → [[full-name:str] [fileid:varint]]...` for final segment with full filename and fileid
 
 ## Feature: T Records (Trigram Inverted Index)
@@ -130,16 +130,16 @@
 - **R249:** `TrigramEntry` struct: `Trigram uint32, Count int`
 - **R250:** `TokenEntry` struct: `Token string, Count int`
 - **R251:** `FileChunkEntry` struct: `ChunkID uint64, Location string`
-- **R252:** Each record struct has `Marshal` and `Unmarshal` methods for LMDB encode/decode
+- **R252:** Each record struct has `Marshal` and `Unmarshal` methods for byte encode/decode
 
 ## Feature: TxnHolder Interface
 **Source:** specs/main.md
 
-- **R264:** `TxnHolder` interface: `Txn() *lmdb.Txn` — any value carrying an LMDB transaction
-- **R265:** CRecord implements `TxnHolder` via its `Txn()` accessor; internal DB methods accept `TxnHolder` instead of raw `*lmdb.Txn`
+- **~~R264:~~** (Retired T57 — see R663) `TxnHolder` interface: `Txn() *lmdb.Txn` — any value carrying an LMDB transaction
+- **R265:** CRecord implements `TxnHolder` via its `Tx()` accessor; internal DB methods accept `TxnHolder` instead of raw `*bbolt.Tx`
 - **R266:** `CRecord.FileRecord(fileid)` passes self as `TxnHolder` to internal read methods — no txn extraction needed
-- **R267:** (inferred) `txnWrap` struct wraps raw `*lmdb.Txn` from View/Update blocks into a `TxnHolder`
-- **R571:** `(db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)` — public power-user accessor; fetches a CRecord by chunkID within an existing txn and attaches db/txn to the returned record so `Txn()`, `DB()`, and `FileRecord(fileid)` work on the result
+- **R267:** (inferred) `txnWrap` struct wraps raw `*bbolt.Tx` from View/Update blocks into a `TxnHolder`
+- **~~R571:~~** (Retired T58 — see R664) `(db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)` — public power-user accessor; fetches a CRecord by chunkID within an existing txn and attaches db/txn to the returned record so `Txn()`, `DB()`, and `FileRecord(fileid)` work on the result
 
 ## Feature: Data-in-Key Pattern
 **Source:** specs/main.md
@@ -200,7 +200,7 @@
 - **R53:** `Search` accepts variadic `SearchOption` and returns `*SearchResults` with Results slice and IndexStatus
 - **R54:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
 - **R55:** `AddStrategy`/`RemoveStrategy` for runtime strategy management
-- **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (DBName, MaxDBs)
+- **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (DBName)
 
 ## Feature: Built-in Chunking Strategies
 **Source:** specs/main.md
@@ -262,7 +262,7 @@
 ## Feature: Ark Integration
 **Source:** specs/main.md
 
-- **R91:** `Env()` method returns the underlying `*lmdb.Env` for sharing with other libraries in the same process
+- **~~R91:~~** (Retired T55 — see R661) `Env()` method returns the underlying `*lmdb.Env` for sharing with other libraries in the same process
 - **R92:** `AddFile` returns `(uint64, error)` — the fileid alongside the error
 - **R93:** `Reindex` returns `(uint64, error)` — the fileid alongside the error
 - **R94:** `FileInfoByID(fileid uint64)` returns `(FRecord, error)` — resolves fileid to its F record data
@@ -290,7 +290,7 @@
 ## Feature: MaxDBs Option
 **Source:** specs/main.md
 
-- **R101:** `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
+- **~~R101:~~** (Retired T56 — see R666) `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
 
 ## Feature: Encoding
 **Source:** specs/main.md
@@ -328,7 +328,7 @@
 - **R140:** `FilterAll` stock filter: returns all trigrams unmodified (disables filtering)
 - **R141:** `FilterByRatio(maxRatio float64)` stock filter: skips trigrams appearing in more than `maxRatio` of total chunks
 - **R142:** `FilterBestN(n int)` stock filter: keeps the N trigrams with the lowest document frequency
-- **R143:** Trigram document frequencies retrieved via per-query T record reads (typically 3-10 LMDB reads per query)
+- **R143:** Trigram document frequencies retrieved via per-query T record reads (typically 3-10 index reads per query)
 - **R144:** Total chunk count derived from the database (sum of file chunk counts from F records, or maintained as a counter)
 - **R145:** ~~removed: A record and BuildIndex fully removed~~
 
@@ -357,7 +357,7 @@
 - **R161:** `WithFileLength(n int64)` option: full file size after append
 - **R162:** `WithBaseLine(n int)` option: 1-based line number offset for line-based chunker ranges; 0 means no adjustment
 - **R163:** (inferred) `AppendChunks` validates that fileid exists; returns error if not found
-- **R164:** (inferred) `AppendChunks` runs in a single LMDB write transaction — all updates are atomic
+- **R164:** (inferred) `AppendChunks` runs in a single bbolt write transaction — all updates are atomic
 
 ## Feature: Chunker Offset Support
 **Source:** specs/main.md
@@ -601,13 +601,13 @@
 ## Feature: Temporary Documents (tmp:// Overlay)
 **Source:** specs/main.md
 
-- **R349:** In-memory overlay on `*DB` holds tmp:// documents alongside the LMDB index — never touches LMDB
+- **R349:** In-memory overlay on `*DB` holds tmp:// documents alongside the index — never touches the index
 - **R350:** Temporary document paths use `tmp://` URI scheme (e.g. `tmp://abc123/scoring-notes`); path is opaque to microfts2
-- **R351:** Temporary fileids count down from `math.MaxUint64` — structural guarantee against collision with LMDB fileids (which count up from 1)
+- **R351:** Temporary fileids count down from `math.MaxUint64` — structural guarantee against collision with index fileids (which count up from 1)
 - **R352:** Temporary chunkids count down from a separate counter starting at `math.MaxUint64` — same structural separation
 - **R353:** Overlay holds equivalent of C, F, T, W, H records in Go maps — per-chunk data, per-file data, trigram index, token index, hash-to-chunkid lookup
-- **R354:** Chunk deduplication within the overlay using SHA-256 hash — same mechanism as LMDB
-- **R355:** No cross-deduplication between overlay and LMDB (separate chunkid spaces)
+- **R354:** Chunk deduplication within the overlay using SHA-256 hash — same mechanism as the index
+- **R355:** No cross-deduplication between overlay and the index (separate chunkid spaces)
 - **R356:** Overlay lifecycle tied to `*DB` handle — created on first use, destroyed on `Close()` or process exit
 - **R357:** Individual tmp:// documents can be removed explicitly
 - **R358:** `AddTmpFile(path, strategy string, content []byte) (uint64, error)` — chunks content, stores in overlay, returns fileid (counting down)
@@ -618,7 +618,7 @@
 - **R363:** `UpdateTmpFile` returns error if path not found in overlay
 - **R364:** `RemoveTmpFile(path string) error` — removes document and all orphaned chunks from overlay
 - **R365:** `RemoveTmpFile` returns error if path not found
-- **R366:** Search always includes overlay — candidates collected from both LMDB and overlay, merged and sorted by score
+- **R366:** Search always includes overlay — candidates collected from both the index and overlay, merged and sorted by score
 - **R367:** Overlay participates in all search modes: `Search`, `SearchRegex`, `SearchMulti`, `ScoreFile`
 - **R368:** All `SearchOption`s apply uniformly to overlay candidates — `WithChunkFilter`, `WithVerify`, `WithTrigramFilter`, etc.
 - **R369:** `TmpFileIDs() map[uint64]struct{}` — returns set of all current tmp:// fileids for use with `WithExcept`
@@ -626,7 +626,7 @@
 - **R371:** Overlay stores original content bytes for each document (needed for chunk retrieval and verify)
 - **R372:** Thread safety: concurrent reads allowed, writes (add/update/remove) serialized — `sync.RWMutex`
 - **R373:** Overlay maintains its own `totalChunks` and `totalTokens` counters
-- **R374:** BM25 and corpus-level computations sum LMDB counters and overlay counters for true corpus size
+- **R374:** BM25 and corpus-level computations sum index counters and overlay counters for true corpus size
 - **R375:** No CLI changes — tmp:// is library-only; ark CLI handles exposure
 - **R376:** `WithNoTmp() SearchOption` — skips overlay entirely during search; no overlay lock acquired, no allocation
 - **R377:** `HasTmp() bool` — returns true if the overlay has any tmp:// documents; no allocation
@@ -703,7 +703,7 @@
 - **R422:** Returns `*SearchResults` (same type as Search) for API compatibility
 - **R423:** Post-filter options apply to top-k: WithChunkFilter, WithRegexFilter, WithExceptRegex, WithProximityRerank
 - **R424:** WithVerify, WithScoring, WithTrigramFilter, WithLoose are ignored (not applicable to posting-list scoring)
-- **R425:** Overlay (tmp://) documents participate: overlay trigram maps OR-unioned into the tally alongside LMDB T records
+- **R425:** Overlay (tmp://) documents participate: overlay trigram maps OR-unioned into the tally alongside index T records
 - **R426:** CLI `-fuzzy` flag on search command calls `SearchFuzzy`. CLI `-loose` flag calls `Search` with `WithLoose()`. Default k = 20 for fuzzy
 - **R427:** (inferred) `collectTrigramUnion` reused from SearchMulti candidate expansion for T record OR-union
 
@@ -711,7 +711,7 @@
 **Source:** specs/main.md
 
 - **R443:** `RecordCounts() (map[byte]RecordStats, error)` — method on DB returning per-prefix statistics
-- **R444:** Opens a read-only LMDB transaction, iterates all keys in the subdatabase, accumulates per-prefix stats
+- **R444:** Opens a read-only bbolt transaction, iterates all keys in the bucket, accumulates per-prefix stats
 - **R445:** `RecordStats` struct: `Count int64`, `KeyBytes int64`, `ValueBytes int64` — aggregate totals per prefix byte
 
 ## Feature: TrigramFilter totalChunks source
@@ -726,14 +726,14 @@
 - **R448:** `FileIDPaths() (map[uint64]string, error)` — method on DB returning fileid→path for all indexed files
 - **R449:** Lazily loaded on first call: scans F records with `UnmarshalFHeader`, caches result
 - **R450:** Incrementally maintained: AddFile inserts, RemoveFile deletes, Reindex removes+adds
-- **R454:** (inferred) Cache is valid because microfts2 owns its subdatabase — dbi is unexported, no external writes
+- **R454:** (inferred) Cache is valid because microfts2 owns its bucket — the `bolt` handle is unexported, no external writes
 - **R455:** `pathToID` reverse cache (path→fileid) built alongside `pathCache`, used by `lookupFileByPath` to skip N record lookup
 
 ## Feature: Search Cache
 **Source:** specs/main.md
 
 - **R456:** `NewSearchCache() func()` — enables FRecord caching on DB, returns cleanup function that clears the cache
-- **R457:** `readFRecord` checks `frecordCache` before LMDB read; caches result on miss
+- **R457:** `readFRecord` checks `frecordCache` before index read; caches result on miss
 - **R458:** (inferred) Cache is keyed by fileid; same fileid returns same FRecord without re-read
 
 ## Feature: Partial F Record Unmarshal
@@ -746,9 +746,9 @@
 ## Feature: DB Copy and Cache Invalidation
 **Source:** specs/main.md
 
-- **R459:** `Copy() *DB` — shallow copy sharing LMDB env, overlay, and chunker registry; caches nil
-- **R460:** Copy shares `env`, `dbi`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
-- **R461:** Copy sets `pathCache`, `pathToID`, `frecordCache` to nil — lazy reload from LMDB
+- **R459:** `Copy() *DB` — shallow copy sharing the index, overlay, and chunker registry; caches nil
+- **R460:** Copy shares `bolt`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
+- **R461:** Copy sets `pathCache`, `pathToID`, `frecordCache` to nil — lazy reload from the index
 - **R462:** (inferred) Copy does not copy `overlayOnce` — overlay pointer is shared directly, already initialized
 - **R463:** `InvalidateCaches()` — nils `pathCache`, `pathToID`, `frecordCache` on the receiver
 - **R464:** `InvalidateCaches` does NOT reset `overlayOnce`
@@ -781,9 +781,9 @@
 - **R496:** `CRecord.ContentLen int` field — populated at index time from `len(chunk.Content)`, persisted in C record wire format
 - **R497:** (inferred) `CRecord.MarshalValue` writes contentLen varint after hash, before n-trigrams
 - **R498:** (inferred) `UnmarshalCValue` reads contentLen varint after hash, before n-trigrams
-- **R499:** (inferred) Overlay chunk structs store contentLen for parity with LMDB C records
+- **R499:** (inferred) Overlay chunk structs store contentLen for parity with index C records
 - **R500:** `ChunkContentLens(fileid uint64) ([]int, error)` — public method on DB. Reads the F record's chunk list, then reads each C record's ContentLen. Returns lengths in chunk-list order. Single View transaction
-- **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of LMDB
+- **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of the index
 
 ## Feature: FileChunker Interface
 **Source:** specs/main.md
@@ -844,11 +844,11 @@
 ## Feature: Remove File with Callback
 **Source:** specs/main.md
 
-- **R546:** `RemoveCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error` — receives the write transaction and orphaned chunk IDs during file removal
+- **~~R546:~~** (Retired T61 — see R665) `RemoveCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error` — receives the write transaction and orphaned chunk IDs during file removal
 - **R547:** `RemoveFileWithCallback(fpath string, fn RemoveCallback) error` — removes a file with a caller callback for transactional cleanup
 - **R548:** Callback receives only orphaned chunkids — chunks whose C records were deleted because the removed file was their last reference
 - **R549:** Chunks still referenced by other files (dedup survivors) are not included in the callback
-- **R550:** Callback runs inside the write transaction — `fn` can read/write any subdatabase in the same LMDB env
+- **R550:** Callback runs inside the write transaction — `fn` can read/write any bucket in the same `*bbolt.DB`
 - **R551:** If `fn` returns a non-nil error, the entire transaction aborts — both microfts2's removals and the caller's changes roll back
 - **R552:** If `fn` is nil, behavior is identical to `RemoveFile` — no callback overhead
 - **R553:** When no chunks are orphaned (all shared), `fn` is called with an empty slice
@@ -857,11 +857,11 @@
 ## Feature: Reindex File with Callback
 **Source:** specs/main.md
 
-- **R555:** `ReindexCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error` — receives the write transaction, orphaned chunk IDs from removal, and new chunk IDs from re-indexing
+- **~~R555:~~** (Retired T62 — see R665) `ReindexCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error` — receives the write transaction, orphaned chunk IDs from removal, and new chunk IDs from re-indexing
 - **R556:** `ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)` — reindexes a file with a caller callback for transactional cleanup
 - **R557:** `orphanedChunkIDs` contains only chunks whose C records were deleted because the old file was their last reference (same semantics as RemoveCallback)
 - **R558:** `newChunkIDs` contains all chunk IDs in the re-indexed file in chunk-list order, including dedup hits
-- **R559:** Callback runs inside the write transaction — `fn` can read/write any subdatabase in the same LMDB env
+- **R559:** Callback runs inside the write transaction — `fn` can read/write any bucket in the same `*bbolt.DB`
 - **R560:** If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
 - **R561:** If `fn` is nil, behavior is identical to `Reindex`
 - **R562:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `Reindex`
@@ -907,7 +907,7 @@
 
 - **R611:** `WithIndexedChunkCallback` fires for tmp:// overlay paths via `AddTmpFile`, `UpdateTmpFile`, and `AppendTmpFile`, mirroring the persistent-path contract
 - **R612:** Callback fires once per genuinely-new chunk (hash dedup miss), in chunk order, after the overlay chunk has been created — never for dedup hits
-- **R613:** `IndexedChunk.CRecord` populated from the overlay chunk has no LMDB transaction context: `CRecord.Txn()` and `CRecord.DB()` return nil — overlay chunkids count down from MaxUint64, so callers can distinguish overlay-fired callbacks by chunkid range
+- **R613:** `IndexedChunk.CRecord` populated from the overlay chunk has no index transaction context: `CRecord.Tx()` and `CRecord.DB()` return nil — overlay chunkids count down from MaxUint64, so callers can distinguish overlay-fired callbacks by chunkid range
 - **R614:** Overlay-fired `IndexedChunk.CRecord` populates ChunkID, Hash, ContentLen, Attrs, FileIDs, and Trigrams from the overlay chunk
 - **R615:** `AppendTmpFile` auto-create path (file did not previously exist) routes through `AddTmpFile`, propagating both `chunkCallback` and `indexedChunkCallback` from the `appendConfig`
 - **R616:** Overlay's `dedupOrCreateChunk` returns `(chunkID, isNew bool)` so callers can fire the callback only on creation, paralleling the persistent path's `nc != nil` check

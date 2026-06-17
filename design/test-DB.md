@@ -259,16 +259,16 @@
 **Expected:** copy.env == original.env, copy.overlay == original.overlay, copy.chunkers == original.chunkers, copy.pathCache == nil, copy.pathToID == nil, copy.frecordCache == nil
 **Refs:** crc-DB.md, R459, R460, R461, R462
 
-## Test: Copy can perform LMDB reads
+## Test: Copy can perform index reads
 **Purpose:** the copy is functional for indexing
 **Input:** create DB, add a file, call Copy(), use copy to read F records
-**Expected:** copy can open View txns and read records from the shared env
+**Expected:** copy can open View txns and read records from the shared index
 **Refs:** crc-DB.md, R459, R460
 
 ## Test: InvalidateCaches clears caches
 **Purpose:** InvalidateCaches nils all three caches
 **Input:** create DB, add a file, call FileIDPaths (populates caches), call InvalidateCaches()
-**Expected:** pathCache == nil, pathToID == nil, frecordCache == nil. Next FileIDPaths call re-populates from LMDB
+**Expected:** pathCache == nil, pathToID == nil, frecordCache == nil. Next FileIDPaths call re-populates from the index
 **Refs:** crc-DB.md, R463, R464
 
 ## Test: AddFile with ChunkCallback

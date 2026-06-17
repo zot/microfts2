@@ -78,14 +78,14 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - UpdateTmpFile(path, strategy, content, idxOpts): delegate to overlay.updateFile with ChunkCallback, return error
 - RemoveTmpFile(path): delegate to overlay.removeFile, return error
 - TmpFileIDs(): delegate to overlay.tmpFileIDs, return map[uint64]struct{}
-- Search/SearchRegex/SearchMulti/ScoreFile: collect candidates from both LMDB and overlay, merge, apply filters and scoring uniformly
+- Search/SearchRegex/SearchMulti/ScoreFile: collect candidates from both the index and overlay, merge, apply filters and scoring uniformly
 - GetChunks: detect tmp:// paths and route to overlay's stored content instead of disk
-- BM25Func: sum LMDB and overlay counters for true corpus size
+- BM25Func: sum index and overlay counters for true corpus size
 - RecordCounts(): open read-only txn, iterate all keys in subdatabase, accumulate count/key bytes/value bytes per prefix. Return map[byte]RecordStats
 - FileIDPaths(): return cached fileid→path map. Lazy load on first call (F record scan with UnmarshalFHeader). AddFile/RemoveFile/Reindex update cache incrementally
 - StaleFiles: uses UnmarshalFHeader (not UnmarshalFValue) — skips Chunks and Tokens
-- NewSearchCache(): set frecordCache, return cleanup func that nils it. readFRecord checks cache before LMDB
-- Copy(): return shallow copy sharing env, dbi, dbName, settings, trigrams, overlay, chunkers. Caches (pathCache, pathToID, frecordCache) set to nil. overlayOnce not copied — overlay pointer shared directly
+- NewSearchCache(): set frecordCache, return cleanup func that nils it. readFRecord checks cache before the index
+- Copy(): return shallow copy sharing bolt, dbName, settings, trigrams, overlay, chunkers. Caches (pathCache, pathToID, frecordCache) set to nil. overlayOnce not copied — overlay pointer shared directly
 - InvalidateCaches(): nil pathCache, pathToID, frecordCache. Does not reset overlayOnce
 - WithChunkCallback(fn): return IndexOption that sets ChunkCallback in indexConfig (R470)
 - WithAppendChunkCallback(fn): return AppendOption that sets ChunkCallback in appendConfig (R471)

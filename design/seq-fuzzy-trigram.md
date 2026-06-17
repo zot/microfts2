@@ -1,12 +1,12 @@
 # Sequence: SearchFuzzy (Fuzzy Trigram Search)
 **Requirements:** R418, R419, R420, R421, R422, R425, R427
 
-Participants: DB, LMDB, Overlay
+Participants: DB, index, Overlay
 
 Fast typo-tolerant search. Scores from posting lists — no C record reads until path resolution of top-k.
 
 ```
-Caller               DB                      LMDB
+Caller               DB                      index
   |                   |                        |
   |--SearchFuzzy()--->|                        |
   |                   |                        |

@@ -547,7 +547,7 @@ func TestAppendTmpFileWithChunkCallback(t *testing.T) {
 }
 
 // AddTmpFile fires WithIndexedChunkCallback once per genuinely-new chunk.
-// Overlay-fired IndexedChunks have no txn context (CRecord.Txn() / DB() == nil)
+// Overlay-fired IndexedChunks have no txn context (CRecord.Tx() / DB() == nil)
 // but carry chunkid, hash, and content for ark's chunkAccumulator pattern.
 func TestAddTmpFileWithIndexedChunkCallback(t *testing.T) {
 	db, _ := testDB(t)

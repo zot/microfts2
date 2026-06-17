@@ -1,7 +1,7 @@
 # Overlay
 **Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R438, R439, R440, R441, R442, R473, R474, R475, R476, R480, R481, R483, R485, R499, R501, R611, R612, R613, R614, R615, R616, R656, R657, R655
 
-In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the LMDB record structure (C, F, T, W, H equivalents) in Go maps. Fileids and chunkids count down from MaxUint64 to structurally avoid collision with LMDB ids. Thread-safe: concurrent reads, serialized writes.
+In-memory overlay holding tmp:// documents alongside the index. Mirrors the index record structure (C, F, T, W, H equivalents) in Go maps. Fileids and chunkids count down from MaxUint64 to structurally avoid collision with index ids. Thread-safe: concurrent reads, serialized writes.
 
 ## Knows
 - mu: sync.RWMutex
@@ -37,7 +37,7 @@ In-memory overlay holding tmp:// documents alongside the LMDB index. Mirrors the
 - updateFile(path, strategy, content, db, cb, ich): find existing file by path (error if missing), remove old file data, add new with both callbacks (R611) — no moment where path is absent from the overlay (hold write lock across both operations)
 - appendFile(path, strategy, content, db, opts): validate UTF-8. RLock to check if file exists — if not, RUnlock and delegate to addFile (create-if-absent, with ChunkCallback and IndexedChunkCallback from opts) (R615). If exists, verify strategy matches (error on mismatch), read fileID, RUnlock. Chunk content outside lock via db's chunker registry; hash over the chunk's Content and index trigrams/tokens from that content (R656), firing ChunkCallback per chunk if present (R483). Apply WithBaseLine via adjustRange if set. Lock, re-check file still exists (error if removed during window). For each chunk: dedupOrCreateChunk, fire IndexedChunkCallback for new chunks only (R611, R612), append to file's chunk list. Merge token bag. Extend stored content bytes. Returns fileid
 - dedupOrCreateChunk(cc, fileID): hash-dedup check over the chunk's Content (R656), so identical content dedups and differing content gives distinct chunkids (R657); on hit, increment refcount and return (existing, false); on miss, allocate chunkid, build overlayChunk, update trigram/token/hash maps, return (chunkID, true) (R616)
-- indexedChunkLocked(chunkID, cc): build IndexedChunk{Chunk, CRecord} for callback delivery — CRecord populated from the just-created overlayChunk, with no LMDB txn context (Txn() and DB() return nil) (R613, R614)
+- indexedChunkLocked(chunkID, cc): build IndexedChunk{Chunk, CRecord} for callback delivery — CRecord populated from the just-created overlayChunk, with no index txn context (Tx() and DB() return nil) (R613, R614)
 - removeFile(path): find by path (error if missing), for each chunkid: remove fileid from overlayChunk, if no fileids remain delete chunk and clean trigram/token/hash maps. Delete file records. Update counters
 - searchCandidates(queryTrigrams): RLock, intersect trigram maps to produce candidate chunkid set, return overlayChunks for candidates. Mirrors DB's T record intersection
 - lookupChunk(chunkid): RLock, return overlayChunk by id

@@ -1,6 +1,6 @@
 # microfts2
 
-A dynamic trigram index backed by LMDB, written in Go. Usable as a CLI tool or as a library.
+A dynamic trigram index backed by bbolt, written in Go. Usable as a CLI tool or as a library.
 
 microfts2 indexes files into raw byte trigrams (24-bit, 16M possible) organized by chunks, then maintains an inverted index for fast substring search. The index is maintained incrementally — every add/remove updates it immediately.
 
@@ -47,7 +47,7 @@ Every byte is its own value — no character set mapping. Three consecutive byte
 
 Search computes the query's trigrams, optionally filters them via a caller-supplied `TrigramFilter`, intersects posting lists from the inverted index, and returns matching file/chunk locations.
 
-**Two-tree design:** Content and index live in separate LMDB subdatabases. The content DB stores trigram frequency counts (sparse C records), file metadata, and settings. The index DB stores the inverted trigram-to-chunk mapping, maintained incrementally on every add/remove.
+**Single-tree design:** All records live in one bbolt bucket, distinguished by a prefix byte. Trigram frequency counts (sparse C records), file metadata, settings, and the inverted trigram-to-chunk mapping share the one tree, maintained incrementally on every add/remove.
 
 **Dynamic trigram filtering:** Query trigram selection is handled at search time via `TrigramFilter` functions. Stock filters include `FilterAll` (use all trigrams), `FilterByRatio` (skip high-frequency trigrams), and `FilterBestN` (keep N most selective). Callers can supply custom filters.
 
@@ -55,7 +55,7 @@ Search computes the query's trigrams, optionally filters them via a caller-suppl
 
 ## CLI Reference
 
-All commands require `-db <path>`. Optional: `-content-db`, `-index-db` for custom subdatabase names.
+All commands require `-db <path>`. Optional: `-db-name` for a custom bucket name (default `fts`).
 
 | Command | Description |
 |---------|-------------|

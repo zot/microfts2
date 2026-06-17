@@ -1,5 +1,5 @@
 # microfts
-A dynamic LMDB trigram index, written in Go. CLI command, structured so it can also be used as a library.
+A dynamic trigram index, written in Go. CLI command, structured so it can also be used as a library.
 
 # features
 
@@ -48,7 +48,7 @@ A dynamic LMDB trigram index, written in Go. CLI command, structured so it can a
     - cross-boundary trigrams preserved — effectively encode character bigrams for CJK search
   - 8 bits / byte, 24 bits per trigram
   - 16M possible trigrams (2^24 = 16,777,216)
-  - trigram counts (C records): sparse individual LMDB records, one per non-zero trigram
+  - trigram counts (C records): sparse individual index records, one per non-zero trigram
 
 # Representation
 
@@ -66,18 +66,18 @@ Sets: this pattern can represent a set for each key
 
 ## Key Chains
 
-LMDB only supports 511 bytes per key. Long filenames (F records below) use multiple keys.
+bbolt allows up to 32768 bytes (32 KB) per key. Long filenames (F records below) use multiple keys, chained at a legacy 511-byte threshold — retained from the original design and still correct.
 
-## Single Subdatabase with Chunk Deduplication
+## Single Bucket with Chunk Deduplication
 
-All records live in one LMDB subdatabase, distinguished by prefix byte. Chunks are deduplicated by content hash — the same chunk content appearing in multiple files is stored once.
+All records live in one bbolt bucket, distinguished by prefix byte. Chunks are deduplicated by content hash — the same chunk content appearing in multiple files is stored once.
 
-Subdatabase name is a parameter: default 'fts', settable via CLI and library API.
+Bucket name is a parameter: default 'fts', settable via CLI and library API.
 Not stored in the I record — needed to open the database in the first place.
 
 ### Why one tree
 
-One B-tree instead of two halves the LMDB page overhead and simplifies transactions (no cross-database coordination).
+One B-tree instead of two halves the bbolt page overhead and simplifies transactions (no cross-bucket coordination).
 
 ### Why chunk deduplication
 
@@ -149,7 +149,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 | I (config) | ~10 |
 | **Total** | **~630K** |
 
-LMDB mmap pressure scales with B-tree entry count, not data volume. Packing per-trigram data into T record values (one entry per distinct trigram) and per-chunk data into C record values (one entry per unique chunk) keeps the entry count low while the data volume stays comparable.
+bbolt mmap pressure scales with B-tree entry count, not data volume. Packing per-trigram data into T record values (one entry per distinct trigram) and per-chunk data into C record values (one entry per unique chunk) keeps the entry count low while the data volume stays comparable.
 
 # Full Trigram Index
 
@@ -331,7 +331,7 @@ func Create(path string, opts Options) (*DB, error)
 func Open(path string, opts Options) (*DB, error)
 func (db *DB) Close() error
 func (db *DB) Settings() Settings
-func (db *DB) Env() *lmdb.Env
+func (db *DB) DB() *bbolt.DB
 func (db *DB) Version() (string, error)
 
 // Content
@@ -378,31 +378,32 @@ FuncChunker: adapter that wraps a ChunkFunc into a Chunker (ChunkText re-runs an
 
 Options:
 - CaseInsensitive, Aliases — creation-time only
-- DBName — subdatabase name, default "fts"
-- MaxDBs — LMDB max named databases, default 2
+- DBName — bucket name, default "fts"
+
+(bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 
 ## TxnHolder interface
 
-Records read from LMDB are tied to the transaction that read them. `TxnHolder` abstracts this — any value that carries a transaction implements it. Internal DB methods accept `TxnHolder` instead of raw `*lmdb.Txn`, so callers pass whatever they have (a CRecord, a transaction wrapper) without extraction or conversion.
+Records read from the index are tied to the transaction that read them. `TxnHolder` abstracts this — any value that carries the active bucket implements it. Internal DB methods accept `TxnHolder` instead of raw `*bbolt.Bucket`, so callers pass whatever they have (a CRecord, a bucket wrapper) without extraction or conversion. The bucket carries its transaction via `bucket.Tx()`.
 
 ```go
-// TxnHolder is anything that carries an LMDB transaction.
+// TxnHolder is anything that carries the index's bbolt bucket.
 type TxnHolder interface {
-    Txn() *lmdb.Txn
+    Bucket() *bbolt.Bucket
 }
 ```
 
-CRecord implements `TxnHolder` via its `Txn()` accessor. A simple `txnWrap` struct wraps raw transactions from View/Update blocks. Navigation methods like `CRecord.FileRecord(fileid)` pass `self` as the TxnHolder — no extraction needed.
+CRecord implements `TxnHolder` via its `Bucket()` accessor (and offers a `Tx() *bbolt.Tx` convenience that returns `bkt.Tx()`). A simple `bucketWrap` struct wraps raw buckets from View/Update blocks. Navigation methods like `CRecord.FileRecord(fileid)` pass `self` as the TxnHolder — no extraction needed.
 
 ## Record structs
 
-Go structs for each LMDB record type. Encoding/decoding lives in methods on the structs. The rest of the code works with typed data, not raw bytes.
+Go structs for each index record type. Encoding/decoding lives in methods on the structs. The rest of the code works with typed data, not raw bytes.
 
 ```go
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
-// Carries unexported db/txn — the chunk is tied to the transaction that read it.
-// Implements TxnHolder.
+// Carries unexported db/bkt — the chunk is tied to the bucket (and its
+// transaction) that read it. Implements TxnHolder.
 type CRecord struct {
     ChunkID  uint64
     Hash     [32]byte
@@ -411,21 +412,22 @@ type CRecord struct {
     Attrs    []Pair                  // opaque per-chunk metadata from chunker (timestamp, role, etc.)
     FileIDs  []uint64
     db       *DB                     // unexported: transaction context
-    txn      *lmdb.Txn              // unexported: transaction context
+    bkt      *bbolt.Bucket           // unexported: transaction context
 }
 
 // TxnHolder implementation + direct access for power-user filters.
-func (c *CRecord) Txn() *lmdb.Txn
+func (c *CRecord) Bucket() *bbolt.Bucket
+func (c *CRecord) Tx() *bbolt.Tx
 func (c *CRecord) DB() *DB
 
 // Convenience navigation — passes self as TxnHolder.
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error)
 
-// ReadCRecord fetches a CRecord by chunkID inside an existing txn.
-// The returned CRecord has db/txn attached so callers can use Txn(), DB(),
-// and FileRecord(fileid) on the result. Must be called inside a View or
-// Update txn — the txn is part of the CRecord and outlives the call.
-func (db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)
+// ReadCRecord fetches a CRecord by chunkID inside an existing tx.
+// The returned CRecord has db/bkt attached so callers can use Bucket(), Tx(),
+// DB(), and FileRecord(fileid) on the result. Must be called inside a View or
+// Update tx — the bucket is part of the CRecord and outlives the call.
+func (db *DB) ReadCRecord(tx *bbolt.Tx, chunkID uint64) (CRecord, error)
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
 type FRecord struct {
@@ -489,7 +491,7 @@ Built-in score functions: `ScoreOverlap` (matching trigram count), `ScoreBM25(id
 
 `ChunkFilter` receives the `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for per-trigram counts), so filtering adds a conditional check on data already in memory.
 
-The CRecord carries unexported `db` and `txn` fields — the chunk is inherently tied to the transaction that read it. `Txn()` and `DB()` accessors expose the context for power-user filters. `FileRecord(fileid)` is a convenience method for the common case.
+The CRecord carries unexported `db` and `bkt` fields — the chunk is inherently tied to the bucket (and its transaction) that read it. `Tx()` and `DB()` accessors expose the context for power-user filters. `FileRecord(fileid)` is a convenience method for the common case.
 
 ```go
 type ChunkFilter func(chunk CRecord) bool
@@ -619,7 +621,7 @@ The proximity bonus is computed as: for each pair of query terms found in the ch
 
 # Multi-Strategy Search
 
-`SearchMulti` runs one query through multiple scoring strategies in a single LMDB read transaction, sharing candidate collection. The candidate set (trigram intersection, T record reads, C record reads, chunk filter application) is computed once; only scoring diverges.
+`SearchMulti` runs one query through multiple scoring strategies in a single bbolt read transaction, sharing candidate collection. The candidate set (trigram intersection, T record reads, C record reads, chunk filter application) is computed once; only scoring diverges.
 
 ```go
 type MultiSearchResult struct {
@@ -760,15 +762,15 @@ A chunker may, in principle, replace more than just the last chunk. The current 
 
 # Ark Integration
 
-microfts2 and microvec share the same LMDB environment when used together in ark. LMDB does not allow two env handles on the same database path within one process, so the first library opened provides the env to the second.
+microfts2 and microvec share the same bbolt DB when used together in ark. bbolt allows one open `*bbolt.DB` per file; the first library opened shares it with the rest of the process, so the first library opened provides the handle to the second.
 
-## MaxDBs
+## Buckets
 
-LMDB requires `SetMaxDBs` before opening the environment. microfts2 uses 1 named subdatabase. When sharing the environment with other libraries (e.g. microvec), the host process needs a higher limit. `Options.MaxDBs` sets this, defaulting to 2.
+bbolt has no named-DB limit, so there is nothing to pre-size. microfts2 uses one bucket (default `fts`); other libraries (e.g. microvec) create their own buckets in the same `*bbolt.DB`. The former `MaxDBs`/`MapSize` options were removed — bbolt grows the file automatically.
 
-## Env accessor
+## DB accessor
 
-`Env()` returns the underlying `*lmdb.Env`. The host process opens microfts2 first, gets the env, and passes it to microvec.
+`DB()` returns the underlying `*bbolt.DB`. The host process opens microfts2 first, gets the handle, and passes it to microvec.
 
 ## Fileid surfacing
 
@@ -856,7 +858,7 @@ microfts2 ships stock filter functions:
 
 ### Trigram count lookup
 
-Per-query T record reads: look up each query trigram's document frequency from T record value length. Typically 3-10 LMDB reads per query.
+Per-query T record reads: look up each query trigram's document frequency from T record value length. Typically 3-10 index reads per query.
 
 The total chunk count is derived from the database (sum of file chunk counts from F records, or maintained as a counter).
 
@@ -1186,7 +1188,7 @@ Exact search first for precision. If no results, fall back to loose for recall.
 
 # Temporary Documents (tmp:// Overlay)
 
-An in-memory overlay that lets callers index content without writing files to disk. Temporary documents are searchable alongside disk-backed documents through the same query interface. The overlay never touches LMDB — all data lives in RAM and disappears when the DB handle is closed or the process exits.
+An in-memory overlay that lets callers index content without writing files to disk. Temporary documents are searchable alongside disk-backed documents through the same query interface. The overlay never touches the index — all data lives in RAM and disappears when the DB handle is closed or the process exits.
 
 ## URI Scheme
 
@@ -1194,11 +1196,11 @@ Temporary documents use `tmp://` paths: `tmp://SESSIONID/human-readable-name` (e
 
 ## FileID Allocation
 
-Temporary document fileids count down from `math.MaxUint64`. The overlay maintains its own counter starting at `math.MaxUint64` and decrementing for each new document. LMDB fileids count up from 1. The two ranges can never collide — structural guarantee, no coordination needed.
+Temporary document fileids count down from `math.MaxUint64`. The overlay maintains its own counter starting at `math.MaxUint64` and decrementing for each new document. Index fileids count up from 1. The two ranges can never collide — structural guarantee, no coordination needed.
 
 ## In-Memory Data
 
-The overlay holds the same data that LMDB holds for disk-backed files, but in Go maps:
+The overlay holds the same data that the index holds for disk-backed files, but in Go maps:
 
 - Per-chunk data: hash, trigram counts, token counts, attrs, fileids — equivalent to C records
 - Per-file data: chunk list with locations, token bag — equivalent to F records
@@ -1228,7 +1230,7 @@ func (db *DB) AddTmpFile(path, strategy string, content []byte) (uint64, error)
 - Returns the allocated fileid (counting down from MaxUint64)
 - Chunks the content using the named strategy, extracts trigrams and tokens, stores everything in the overlay
 - Chunk deduplication within the overlay — same content hash = same chunkid
-- No cross-dedup between overlay and LMDB (they have separate chunkid spaces)
+- No cross-dedup between overlay and the index (they have separate chunkid spaces)
 - `ErrAlreadyIndexed` if the path is already in the overlay
 
 ## Updating Documents
@@ -1280,10 +1282,10 @@ func (db *DB) RemoveTmpFile(path string) error
 
 ## Search Integration
 
-Searches always include the overlay. The search path queries both LMDB and the in-memory overlay, merging results into a single result set sorted by score.
+Searches always include the overlay. The search path queries both the index and the in-memory overlay, merging results into a single result set sorted by score.
 
 For each search:
-1. Collect candidates from LMDB (existing path — T record reads, C record reads, scoring)
+1. Collect candidates from the index (existing path — T record reads, C record reads, scoring)
 2. Collect candidates from overlay (same trigram intersection logic, against in-memory maps)
 3. Merge and sort by score descending
 4. Apply post-filters (verify, regex, proximity) to merged results
@@ -1342,11 +1344,11 @@ func WithExcept(ids map[uint64]struct{}) SearchOption  // exclude these fileids
 
 ## Thread Safety
 
-The overlay must be safe for concurrent reads. Writes (add/update/remove) are serialized. This matches LMDB's model: concurrent readers, one writer at a time. A `sync.RWMutex` on the overlay is sufficient.
+The overlay must be safe for concurrent reads. Writes (add/update/remove) are serialized. This matches bbolt's model: concurrent readers, one writer at a time. A `sync.RWMutex` on the overlay is sufficient.
 
 ## Corpus Counters
 
-The overlay maintains its own `totalChunks` and `totalTokens` counters. BM25 and other corpus-level computations sum LMDB counters and overlay counters to get the true corpus size.
+The overlay maintains its own `totalChunks` and `totalTokens` counters. BM25 and other corpus-level computations sum index counters and overlay counters to get the true corpus size.
 
 ## CLI
 
@@ -1380,7 +1382,7 @@ Opens a read transaction, iterates every key in the subdatabase, and accumulates
 func (db *DB) FileIDPaths() (map[uint64]string, error)
 ```
 
-Lazily loaded, incrementally maintained caches. First call scans F records using `UnmarshalFHeader` to populate both `pathCache` (fileid→path) and `pathToID` (path→fileid). Subsequent calls return directly from cache. AddFile, RemoveFile, and Reindex update both caches after their LMDB writes succeed. `lookupFileByPath` uses `pathToID` to skip the N record lookup when the cache is populated. Since microfts2 owns its subdatabase (dbi is unexported), no external writes can invalidate the caches.
+Lazily loaded, incrementally maintained caches. First call scans F records using `UnmarshalFHeader` to populate both `pathCache` (fileid→path) and `pathToID` (path→fileid). Subsequent calls return directly from cache. AddFile, RemoveFile, and Reindex update both caches after their index writes succeed. `lookupFileByPath` uses `pathToID` to skip the N record lookup when the cache is populated. Since microfts2 owns its bucket (the bucket name is fixed and the handle is unexported), no external writes can invalidate the caches.
 
 ## Partial F Record Unmarshal
 
@@ -1395,7 +1397,7 @@ Lazily loaded, incrementally maintained caches. First call scans F records using
 func (db *DB) NewSearchCache() func()
 ```
 
-Opt-in per-batch cache for callers that fuse multiple searches and lookups in the same goroutine. The caller activates the cache, runs a batch of operations (Search, FileInfoByID, etc.), then calls the cleanup function. `readFRecord` checks the cache before going to LMDB — same fileid returns the same FRecord without re-reading or re-deserializing.
+Opt-in per-batch cache for callers that fuse multiple searches and lookups in the same goroutine. The caller activates the cache, runs a batch of operations (Search, FileInfoByID, etc.), then calls the cleanup function. `readFRecord` checks the cache before going to the index — same fileid returns the same FRecord without re-reading or re-deserializing.
 
 # DB Copy and Cache Invalidation
 
@@ -1405,18 +1407,18 @@ Support for read/write path separation in a closure actor. The caller runs reads
 
 ```go
 // Copy returns a shallow copy of the DB suitable for indexing in a
-// separate goroutine. The copy shares the LMDB env, overlay, and
+// separate goroutine. The copy shares the bbolt handle, overlay, and
 // chunker registry. Caches are nil — the copy will lazy-load from
-// committed LMDB state if needed.
+// committed bbolt state if needed.
 func (db *DB) Copy() *DB
 ```
 
-- `env`: shared (same `*lmdb.Env`) — LMDB handles concurrent readers/single writer natively
-- `dbi`, `dbName`, `settings`, `trigrams`: shared (read-only or safe to share)
+- `bolt`: shared (same `*bbolt.DB`) — bbolt handles concurrent readers/single writer natively
+- `dbName`, `settings`, `trigrams`: shared (read-only or safe to share)
 - `overlay`: shared (has its own `sync.RWMutex`)
 - `chunkers`: shared (read-only during writes — only updated by config, which runs synchronously in the main actor)
 - `overlayOnce`: not copied — overlay is already initialized on the source, and the copy shares the overlay pointer directly
-- `pathCache`, `pathToID`, `frecordCache`: nil — forces lazy reload from committed LMDB state, avoids stale data from the source's cache
+- `pathCache`, `pathToID`, `frecordCache`: nil — forces lazy reload from committed bbolt state, avoids stale data from the source's cache
 
 The copy is short-lived: one write transaction, then discarded.
 
@@ -1654,24 +1656,24 @@ The per-file cache entry gains positional access and random-access scratch:
 
 # Remove File with Callback
 
-When microfts2 removes a file, some chunks become orphaned (no remaining file references). Callers that maintain their own LMDB records keyed by chunkid — in the same env, different subdatabase — need a hook to clean up those records transactionally. Without this, callers must track chunk→file mappings externally or accept stale records.
+When microfts2 removes a file, some chunks become orphaned (no remaining file references). Callers that maintain their own index records keyed by chunkid — in the same `*bbolt.DB`, different bucket — need a hook to clean up those records transactionally. Without this, callers must track chunk→file mappings externally or accept stale records.
 
 ## Design
 
 `RemoveFileWithCallback` wraps `RemoveFile` with a caller-supplied callback that fires inside the same write transaction, after orphaned chunks are identified and cleaned up from microfts2's records but before the transaction commits.
 
 ```go
-// RemoveCallback receives the LMDB write transaction and the list of
+// RemoveCallback receives the bbolt write transaction and the list of
 // chunk IDs that were orphaned (deleted from the index) during removal.
 // Returning a non-nil error aborts the entire transaction.
-type RemoveCallback func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error
+type RemoveCallback func(tx *bbolt.Tx, orphanedChunkIDs []uint64) error
 
 func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
 ```
 
-- `fn` receives the raw `*lmdb.Txn` and a slice of orphaned chunkids — chunks that were fully removed from the index because the removed file was their last reference
+- `fn` receives the raw `*bbolt.Tx` and a slice of orphaned chunkids — chunks that were fully removed from the index because the removed file was their last reference
 - Chunks still referenced by other files (dedup survivors) are not included — their C records were updated but not deleted
-- The callback runs inside the write transaction — `fn` can read/write any subdatabase in the same env
+- The callback runs inside the write transaction — `fn` can read/write any bucket in the same `*bbolt.DB`
 - If `fn` returns a non-nil error, the entire transaction aborts — both microfts2's removals and the caller's changes roll back atomically
 - If `fn` is nil, behavior is identical to `RemoveFile`
 - No orphaned chunks (all chunks shared with other files) → `fn` is called with an empty slice
@@ -1686,18 +1688,18 @@ Same pattern as `RemoveFileWithCallback`, but for reindex. Reindexing is a remov
 `ReindexWithCallback` wraps `Reindex` with a caller-supplied callback that fires inside the write transaction, after both the remove and add steps complete but before the transaction commits.
 
 ```go
-// ReindexCallback receives the LMDB write transaction, the chunk IDs
+// ReindexCallback receives the bbolt write transaction, the chunk IDs
 // orphaned during removal of the old indexing, and the chunk IDs
 // present in the newly re-indexed file.
 // Returning a non-nil error aborts the entire transaction.
-type ReindexCallback func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error
+type ReindexCallback func(tx *bbolt.Tx, orphanedChunkIDs, newChunkIDs []uint64) error
 
 func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
 ```
 
 - `orphanedChunkIDs`: chunks fully removed from the index because the old file was their last reference (same semantics as `RemoveCallback`)
 - `newChunkIDs`: all chunk IDs in the re-indexed file, in chunk-list order — includes dedup hits (chunks shared with other files), not just genuinely new allocations. The caller needs every chunk ID to create its own per-chunk records
-- The callback runs inside the write transaction — `fn` can read/write any subdatabase in the same env
+- The callback runs inside the write transaction — `fn` can read/write any bucket in the same `*bbolt.DB`
 - If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
 - If `fn` is nil, behavior is identical to `Reindex`
 - Cache invalidation (pathCache, pathToID) happens after the transaction commits, same as `Reindex`

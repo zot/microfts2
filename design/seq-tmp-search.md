@@ -1,17 +1,17 @@
 # Sequence: Search with Overlay
 **Requirements:** R366, R367, R368, R369, R370, R372, R374
 
-## Search (merged LMDB + overlay)
+## Search (merged index + overlay)
 
 ```
-Caller              DB                    Overlay               LMDB
+Caller              DB                    Overlay               index
   |                  |                       |                      |
   |--Search--------->|                       |                      |
   |  (query, opts)   |                       |                      |
   |                  |--extract trigrams     |                      |
   |                  |--apply TrigramFilter  |                      |
   |                  |                       |                      |
-  |                  |  --- LMDB candidates ---                     |
+  |                  |  --- index candidates ---                    |
   |                  |--View txn------------>|                      |
   |                  |  read T records       |                      |
   |                  |  intersect chunkids   |                      |
@@ -19,7 +19,7 @@ Caller              DB                    Overlay               LMDB
   |                  |  apply ChunkFilter    |                      |
   |                  |  apply WithOnly/Except|                      |
   |                  |  score candidates     |                      |
-  |                  |<--lmdb candidates-----|                      |
+  |                  |<--index candidates----|                      |
   |                  |                       |                      |
   |                  |  --- Overlay candidates ---                  |
   |                  |--searchCandidates---->|                      |
@@ -42,7 +42,7 @@ Caller              DB                    Overlay               LMDB
   |                  |                       |                      |
   |                  |  --- Post-filters ---  |                      |
   |                  |--if verify/regex:     |                      |
-  |                  |  for lmdb results:    |                      |
+  |                  |  for index results:   |                      |
   |                  |    re-chunk from disk  |                      |
   |                  |  for overlay results: |                      |
   |                  |    chunk from stored   |                      |
@@ -68,7 +68,7 @@ Caller              DB                    Overlay
 ## BM25 with overlay counters
 
 ```
-Caller              DB                    Overlay               LMDB
+Caller              DB                    Overlay               index
   |                  |                       |                      |
   |--BM25Func------->|                       |                      |
   |  (queryTrigrams) |                       |                      |
@@ -79,7 +79,7 @@ Caller              DB                    Overlay               LMDB
   |                  |--counters()---------->|                      |
   |                  |                       |--return overlay      |
   |                  |                       |  totalChunks,Tokens  |
-  |                  |--sum LMDB + overlay   |                      |
+  |                  |--sum index + overlay  |                      |
   |                  |  for avgdl            |                      |
   |                  |--build ScoreBM25      |                      |
   |<--ScoreFunc------|                       |                      |
@@ -104,7 +104,7 @@ Caller              DB/ChunkCache         Overlay
   |                  |                       |
   |                  |  no (disk file):      |
   |                  |  existing path via    |
-  |                  |  LMDB N/F records     |
+  |                  |  index N/F records    |
   |                  |                       |
   |<--[]ChunkResult--|                       |
 ```

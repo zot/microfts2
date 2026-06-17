@@ -72,12 +72,12 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] O10: No test for WithAfter/WithBefore date filtering (needs chunker producing Attrs with timestamp)
 - [x] O11: Implementation: db.go needs full rewrite for new record layout (single subdatabase, chunk dedup, record structs, T/W records, ChunkFilter)
 - [ ] O12: SearchOption enumeration not fully anchored in requirements — WithOnly and WithExcept exist in code without spec/requirement coverage; audit all SearchOptions against requirements
-- [ ] O13: ChunkFilter on overlay candidates lacks LMDB transaction context — filters using Txn() or FileRecord() will get zero values on tmp:// chunks
+- [ ] O13: ChunkFilter on overlay candidates lacks index transaction context — filters using Tx() or FileRecord() will get zero values on tmp:// chunks
 - [x] O14: ~~R417: Bigram OR-union candidate set size unbounded — monitor performance on large corpora, add filtering if needed~~ — moot; bigram index removed (A4)
 - [x] O15: ~~resolveChunkText and chunkTextByRangeFile defined but not called~~ — resolved by removing ChunkTexter entirely; RandomAccessChunker (R524) supersedes it
 - [x] O16: All four built-in text chunkers (`LineChunker`, `MarkdownChunker`, `BracketChunker`, `IndentChunker`) implement `AppendAwareChunker` via the shared `appendByRechunkResume` helper, and all four implement `FileChunker` via the shared `fileChunksByRead` helper (R633, R636). The `DB.AppendChunks` silent-no-op guard (R623, `ErrAppendBoundary`) catches the case where a non-AppendAware custom chunker is used and produces no chunks for non-empty input.
 - T1: R308 retired by R309 (2026-05-04 BracketLang unification: StringDelim folded into BracketGroup via Escape+AllowedInner+AllowedParent)
-- [ ] O17: ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is LMDB-only — pre-existing); tmp:// retrieval goes through getChunksTmp instead, which surfaces overlay-stored Attrs (R655). If ChunkCache gains tmp:// support it must read overlay Attrs the same way.
+- [ ] O17: ChunkCache.ChunkText cannot serve tmp:// paths (lookupFileByPath is index-only — pre-existing); tmp:// retrieval goes through getChunksTmp instead, which surfaces overlay-stored Attrs (R655). If ChunkCache gains tmp:// support it must read overlay Attrs the same way.
 - T2: R648 retired by R655 (2026-06-03 content-transform-index-only: retrieval no longer transforms; returns original content)
 - T3: R651 retired by R655 (2026-06-03 content-transform-index-only: fast path reads stored C-record Attrs, no transform repopulation)
 - T4: R652 retired by R656 (2026-06-03 content-transform-index-only: dedup hash over original Content only, Attrs dropped from hash)
@@ -131,3 +131,11 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T52: R414 retired (2026-06-12 bigram-removed (design.md A4); SearchFuzzy supersedes)
 - T53: R415 retired (2026-06-12 bigram-removed (design.md A4); SearchFuzzy supersedes)
 - T54: R416 retired (2026-06-12 bigram-removed (design.md A4); SearchFuzzy supersedes)
+- T55: R91 retired by R661 (2026-06-15 lmdb-to-bbolt: R91 LMDB API/contract -> R661 bbolt)
+- T56: R101 retired by R666 (2026-06-15 lmdb-to-bbolt: R101 LMDB API/contract -> R666 bbolt)
+- T57: R264 retired by R663 (2026-06-15 lmdb-to-bbolt: R264 LMDB API/contract -> R663 bbolt)
+- T58: R571 retired by R664 (2026-06-15 lmdb-to-bbolt: R571 LMDB API/contract -> R664 bbolt)
+- T59: R2 retired by R660 (2026-06-15 lmdb-to-bbolt: R2 LMDB API/contract -> R660 bbolt)
+- T60: R218 retired by R662 (2026-06-15 lmdb-to-bbolt: R218 LMDB API/contract -> R662 bbolt)
+- T61: R546 retired by R665 (2026-06-15 lmdb-to-bbolt: R546 LMDB API/contract -> R665 bbolt)
+- T62: R555 retired by R665 (2026-06-15 lmdb-to-bbolt: R555 LMDB API/contract -> R665 bbolt)

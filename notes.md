@@ -25,7 +25,7 @@
   - Take top N from each strategy, merge and deduplicate
   - Chunks scoring well across multiple strategies are high confidence
   - All pure FTS — no vectors, no model loading, parallelizable
-  - **All data already in LMDB trigram index:**
+  - **All data already in the trigram index:**
     - Token overlap: decompose query to trigrams, count matches per chunk (AND→OR)
     - BM25: TF is in chunk trigram list, IDF from global trigram counts (already maintained for cutoff percentile)
     - Trigram density: matched / total trigrams per chunk — both in index
@@ -45,7 +45,7 @@ appear in the chunk's T-record bitset.
 
 Change index records to `[trigram:3][count:varint][fileid:8][chunknum:8]`.
 Count is how many times this trigram appears in this chunk. With count in
-the key between trigram and fileid, LMDB cursor scan for a trigram returns
+the key between trigram and fileid, an index cursor scan for a trigram returns
 chunks ordered by occurrence count — high-count chunks first, enabling
 early termination for top-k.
 
