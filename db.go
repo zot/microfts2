@@ -507,6 +507,12 @@ type Options struct {
 	CaseInsensitive bool
 	Aliases         map[byte]byte // maps input bytes to replacement bytes before trigram extraction
 	DBName          string        // subdatabase name, default "fts"
+	// Timeout bounds how long Open/Create waits for the bbolt file lock
+	// before returning bbolt.ErrTimeout. Zero blocks until the lock is
+	// available (bbolt default). The index is single-process; a bounded
+	// timeout lets a second opener fail fast instead of hanging while
+	// another holds the DB. R672
+	Timeout time.Duration
 }
 
 func (o *Options) dbNameOrDefault() string {
@@ -931,7 +937,8 @@ func Create(path string, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("create: %w", err)
 	}
 
-	boltDB, err := bbolt.Open(path, 0644, nil)
+	// R672: bounded lock wait (zero = block forever, bbolt default)
+	boltDB, err := bbolt.Open(path, 0644, &bbolt.Options{Timeout: opts.Timeout})
 	if err != nil {
 		return nil, fmt.Errorf("bbolt Open %s: %w", path, err)
 	}
@@ -990,7 +997,8 @@ func Open(path string, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 
-	boltDB, err := bbolt.Open(path, 0644, nil)
+	// R672: bounded lock wait (zero = block forever, bbolt default)
+	boltDB, err := bbolt.Open(path, 0644, &bbolt.Options{Timeout: opts.Timeout})
 	if err != nil {
 		return nil, fmt.Errorf("bbolt Open %s: %w", path, err)
 	}

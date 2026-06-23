@@ -379,6 +379,11 @@ FuncChunker: adapter that wraps a ChunkFunc into a Chunker (ChunkText re-runs an
 Options:
 - CaseInsensitive, Aliases — creation-time only
 - DBName — bucket name, default "fts"
+- Timeout — bounds how long Open/Create waits for the bbolt file lock
+  before returning bbolt.ErrTimeout; zero blocks until the lock frees
+  (bbolt default). The index is single-process, so a bounded timeout
+  lets a second opener fail fast instead of hanging while another holds
+  the DB.
 
 (bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 
