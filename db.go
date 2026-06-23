@@ -1740,13 +1740,26 @@ func (db *DB) dropFromChunkRef(
 	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
-// R254: Remove via F record → C records → T/W cleanup for orphaned chunks
-func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallback) ([]uint64, error) {
-	fileid, frec, err := db.lookupFileByPath(th, fpath)
-	if err != nil {
-		return nil, err
+// deleteFileMeta deletes a file's F record and N key chain only, leaving its
+// chunks alone. Shared by removeFileInTxn (final step) and reindexCore (frees
+// the path before addFileInTxn re-adds the new chunks under a fresh fileid).
+// CRC: crc-DB.md | R254, R673
+func (db *DB) deleteFileMeta(th TxnHolder, fileid uint64, fpath string) {
+	b := th.Bucket()
+	b.Delete(makeFKey(fileid))
+	for _, pair := range EncodeFilename(fpath) {
+		b.Delete(pair.Key)
 	}
+}
 
+// dropFileChunkOccurrences drops one file's occurrences from each of its chunks'
+// C records (seen-deduped over the F record chunk list, removeFileID per chunk),
+// orphan-cascades chunks that lose their last reference, decrements the corpus
+// counters, and returns the orphaned chunkids. Does not touch F/N records.
+// Shared by removeFileInTxn (whole-file removal) and reindexCore (dropping the
+// old fileid's occurrences after the new chunks were re-added).
+// CRC: crc-DB.md | R254, R673
+func (db *DB) dropFileChunkOccurrences(th TxnHolder, frec FRecord, fileid uint64, rcb RemovedChunkCallback) ([]uint64, error) {
 	var orphanedChunkIDs []uint64
 	var removedChunks int64
 	var removedTokens int64
@@ -1774,13 +1787,20 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallba
 			return nil, err
 		}
 	}
+	return orphanedChunkIDs, nil
+}
 
-	// Delete F record and N records (key chain)
-	b := th.Bucket()
-	b.Delete(makeFKey(fileid))
-	for _, pair := range EncodeFilename(fpath) {
-		b.Delete(pair.Key)
+// R254: Remove via F record → C records → T/W cleanup for orphaned chunks
+func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallback) ([]uint64, error) {
+	fileid, frec, err := db.lookupFileByPath(th, fpath)
+	if err != nil {
+		return nil, err
 	}
+	orphanedChunkIDs, err := db.dropFileChunkOccurrences(th, frec, fileid, rcb)
+	if err != nil {
+		return nil, err
+	}
+	db.deleteFileMeta(th, fileid, fpath)
 	return orphanedChunkIDs, nil
 }
 
@@ -1814,13 +1834,21 @@ func (db *DB) ReindexWithContent(fpath, strategy string, opts ...IndexOption) (u
 	return db.reindexCore(fpath, strategy, cfg.chunkCallback, nil, cfg.indexedChunkCallback, cfg.removedChunkCallback)
 }
 
+// CRC: crc-DB.md | R556, R673
 func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexCallback, ich IndexedChunkCallback, rmcb RemovedChunkCallback) (uint64, []byte, error) {
 	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
 		return 0, nil, err
 	}
 
-	// Single transaction: remove old records then add new ones
+	// R673: add the new chunks before dropping the old file's occurrences so
+	// unchanged content keeps its chunkid. Only F+N metadata is deleted up
+	// front (freeing the path for the re-add); the old chunks' H records
+	// survive into addFileInTxn, so a chunk whose content hash is unchanged
+	// dedup-hits and reuses its chunkid while new content allocates a fresh
+	// one. Dropping the old fileid's occurrences afterward keeps surviving
+	// content (re-added under the new fileid) and orphans content gone from
+	// the file.
 	var fileid uint64
 	err = db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
@@ -1828,15 +1856,20 @@ func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexC
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		th := bucketWrap{b}
-		orphans, err := db.removeFileInTxn(th, fpath, rmcb)
+		oldFileID, oldFrec, err := db.lookupFileByPath(th, fpath)
 		if err != nil {
 			return err
 		}
+		db.deleteFileMeta(th, oldFileID, fpath)
 		var newChunkIDs []uint64
 		var txnErr error
 		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)), ich)
 		if txnErr != nil {
 			return txnErr
+		}
+		orphans, err := db.dropFileChunkOccurrences(th, oldFrec, oldFileID, rmcb)
+		if err != nil {
+			return err
 		}
 		if rcb != nil {
 			return rcb(tx, orphans, newChunkIDs)

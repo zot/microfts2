@@ -865,6 +865,7 @@
 - **R560:** If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
 - **R561:** If `fn` is nil, behavior is identical to `Reindex`
 - **R562:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `Reindex`
+- **R673:** Reindex preserves chunkids for unchanged content. `reindexCore` re-chunks the new content, deletes only the old file's F and N records (path metadata, not its chunks), adds the new chunks (the old chunks' H records still exist, so a chunk whose content hash is unchanged is a dedup hit that keeps its chunkid while genuinely new content allocates a fresh chunkid), then drops the old fileid's occurrences from the old chunk list (content that survived was re-added under the new fileid and lives on; content gone from the file loses its last reference and orphan-cascades). Net effect: only new content allocates a chunkid and only removed content is orphaned, so chunkid-keyed external state (e.g. an EC embedding) survives an edit that leaves a chunk untouched
 
 ## Feature: Chunk Locator
 **Source:** specs/main.md

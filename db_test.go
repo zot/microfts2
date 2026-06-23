@@ -315,6 +315,76 @@ func TestReindexWithCallbackNil(t *testing.T) {
 	}
 }
 
+// R673: editing one line of a file must leave the other lines' chunkids
+// untouched, so chunkid-keyed external state (embeddings) survives the edit.
+func TestReindexPreservesUnchangedChunkIDs(t *testing.T) {
+	db, dir := testDB(t)
+
+	// Three distinct lines → three distinct chunks under the line strategy.
+	fp := writeTestFile(t, dir, "notes.md", "alpha first line\nbeta second line\ngamma third line\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(before.Chunks))
+	}
+	oldIDs := []uint64{before.Chunks[0].ChunkID, before.Chunks[1].ChunkID, before.Chunks[2].ChunkID}
+
+	// Edit only the middle line; lines 1 and 3 stay byte-identical.
+	writeTestFile(t, dir, "notes.md", "alpha first line\nbeta SECOND edited\ngamma third line\n")
+
+	var orphans, newIDs []uint64
+	newFileid, err := db.ReindexWithCallback(fp, "line", func(tx *bbolt.Tx, orph, nw []uint64) error {
+		orphans = append(orphans, orph...)
+		newIDs = append(newIDs, nw...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := db.FileInfoByID(newFileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Chunks) != 3 {
+		t.Fatalf("expected 3 chunks after reindex, got %d", len(after.Chunks))
+	}
+	gotIDs := []uint64{after.Chunks[0].ChunkID, after.Chunks[1].ChunkID, after.Chunks[2].ChunkID}
+
+	// Unchanged lines keep their chunkids.
+	if gotIDs[0] != oldIDs[0] {
+		t.Errorf("line 1 chunkid changed: was %d, now %d", oldIDs[0], gotIDs[0])
+	}
+	if gotIDs[2] != oldIDs[2] {
+		t.Errorf("line 3 chunkid changed: was %d, now %d", oldIDs[2], gotIDs[2])
+	}
+	// The edited line gets a fresh chunkid.
+	if gotIDs[1] == oldIDs[1] {
+		t.Errorf("edited line 2 should have a new chunkid, still %d", gotIDs[1])
+	}
+
+	// Only the old line-2 chunk is orphaned.
+	if len(orphans) != 1 || orphans[0] != oldIDs[1] {
+		t.Errorf("expected orphans [%d], got %v", oldIDs[1], orphans)
+	}
+	// newChunkIDs reports the full chunk list (R558), including the new line-2 id.
+	foundNew := false
+	for _, id := range newIDs {
+		if id == gotIDs[1] {
+			foundNew = true
+		}
+	}
+	if !foundNew {
+		t.Errorf("new chunkid %d not in reported newIDs %v", gotIDs[1], newIDs)
+	}
+}
+
 func TestDBLongFilename(t *testing.T) {
 	db, dir := testDB(t)
 	// Create a deeply nested directory to get a path > 511 bytes

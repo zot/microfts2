@@ -182,6 +182,8 @@ When removing a file:
 
 The same orphan-cascade logic is used by append-merge's drop-and-replace path (see `AppendAwareChunker` below): a chunk dropped from a single file decrements that fileid's count, with the same C/T/W/H cleanup if it was the last reference.
 
+When reindexing a file (re-chunking it after an edit), preserve the chunkids of unchanged content. Re-chunk the new content, then delete only the old file's F and N records — the path metadata, not its chunks. Add the new chunks next: the old chunks' H records still exist, so a chunk whose content (hash) is unchanged is a dedup hit that keeps its chunkid, while genuinely new content allocates a fresh chunkid. Finally drop the old fileid's occurrences from the old chunk list. Chunks whose content survived were just re-added under the new fileid, so they live on; chunks whose content is gone lose their last reference and orphan-cascade as when removing a file. The net effect is a content diff, so chunkid-keyed external state (an embedding keyed by chunkid, say) survives an edit that leaves a chunk untouched.
+
 When searching for a literal string:
 - trim leading and trailing whitespace from the query before trigram extraction
 - parse the query into terms using `parseQueryTerms`: unquoted words split on spaces, double-quoted phrases treated as single terms with quotes stripped
@@ -1686,15 +1688,15 @@ func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
 
 # Reindex File with Callback
 
-Same pattern as `RemoveFileWithCallback`, but for reindex. Reindexing is a remove-then-add in one transaction — the callback receives both orphaned chunk IDs from the old indexing and the new chunk IDs from re-indexing, so the caller can clean up stale records and create new ones atomically.
+Same pattern as `RemoveFileWithCallback`, but for reindex. Reindexing is a content diff in one transaction (see "When reindexing a file" above): unchanged content keeps its chunkid, so `orphanedChunkIDs` holds only the chunks whose content is gone from the file (their last reference dropped) and `newChunkIDs` holds the re-indexed file's chunk list. The caller cleans up stale records and creates new ones atomically, and chunkid-keyed external state for unchanged content is left untouched.
 
 ## Design
 
-`ReindexWithCallback` wraps `Reindex` with a caller-supplied callback that fires inside the write transaction, after both the remove and add steps complete but before the transaction commits.
+`ReindexWithCallback` wraps `Reindex` with a caller-supplied callback that fires inside the write transaction, after the new chunks are added and the old fileid's occurrences dropped, but before the transaction commits.
 
 ```go
 // ReindexCallback receives the bbolt write transaction, the chunk IDs
-// orphaned during removal of the old indexing, and the chunk IDs
+// orphaned because their content is gone from the file, and the chunk IDs
 // present in the newly re-indexed file.
 // Returning a non-nil error aborts the entire transaction.
 type ReindexCallback func(tx *bbolt.Tx, orphanedChunkIDs, newChunkIDs []uint64) error
