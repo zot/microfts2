@@ -59,6 +59,15 @@ then open only the specs it points you to.
   and cache invalidation.
 - [`cli.md`](cli.md) — CLI subcommands and flags.
 
+## Removed features
+
+- [`deleted.md`](deleted.md) — capabilities microfts2 deliberately does not
+  have, and why. Registry of removed features with their retired requirement
+  ranges, so a feature that was tried and rejected cannot be quietly
+  re-proposed. Also the `**Source:**` for any feature whose requirements are
+  *all* retired — pointing those at the spec that replaced them would misstate
+  what that spec covers.
+
 ## Summary specs
 
 None yet. Note that CLI flags introduced by a feature are documented in that
@@ -102,6 +111,7 @@ order. None in flight.
 - [`complete/001-lmdb-to-bbolt.md`](migrations/complete/001-lmdb-to-bbolt.md) —
   LMDB → bbolt store port (2026-06-12, v0.4.0).
 - [`complete/002-bigram-index-removed.md`](migrations/complete/002-bigram-index-removed.md)
-  — the retired bigram index spec (removed 2026-03-22; recorded later, so its
-  number is recording order, not landing order). Kept so retired requirements
-  R379–R416 resolve. Describes behavior microfts2 no longer has.
+  — the retired bigram index spec in full (removed 2026-03-22; recorded later,
+  so its number is recording order, not landing order). Summarized in
+  [`deleted.md`](deleted.md), which is what R379–R416 cite; this is the detail
+  behind that entry. Describes behavior microfts2 no longer has.

@@ -176,7 +176,7 @@
 - **R35:** Library returns struct slices with file path, range string, score
 
 ## Feature: Index Computation
-**Source:** specs/indexing.md
+**Source:** specs/deleted.md
 
 - **R36:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
 
@@ -286,12 +286,12 @@
 - **R109:** ~~removed: N record chunkRanges/chunkTokenCounts replaced by F record chunk list and C record token counts~~
 
 ## Feature: MaxDBs Option
-**Source:** specs/api.md
+**Source:** specs/deleted.md
 
 - **~~R101:~~** (Retired T56 — see R666) `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
 
 ## Feature: Encoding
-**Source:** specs/storage.md
+**Source:** specs/deleted.md
 
 - **R123:** ~~removed: old C record BigEndian replaced by varint encoding~~
 
@@ -650,7 +650,7 @@
 - **R442:** Empty chunk result from chunking is a no-op — returns fileid, nil
 
 ## Feature: Bigram Index (removed)
-**Source:** specs/migrations/complete/002-bigram-index-removed.md
+**Source:** specs/deleted.md
 
 - **~~R379:~~** (Retired T17 — no replacement) Bigram indexing is on by default; `--no-bigrams` flag at `init` disables it
 - **~~R380:~~** (Retired T18 — no replacement) Bigram enabled/disabled setting stored in an I record; checked at index time to gate B record writes and C record bigram section
