@@ -5,9 +5,9 @@ description: "**MANDATORY: Invoke BEFORE writing or modifying any code.** Withou
 
 # Mini-spec
 
-## Design Docs First — Not Code
+## Load the model first
 
-**When understanding a feature or planning a change, start with `design/design.md` and the relevant CRC cards/sequences BEFORE using code exploration tools.** Design docs are the project index — they show component relationships, responsibilities, and code file mappings more efficiently than code search. Only drop into code-level tools (Serena, Grep, etc.) after the design docs have oriented you.
+**IMMEDIATELY invoke `/minimap` using the Skill tool before doing anything else.** It carries the structural *model* this skill builds on: the 3-level spec→design→code layout, what each level is for, where artifacts live, the **root spec index**, what a **summary spec** is, and the **traceability links** (`Rn` → CRC card → code `// CRC:/Seq:` comment) that stitch the levels together. Start at the design docs and the root index, not at code — drop into code-level tools (Serena, Grep, etc.) only after they've oriented you. This skill adds the **process** — phases, traceability *maintenance*, gaps, migrations, trajectory tracking — on top of that model.
 
 ## Prerequisite: Version Check and Comment Patterns
 
@@ -47,46 +47,11 @@ Migrations are temporary by design — see "Migration Workflow" below.
 
 ---
 
-## Overview
+## Why the levels matter
 
-3-level architecture: specs → design → code.
-
-```
-specs/                # Human intent — current state of the project, in the user's own words
-  migrations/         # In-flight migrations — temporary, get moved on completion
-    complete/         # Completed migrations, numbered in landing order
-design/               # AI translation — requirements.md, crc-*, seq-*, ui-*, test-*, manifest-ui.md
-docs/                 # user-manual.md, developer-guide.md
-src/                  # Code with traceability comments
-```
-
-### What each level is for
-
-**Specs** are the human's voice. They describe what the system should
-do in natural language, organized by feature area. The user writes or
-approves them. They communicate intent — not implementation, not
-internal structure. A spec should read like someone explaining the
-feature to a colleague. For libraries, API signatures belong in specs
-because they *are* the face of the project — they must be agreed upon
-before design begins. Specs must state the language and environment
-so the AI knows what it's building for.
-
-Most specs are **per-feature** — one spec, one capability, one cohesive
-slice of behavior. A second kind, **summary specs**, indexes existing
-behavior along a cross-cutting axis (CLI surface, storage layout, API
-set, capabilities) without introducing any new behavior of its own.
-See *Summary specs* below.
-
-**Design** is the AI's translation of specs into buildable structure.
-Requirements extract testable statements. CRC cards assign
-responsibilities to components. Sequences show how components
-interact. The user reviews this translation before code is written —
-catching a misunderstanding here costs minutes, not hours.
-
-**Code** implements the design with traceability comments linking back
-to the design artifacts that justify each component's existence.
-
-### Why this matters
+(*The 3-level model itself — what specs, design, and code each are, and where
+they live — is in `/minimap`. This skill is the **process** that builds and
+maintains them.*)
 
 Each level exists because skipping it has a concrete cost:
 
@@ -98,23 +63,11 @@ Each level exists because skipping it has a concrete cost:
 
 The phases are not ceremony. They are cheaper than debugging a misunderstood requirement after 500 lines of code.
 
-### Summary specs
+## Summary specs — maintenance
 
-A **summary spec** is a spec that doesn't introduce behavior — it
-*indexes* behavior owned by per-feature specs, along one cross-cutting
-axis. Per-feature specs answer "what does this feature do?"; summary
-specs answer "what's the full set of X in this project?"
-
-Examples that recur across projects:
-
-- A **CLI inventory** spec lists every subcommand and flag (e.g.
-  `specs/cli-commands.md`).
-- A **storage layout** spec lists every record class with key/value
-  layout (e.g. `specs/record-formats.md`).
-- An **API surface** spec lists every public binding exposed to a
-  scripting or extension layer (e.g. `specs/lua-api.md`).
-- A **capabilities** spec lists every named feature with motivation
-  and objective (e.g. `specs/features.md`).
+(*What a summary spec **is**, and the recurring kinds — CLI inventory, storage
+layout, API surface, capabilities — are in `/minimap`. This is the maintenance
+side: when to create one, and how to keep it true.*)
 
 When to create one:
 
@@ -162,6 +115,7 @@ TaskCreate: "Update design docs"
 - write idiomatic code for the language you use
 - avoid holding locks in sections that have significant functionality
 - **No unanchored design:** every design artifact must trace back to a spec item and requirement. If you need to add something to the design, add it to specs first, then requirements, then design. This applies regardless of direction — even when documenting existing code, verify the spec anchor exists before updating design. This prevents features from existing only in the AI's interpretation.
+- **Supersede at the source:** the mirror of "No unanchored design." A change is complete only when every directive describing the *old* behavior is removed or rewritten **at its source** — across specs, requirements, AND design prose. Anchoring keeps features from vanishing; superseding keeps stale directives from causing reverts: a future agent reads a leftover spec sentence or design bullet as current intent and "fixes" the code back to match, undoing the change that obsoleted it. Completion test for any change: could an agent reading only specs + design be led to undo it? If yes, a trap remains.
 - in HTML, use the slimmest DOM Possible. Fewer elements makes everything in the browser better: less memory, more speed, better responsiveness
 
 ### Why anchoring matters
@@ -177,6 +131,20 @@ Anchoring is cheap (a few lines of spec + a requirement number). The cost
 of *not* anchoring is discovering, three sessions later, that a feature
 vanished during an unrelated refactor and no one noticed because the design
 never mentioned it. The spec is the pin that says "this must survive."
+
+### Why superseding matters
+
+Anchoring and superseding guard opposite failure directions. Anchoring fights
+*omission* — a feature with no spec silently disappears. Superseding fights
+*contradiction* — a directive that outlived the behavior it described silently
+reappears. The second is the more dangerous: a contradiction in the design is a
+trap that springs in the *revert* direction. A retired requirement has a forcing
+function (the `retire` command strikes it through, appends the Tn, and prints a
+reconcile reminder), but the *prose* that spawned it — the originating spec
+sentence, the CRC bullet, the sequence step — has none. It rots in place until a
+future agent reads it as current intent and "fixes" the code back to match. So
+retirement is not done when the `Rn` is struck out; it is done when every
+sentence that described the old behavior is gone or rewritten at its source.
 
 ## Cross-cutting Concerns
 
@@ -214,6 +182,14 @@ area. Specs are the user's intent in their own words. For applications,
 this means behavior and user-facing concepts. For libraries, include
 the public API signatures — they are the contract that design must
 satisfy. Do not include internal structure or implementation choices.
+
+**Reconcile the root spec index.** Whenever you add, rename, or retire a
+per-feature spec, straighten out the root index (the project's
+`specs/index.md`) in the same pass: create it if it doesn't exist yet, then
+make sure every spec has an entry under a system, with new summary specs and
+themes registered. Run `~/.claude/bin/minispec query unindexed-specs` — it
+lists any per-feature spec missing from the index (the spec-level analog of
+`query uncovered`); the pass is clean when that list is empty.
 
 **Upon completion**, run `~/.claude/bin/minispec phase spec` to verify spec files exist, then offer Requirements Phase. Do not jump to Design.
 
@@ -264,6 +240,20 @@ Use minispec to add requirement references:
 ```bash
 ~/.claude/bin/minispec update add-ref crc-Store.md R5
 ```
+
+**Where requirement refs count.** `minispec validate` computes
+requirements→design coverage from each CRC card's **top-line
+`**Requirements:**` field only** (plus approved gaps). Refs written
+anywhere else in the card body — e.g. a per-method `(R5, R6)`
+annotation on a `## Does` bullet — are documentation; the validator
+does not parse them, so they earn a requirement no coverage. A
+requirement counts as covered only when it appears in some artifact's
+top-line field, which is what `add-ref` maintains. Body-level
+annotations are fine as human notes, but never let them be the *only*
+home for a ref. (Requirements→code coverage is separate: it comes
+from inline `Rn` refs in code traceability comments. Retired
+requirements are skipped by both coverage checks yet still resolve as
+references, so a ref to a retired Rn is never flagged as unknown.)
 
 **Artifacts Format** (must be exact for `minispec` tool parsing):
 ```markdown
@@ -321,6 +311,45 @@ add(data): Item {
 
 The third `| Rn, Rn` section is optional but recommended — it links specific code locations directly to requirements, enabling implementation coverage validation.
 
+**What counts as an inline `Rn` ref (v2.10.0+).** `minispec validate`
+harvests implementation refs from two comment shapes:
+
+1. **The tail of a `// CRC:` line** — `// CRC: <card> | Seq: <seq> | R5, R12`.
+   The parser is `<comment-prefix>CRC:\s*<card>(\| Seq: <seq>)?<rest>`
+   and pulls every `Rn` from `<rest>`.
+2. **A bare annotation that *leads* with the ref(s)** right after the
+   comment leader: `// R5: desc`, `// R5, R6`, or a trailing
+   `foo() // R7`. The leading comma-separated refs count. This credits
+   the deliberate field/line annotations that sit beside a type's or
+   function's `// CRC:` header.
+
+**Ranges (v2.11.0+).** Both shapes expand `Rn-Rm` **range** syntax into
+every member, so `// R5-R8` counts R5, R6, R7, and R8 — no need to spell
+out a long contiguous span. The second `R` is optional (`R5-8`), ranges
+and comma lists mix freely (`// R5-R7, R10`), and a reversed range
+(`R8-R5`) contributes only the low ref.
+
+The `<comment-prefix>` is the file's line-comment leader and is
+**language-dependent**: `//` for Go/JS/TS/C, `--` for Lua, `#` for
+shell/Python, `<!--` for Markdown/HTML, `/*` for CSS. Run `minispec
+query comment-patterns` for the per-extension list (and the
+block-comment closers below). The examples here are Go. A
+`comment_patterns` entry may be an **alternation** (v2.11.0+) — e.g.
+`.html: "<!--\s*|//\s*"` so an HTML file's embedded-JS `// Rn`
+annotations harvest alongside its `<!-- CRC: … -->` comments.
+
+What still does **not** count, because the ref does not lead the
+comment and so reads as prose rather than intent:
+
+- `// computed lazily (R5)` (parenthetical mid-prose)
+- `// see R5 for the rationale` (ref after words)
+- `// Seq: seq-foo.md | R5` (no `CRC:`; a `Seq:`-only line does not trigger)
+
+A requirement annotated only in prose form reads as "missing impl
+coverage." Lead with the ref, or fold it onto the governing `// CRC:`
+header (with the card that owns the `Rn`, per its `**Requirements:**`
+field), to anchor the code location.
+
 **Block-comment languages:** The `minispec query comment-patterns` output lists any `comment_closers`. If a closer exists for the file extension, you MUST append it to every traceability comment. An unclosed block comment silently swallows all subsequent code. See `config-reference.md` (in this skill directory) if you need to configure closers for a new language.
 
 Mark implemented using minispec:
@@ -329,6 +358,28 @@ Mark implemented using minispec:
 ```
 
 Look out for language-specific "gotchas" like mixing functions and methods in Lua.
+
+**Codify what you verified — don't leave behavior hand-checked.** When you
+implement a behavior and confirm it works (a live run, a smoke test, an ad-hoc
+script), capture that verification as a `test-*.md` design + a test **in the same
+pass**. A hand-check proves it works *today*; the test is what catches the
+regression three sessions from now, when a future agent refactors the code that
+made it pass. This is a **default action of the Implementation phase** — not a
+Design-phase afterthought, and not something to defer to a Gaps-phase `O` entry.
+
+- **The cheap cases have no excuse.** Pure, deterministic logic — state
+  machines, parsers, ownership/routing decisions, config defaults — tests with a
+  fake collaborator (a small interface double) and a zero-value struct: no DB,
+  no server, no fixtures. Choose scenarios that avoid the expensive-to-reach
+  paths and you still pin the decision logic.
+- **Anchor the test like any artifact.** Add `test-*.md` to `design.md`
+  Artifacts mapped to the test file (so its refs harvest and future anchors
+  there are seen), then `minispec update check` it once it passes.
+- **`O`-gap is the exception, not the escape hatch.** Logging "missing tests" as
+  an Oversight gap is for behavior genuinely disproportionate to test now — needs
+  live external infra, a full rebuild, a real GPU. When you take that exception,
+  say *why* in the gap. Everything a fake-and-zero-value can reach is written,
+  not deferred.
 
 **Upon completion**, run `~/.claude/bin/minispec phase implementation` to verify traceability, then run the Simplification Phase.
 
@@ -355,8 +406,8 @@ Run `~/.claude/bin/minispec phase gaps` to validate the gaps section, then run `
 - **Design→Code (Dn):** Designed features without code
 - **Code→Design (Cn):** Code without design artifacts
 - **Implementation (In):** Requirements with design coverage but no inline Rn ref in any code file
-- **Oversights (On):** Missing tests, tech debt, enhancements, security concerns, etc.
-- **Approved (An):** Approved gap. Permanent — written without a checkbox.
+- **Oversights (On):** Missing tests *that were genuinely disproportionate to write in the Implementation phase* (say why — the cheap deterministic cases get a test, not an O-gap), tech debt, enhancements, security concerns, etc.
+- **Approved (An):** Approved gap. Permanent — written without a checkbox. Good for "don't do it this way" requirements.
 - **'Tired (Tn):** Retired requirement — obsoleted by a later change. Each Tn names the original Rn, the replacement Rn (or "no replacement" if removed outright), and the reason (usually a migration or refactor). Retired Rn entries stay in requirements.md with their original text but get a `~~Rn:~~ (Retired Tn — see Rxxx)` marker so old design/code references still resolve. Permanent — written without a checkbox.
 
 Nest related items with checkboxes (only S/R/D/C/I/O take checkboxes; A and T are permanent and never carry one):
@@ -378,6 +429,47 @@ If you encounter legacy `- [ ] An:` lines, drop the `[ ]` —
 
 Use `minispec update add-gap` to add gaps; it writes the right
 shape automatically (no checkbox for A/T, checkbox for the rest).
+
+### Conformance deviations are gaps, and they link both ways
+
+When a requirement states a rule the code does not yet honor everywhere,
+**each deviation is its own gap** — not a paragraph of spec prose. Prose
+cannot be queried, is never checked off, and drifts out of date silently;
+a gap is greppable, carries a checkbox, and gets closed. So a spec states
+the rule and says "deviations are tracked as gaps"; the gap list holds the
+inventory.
+
+**One gap per deviation, not one gap listing several.** Splitting them is
+what makes each independently closable, and it surfaces ordering
+constraints a combined body hides — dependencies between deviations only
+become visible once they are separate entries that can block one another.
+
+**Link both ways.** A gap whose repair will require editing a requirement
+names that `Rn` in its body *and* says the requirement edit is part of the
+repair. The requirement then carries a short back-link — a consistent,
+greppable phrase such as `see gap <ID>` — noting that it is provisional
+and what changes when the gap closes.
+
+The back-link is the load-bearing half, and the one people skip. The
+forward link (gap → requirement) is discovered by whoever works the gap,
+who is already looking. The reverse is for everyone else: without it a
+requirement reads as settled current intent, and a future agent
+"fixes" code to match a clause that was already slated for removal —
+precisely the revert trap "Supersede at the source" exists to prevent.
+Write the requirement text so it still describes today truthfully, with
+the pending change marked; do not pre-apply an edit that has not landed,
+which would make the requirement a lie in the other direction.
+
+Two forms not to confuse with this: a **retired** requirement (`Tn`)
+already back-links by construction, since `minispec update retire` writes
+the `~~Rn:~~ (Retired Tn — see Rxxx)` marker; and a gap that merely *cites*
+a requirement as context needs no back-link, because nothing about that
+requirement changes when the gap is repaired. Back-link only where the
+repair edits the requirement.
+
+To audit: for every open S/R/D/C/I/O gap naming an `Rn`, ask whether
+repairing it changes that requirement's text. If yes, the requirement must
+carry the back-link.
 
 **Upon completion**, offer to update Documentation (Documentation Phase).
 
@@ -415,13 +507,55 @@ To keep `specs/` from accumulating stale migration narratives:
    appends a new Tn entry to `design.md` Gaps in one atomic step.
    Outputs the assigned Tn.
 
+   To stderr it also prints a **supersede-at-source reminder** naming
+   `R<old>`'s originating spec (its feature's `**Source:**`). Treat
+   that reminder as a checklist item, not noise — it points at step 6,
+   which applies to *every* retirement, not just migrations.
+
    If a CRC card or inline code comment still references the
    retired Rn but the code no longer fulfills it, update the
    reference to the replacement Rn. (References to retired Rn in
    code that was removed are fine — the comment went with the
    code.)
 
-6. **Move the migration spec(s)** by running:
+6. **Reconcile obsoleted spec *and* design prose — at the source.**
+   Retiring a requirement has a forcing function — the `retire`
+   command, the Tn entry, the `~~Rn:~~` marker, and the stderr
+   reminder. The *prose* that described the old behavior has none.
+   Two layers rot silently:
+   - **Originating spec prose.** The requirement was born from a
+     sentence in its feature's `**Source:**` spec — "current truth,
+     the human's intent," the most authoritative trap of all. Follow
+     the `**Source:**` the reminder names and rewrite or delete the
+     sentence that spawned the retired `Rn`.
+   - **Design prose.** CRC `## Does` descriptions, method signatures,
+     and sequence diagrams that described state A do not flag
+     themselves as stale. Grep `design/` for the changed method
+     names, old signatures, and renamed types, and rewrite every CRC
+     bullet and seq diagram that still describes the old behavior to
+     match state B.
+
+   This is **not migration-only.** Every retirement — standalone or
+   part of a migration — owes this reconciliation, and the `retire`
+   reminder prompts it each time. `minispec validate` cannot catch
+   it: it checks that requirements are *referenced*, not that the
+   prose around the reference is accurate. (Step 5 reconciles the
+   *Rn references*; this step reconciles the *descriptions* those
+   references annotate — a distinct, easily-missed pass.)
+
+7. **Move the migration spec(s).**
+
+   **Precondition — the prose grep.** Before completing, grep the
+   retired module/type/old-behavior names across **both** `specs/`
+   and `design/`. Every hit must be either gone or framed as a
+   historical record (a retirement note, a `complete/` migration
+   spec) — **zero stale-as-live mentions.** A grep alone can't tell a
+   trap from an accurate "documents the absence" record, so this is
+   your judgment, not the tool's. Apply the completion test: could an
+   agent reading only specs + design be led to undo the migration? If
+   yes, a trap remains — fix it before moving the spec.
+
+   Then run:
 
    ```
    ~/.claude/bin/minispec update migration-complete <name>
@@ -437,6 +571,224 @@ To keep `specs/` from accumulating stale migration narratives:
 `specs/migrations/complete/` is the migration history — a
 chronological record of what changed and why. `specs/` always
 reflects the present.
+
+## Trajectory Tracking (PENDING / CURRENT / DONE)
+
+Specs → design → code anchor the project's **structure** — what exists and
+why. They do not track its **trajectory**: what's queued, what's in flight,
+what just landed. The harness task tool (`TaskCreate`/`TaskUpdate`) is
+session-local and dies with the session. Trajectory tracking is the durable,
+cross-session spine the structural docs and the ephemeral tasks both lack.
+
+It is **tool-agnostic**: it tracks any kind of work — a mini-spec pass, a UI
+pass, a plain investigation — each item naming the skill that runs it, or
+none. It ships with mini-spec but is not about mini-spec.
+
+### The three files
+
+Named for the states an item passes through: **pending → current → done**
+(future → present → past). Default location
+`specs/migrations/{PENDING,CURRENT,DONE}.md`; a project may site them
+elsewhere (e.g. at top level) and keep a project prefix. The vocabulary
+below refers to the project's files **wherever they live**, so a path never
+needs qualifying:
+
+- **the pending file** — the work queue.
+- **the current file** — working context for the active item.
+- **the done file** — the completion ledger.
+
+The standing ledger (exactly one PENDING, one CURRENT, one DONE) sits in the
+same `migrations/` directory as the in-flight migration specs. Two kinds of
+file share that directory — say so, so `PENDING.md` is never mistaken for a
+migration spec.
+
+### Lifecycle rules
+
+- **The pending file is ordered by intent** — the top item is active. Each
+  item is a `##` heading, so a paused item's context can nest as a sub-item
+  beneath it.
+- **Finishing an item:** first mark it done in its **source file** (the
+  plan/spec/design doc where the work lives); then reset the current file;
+  then move the item from the pending file to the done file.
+- **The current file is for the active item only** — never a log of finished
+  work (that is the done file). With nothing active, it holds a one-line
+  placeholder.
+- **Entries are status indicators only** — the source file holds the
+  content, design, and rules. No instructions in entries.
+- **The done file is most-recent-first.** Each entry records date, title,
+  and what landed (commit, requirement ranges, gaps banked, sources) —
+  enough to reconstruct the change without re-reading the code.
+- **The pending file is the index** back to the roadmap, planning scratch,
+  and feature designs.
+
+### File shapes
+
+```markdown
+# Pending
+<lifecycle rules>
+---
+## 1. **<title>** (<skill that runs it — or omit>). <one-line status>.
+   Source: [<doc>](<path>). Next: <next action>.
+## 2. **<title>** …
+```
+```markdown
+# Current
+Working context for the active item only — never a log (that's the done
+file). To pause: lift this into a sub-item under that item's `##` heading in
+the pending file, then reset here, freeing it for what you pick up next.
+---
+_No active item._
+```
+```markdown
+# Done
+Completed items, most-recent first.
+- **YYYY-MM-DD — <title>.** <commit, R-range, gaps banked, sources touched>.
+```
+
+### Interleaving with migrations
+
+A **state item** and a **migration** are two orthogonal lifecycles,
+composable as the work demands:
+
+- A **migration** distills a brainstorm into a concise A→B document that may
+  span several steps; it runs the phases and lands in `complete/NNN-`. It
+  can be done all-at-once and may never enter the pending queue.
+- A **state item** is a unit of queued work, paused and resumed via the
+  current file.
+
+They compose; they do not nest by rule. The current file is a **resume
+buffer**: to change styles mid-flight, park the active item's context as a
+sub-item under its `##` heading (the pending file is a stack you can push
+onto), freeing the current file for the migration, then resume later from the
+parked sub-item. The freedom to intermix is the point — neither style is
+imposed.
+
+### Carves — the layer above the item
+
+An item is a unit of *work*. A **carve** is the layer above it: one coherent
+problem decomposed into items that may each need a different skill. It is the
+document those items point back at.
+
+It exists because coherence and schedulability have different natural units. A
+problem is coherent at the size of "the review console" — change one decision
+and the others move. Work is schedulable only in pieces that fit one session
+with one skill loaded. So no session can hold the whole problem and the queue
+can only hold pieces. Something has to carry the whole, and that is the carve.
+
+Both a carve and a migration are documents that spawn work, but their
+properties are close to inverted:
+
+| | Migration | Carve |
+|---|---|---|
+| End state | Defined (A→B); expires by design | None; decays as parts land |
+| Completion | Ritual: prose grep, `migration-complete`, `complete/NNN-` | A move to `done/` |
+| Spawns | One coherent change, phases run once | N items, scheduled independently over months |
+| Content | How to get from A to B | Decisions, open forks, and the split |
+| Kinds of work | One | Deliberately several |
+
+A migration says *the system is at A and must reach B*. A carve says *here is a
+problem area, here is what we have settled, here is how it breaks into
+schedulable pieces*. The lifetime difference is the sharpest: migrations are
+temporary by design, while a carve can stay open for months.
+
+**Where a carve lives: with the public design docs, not with the private
+trajectory files.** A carve is almost entirely facts about the code, and those
+belong where someone reading the project can find them. A top-level `carves/`
+beside `specs/` and `design/` is the default, with `carves/done/` for finished
+ones so they do not crowd out live ones. Deliberately not under `specs/`, which
+describes how the system *is*; a carve is a work-management artifact, which is
+the same reason migrations were exiled to `specs/migrations/`.
+
+**Promotion is a judgment call, and it belongs to the maintainer.** The test is
+*is this a meaty task?* — substantial enough to stay open a while and worth
+naming, because the name is what makes the surrounding work manageable. No count
+of queue items decides it: a one-item document can be carved on the expectation
+of more, and a two-item one can stay a working note if nobody needs the name.
+Keep the number of live carves small; they are a management tool, and a directory
+full of them stops being one.
+
+**An agent proposes; it does not decide.** Raise it once a document has spawned a
+second item — that is the prompt to ask, not a rule that fires. Below that,
+usually stay quiet. Treating the count as the criterion gets it wrong in both
+directions at once: it refuses a meaty single-item problem while mechanically
+promoting anything that happens to spawn two.
+
+Promote forward, moving an existing carve when it is next touched rather than in
+a sweep, and rewrite the links that pointed at the old path as part of the move.
+Promotion also forces an editorial pass separating the decision from the private
+reasoning behind it, and writing for a stranger is the cheapest clarity check
+available.
+
+**Three disciplines.** The first two tend to happen by instinct. The third does
+not, and it is the one that matters.
+
+1. **Per-part status, in a block at the top.** A carve outlives the length
+   anyone reads end to end, so "what is still open?" has to be answerable from
+   the first screen. Left to grow where the work happened, status lands
+   two-thirds down and is effectively invisible.
+
+   ```markdown
+   ## Status
+
+   - [x] ~~**Item 1 — record and resolve.**~~ **LANDED (`4c6e974`, 2026-08-04.)**
+   - [ ] **Item 4 — fail fast when onboarding does not take.** **OPEN (#122.)**
+   ```
+
+   Further down, each part's detail is keyed by **bare number, with no title and
+   no description** — `**Item 1** (…)`. That split is the point rather than a
+   style preference: the block owns the title and the status, the body owns the
+   detail, and neither repeats the other, so there is no second copy to drift. A
+   status *table* restating body prose is worse than none, because the two will
+   disagree and nothing will say which is right.
+
+   - **The checkbox is authoritative** where the markings on a line disagree.
+     The line states the same fact three ways — checkbox, strikethrough, marker
+     — because three different readers want it: a grep, a skimmer, and someone
+     wanting provenance. Use the same `- [ ]` / `- [x]` notation as the gaps
+     list, so both documents read alike and one query spans them.
+   - **`LANDED (commit, date)` mirrors `DECIDED (name, date)`**, deliberately —
+     same shape, same greppability, and the commit is what makes the claim
+     checkable. **Let the verb vary where it carries information**: `SENT` for a
+     part discharged by a cross-project message and owning no commit, `DEFERRED`
+     for one parked on purpose rather than merely unstarted. Forcing `LANDED`
+     onto those makes the marker a worse record than the prose it replaced.
+   - **State the negative, and distinguish "open" from "not checked".** A part
+     with no marker is indistinguishable from one nobody has thought about.
+     `NOT VERIFIED` earns its own words, because a repaired *symptom* reads
+     exactly like a satisfied *requirement* — that misreading is the most
+     expensive one this block prevents.
+   - **Not everything takes a checkbox.** Banked gaps, accepted residue, and
+     already-in-place preconditions are listed without one; there is nothing to
+     close. Same distinction an approved gap draws.
+
+   Key parts however the document already does — `Item N` where it wrote a
+   numbered split, the queue's own `#N` where every part has one. The queue
+   number is better when it exists, being the identifier the work is scheduled
+   under. The machine view across every live carve is one grep for `^- \[ \]`.
+2. **Dated, attributed decisions.** `DECIDED (name, date)`, append-only, so a
+   reader can tell a settled call from a musing and whose it was. This is the
+   single highest-value habit in the format.
+3. **Migrate on landing.** When a part lands, its decisions belong in `specs/`
+   and `design/` as requirements, spec prose, or a comment at the code; the
+   carve then points at where they went. A migration gets a forcing function for
+   free (the retire reminder, the prose grep, the completion ritual). A carve
+   gets none, so its decisions rot silently while still reading as current. This
+   is not hypothetical: a stale line in one working note sent a later carve down
+   a wrong path, and that carve had to mark the note stale by hand.
+
+Adopting discipline 3 also reframes the planning scratch usefully, as a staging
+area for reasoning that has not earned a public home yet rather than a permanent
+one.
+
+### What's reusable vs. project-specific
+
+Reusable core: the three files, the lifecycle, the interleaving model, the carve
+layer above the item, and the status block's shape — a block at the top, bare
+keys below, nothing stated twice. Each project parameterizes the rest — routing
+labels (which skill runs an item), the planning-scratch location, any batching
+rules, file siting and case convention, whether carves sit at top level or
+elsewhere, whether the files carry a project prefix, and how parts are keyed
+(`Item N` versus the queue's own `#N`).
 
 ## CRC Card Format
 ```markdown
@@ -476,6 +828,7 @@ Cover: happy path, errors, edge cases.
 - [ ] Traceability: design files in Artifacts, code files have checkboxes, all Rn referenced
 - [ ] Tests: test-*.md for key behaviors
 - [ ] Summary specs: any cross-cutting axis touched by this change has been mirrored in the relevant summary spec (CLI inventory, storage layout, API surface, capabilities, …) — see the project's pinned list
+- [ ] Root spec index: every per-feature spec is mapped under a system in the root index (created if absent); `~/.claude/bin/minispec query unindexed-specs` returns empty
 - [ ] Phase validation: `~/.claude/bin/minispec phase <phase>` passes after each phase
 - [ ] Full validation: `~/.claude/bin/minispec validate` passes
 
