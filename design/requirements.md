@@ -1,13 +1,13 @@
 # Requirements
 
 ## Feature: Core
-**Source:** specs/main.md
+**Source:** specs/overview.md
 
 - **R1:** Go CLI command, also usable as a Go library
 - **~~R2:~~** (Retired T59 — see R660) LMDB-backed storage using a single named subdatabase with prefix-distinguished records
 
 ## Feature: Raw Byte Trigrams
-**Source:** specs/main.md
+**Source:** specs/trigrams.md
 
 - **R3:** Raw byte trigrams — every byte is its own value, no character set mapping
 - **R4:** Whitespace bytes (space, tab, newline, carriage return) are word boundaries; runs collapse
@@ -22,7 +22,7 @@
 - **R114:** 2-byte and ASCII characters produce no internal trigrams; behavior unchanged for these
 
 ## Feature: Byte Aliases
-**Source:** specs/main.md
+**Source:** specs/trigrams.md
 
 - **R45:** Byte aliases map input bytes to replacement bytes before trigram extraction
 - **R46:** Aliases stored in I records using data-in-key pattern (one record per alias)
@@ -30,7 +30,7 @@
 - **R115:** Both source and target bytes in aliases must be ASCII (< 0x80) — aliasing UTF-8 continuation or leading bytes would corrupt multibyte characters and break character-internal trigram skipping
 
 ## Feature: Chunking Strategies
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R10:** Chunking strategies are configurable and added/removed dynamically (external commands or Go functions)
 - **R11:** Each strategy is a name mapped to an external command: `[cmd] [filename]` outputs `range\tcontent` lines
@@ -46,7 +46,7 @@
 - **R119:** Built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap, chunk-markdown) register as func strategies
 
 ## Feature: Single Subdatabase
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R14:** ~~removed: two-tree content/index split replaced by single subdatabase~~
 - **R15:** ~~removed: two-tree content/index split replaced by single subdatabase~~
@@ -54,14 +54,14 @@
 - **R219:** Subdatabase name is a parameter: default `fts`, settable via CLI (`-db-name`) and library (`Options.DBName`)
 
 ## Feature: Encoding Conventions
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R220:** Integer fields use varint encoding (Go `binary.PutUvarint` / `binary.ReadUvarint`)
 - **R221:** Trigram fields are fixed 3 bytes (24-bit); hash fields are fixed 32 bytes (SHA-256)
 - **R222:** Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes
 
 ## Feature: Chunk Deduplication
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R223:** Chunks are deduplicated by content hash (SHA-256) — same content = same chunkid across files
 - **R224:** `H` records: `H[hash:32] → chunkid:varint` — content hash to chunkid lookup
@@ -69,11 +69,10 @@
 - **R226:** If H record does not exist, allocate new chunkid, create H record, create C record, update T and W records
 
 ## Feature: C Records (Per-Chunk)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R16:** ~~removed: old per-trigram C records replaced by per-chunk C records~~
 - **R227:** `C` records: `C[chunkid:varint] → hash:32 + packed trigrams + packed tokens + packed attrs + packed fileids`
-- **R495:** C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
 - **R228:** C record trigrams: `[n-trigrams:varint] [[trigram:3] [count:varint]]...` — per-chunk trigram counts
 - **R229:** C record tokens: `[n-tokens:varint] [[count:varint] [token:str]]...` — per-chunk token counts
 - **R230:** C record attrs: `[n-attrs:varint] [[key:bytes] [value:bytes]]...` — optional key-value pairs from chunker Attrs (e.g. timestamp, role); opaque to microfts2
@@ -81,7 +80,7 @@
 - **R232:** C record is self-describing — all data needed for search, scoring, filtering, and removal in one read
 
 ## Feature: F Records (Per-File)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R233:** `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
 - **R234:** F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
@@ -90,20 +89,20 @@
 - **R237:** F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
 
 ## Feature: I Records (Config)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R17:** `I` records use data-in-key pattern: `I[name:str] = [value:str] → empty` — each setting independently readable and writable
 - **R19:** ~~removed: N record JSON replaced by F record struct~~
 
 ## Feature: N Records (Name Lookup)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R20:** `N` records: filename → fileid mapping using key chains for names exceeding 511 bytes
 - **R25:** Filenames exceeding 511 bytes use multiple chained N keys (a legacy threshold; bbolt's key limit is 32 KB, so the chains are retained but rarely triggered — see migration Out of scope)
 - **R26:** `N` records use chain-byte to chain: `N[0-254][name:str] → empty` for prefix, `N[255][name:str] → [[full-name:str] [fileid:varint]]...` for final segment with full filename and fileid
 
 ## Feature: T Records (Trigram Inverted Index)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R21:** ~~removed: forward index entries replaced by T records~~
 - **R238:** `T` records: `T[trigram:3] → [chunkid:varint]...` — packed list of chunkids per trigram
@@ -111,14 +110,14 @@
 - **R240:** One T record per distinct trigram; entry count proportional to vocabulary, not trigram-chunk pairs
 
 ## Feature: W Records (Token Inverted Index)
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R241:** `W` records: `W[token-hash:4] → [chunkid:varint]...` — packed list of chunkids per token hash
 - **R242:** Token IDF derived from W record value length — same structure as T records
 - **R243:** Provides exact token-level inverse document frequency for BM25 scoring
 
 ## Feature: Record Structs
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R95:** ~~removed: FileInfo struct replaced by FRecord~~
 - **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
@@ -133,7 +132,7 @@
 - **R252:** Each record struct has `Marshal` and `Unmarshal` methods for byte encode/decode
 
 ## Feature: TxnHolder Interface
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **~~R264:~~** (Retired T57 — see R663) `TxnHolder` interface: `Txn() *lmdb.Txn` — any value carrying an LMDB transaction
 - **R265:** CRecord implements `TxnHolder` via its `Tx()` accessor; internal DB methods accept `TxnHolder` instead of raw `*bbolt.Tx`
@@ -142,32 +141,32 @@
 - **~~R571:~~** (Retired T58 — see R664) `(db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)` — public power-user accessor; fetches a CRecord by chunkID within an existing txn and attaches db/txn to the returned record so `Txn()`, `DB()`, and `FileRecord(fileid)` work on the result
 
 ## Feature: Data-in-Key Pattern
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R22:** Store data in keys using lexical sort for range queries
 - **R23:** Key ranges: `[key]...[key+1]` spans all items for a key
 - **R24:** Sets represented as `[key][info] → empty value`
 
 ## Feature: Full Trigram Index
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R27:** T records contain entries for ALL trigrams present in the content, not a frequency-selected subset
 - **R28:** ~~removed: searchCutoff and A record replaced by dynamic TrigramFilter~~
 
 ## Feature: Adding Files
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R29:** Adding a file: check for existing N records (dedup guard), allocate fileid, create N/F records, call chunker (yields Range+Content per chunk), for each chunk: hash content, check H record for dedup, create/update C records, batch T/W record updates
 - **R253:** Batch T/W updates: accumulate all chunkids per trigram/token across the file's chunks, then one read-modify-write per affected T/W record
-- **R110:** AddFile computes trigram counts per chunk from chunk Content, not raw file bytes
+- **R110:** (inferred) AddFile computes trigram counts per chunk (map[uint32]int) from chunk Content, not raw file bytes
 
 ## Feature: Removing Files
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R254:** Removing a file: read F record to get chunk list, for each chunkid remove fileid from C record, if C has no remaining fileids delete C/H records and remove chunkid from T/W records, delete F and N records
 
 ## Feature: Searching
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R30:** ~~removed: no separate index DB existence check — index is always maintained~~
 - **R31:** Literal search: trim whitespace, parse query into terms via parseQueryTerms, extract trigrams per term (not whole query), intersect per-term candidate sets, select via TrigramFilter (default: FilterAll)
@@ -177,12 +176,12 @@
 - **R35:** Library returns struct slices with file path, range string, score
 
 ## Feature: Index Computation
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R36:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
 
 ## Feature: CLI Commands
-**Source:** specs/main.md
+**Source:** specs/cli.md
 
 - **R37:** CLI `delete` command removes files from the database
 - **R38:** CLI `reindex` command re-chunks files with a different strategy
@@ -192,7 +191,7 @@
 - **R50:** All CLI commands require `-db` flag; optional shared flag `-db-name` (subdatabase name, default `fts`)
 
 ## Feature: Library API
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R51:** `Create`/`Open`/`Close`/`Settings` lifecycle functions
 - **R268:** `Version() (string, error)` returns the DB format version string from the I record; read-only transaction
@@ -203,7 +202,7 @@
 - **R56:** `Options` struct configures creation (CaseInsensitive, Aliases) and opening (DBName)
 
 ## Feature: Built-in Chunking Strategies
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R57:** Built-in chunkers are registered as func strategies; also available as CLI subcommands outputting `range\tcontent` lines
 - **R58:** `chunk-lines`: every line is a chunk; range is `N-N` (line number); content is the line text
@@ -213,14 +212,14 @@
 - **R62:** Range for all built-in text chunkers is `startline-endline` (1-based, inclusive); content is the text of those lines
 
 ## Feature: Subdatabase Name
-**Source:** specs/main.md
+**Source:** specs/api.md, specs/cli.md
 
 - **R40:** Subdatabase name is a parameter with default `fts`
 - **R41:** Settable via CLI flag (`-db-name`) and library API (`Options.DBName`)
 - **R42:** Not stored in the I record — required to open the database
 
 ## Feature: Staleness Detection
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R63:** F record stores file modification time (Unix nanoseconds) and content hash (SHA-256) at index time
 - **R64:** A file is stale when its mod time differs from stored AND its content hash differs from stored
@@ -236,7 +235,7 @@
 - **R74:** Missing files are reported by `-r` but not deleted
 
 ## Feature: Incremental Index Update
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R75:** ~~removed: A record replaced by dynamic TrigramFilter~~
 - **R76:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
@@ -247,7 +246,7 @@
 - **R81:** Index is always maintained incrementally — no separate "index exists" check needed
 
 ## Feature: Regex Search
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R82:** `SearchRegex(pattern string, opts ...SearchOption)` searches using a Go regexp pattern against the full trigram index
 - **R83:** ~~removed: IndexStatus.Built vestige of old build-index step~~
@@ -260,7 +259,7 @@
 - **R89:** CLI `search -regex` flag switches to regex mode
 
 ## Feature: Ark Integration
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **~~R91:~~** (Retired T55 — see R661) `Env()` method returns the underlying `*lmdb.Env` for sharing with other libraries in the same process
 - **R92:** `AddFile` returns `(uint64, error)` — the fileid alongside the error
@@ -276,7 +275,7 @@
 - **R122:** Original `AddFile`/`Reindex` signatures unchanged; WithContent variants avoid a redundant file read in ark's hot path
 
 ## Feature: Scoring Strategies
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R103:** `ScoreFunc` type: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`
 - **R104:** `SearchOption` functional option type for configuring search behavior
@@ -285,27 +284,26 @@
 - **R107:** `WithScoring(fn ScoreFunc)` option: use a custom scoring function
 - **R108:** CLI `search -score coverage|density` flag selects scoring strategy (default: coverage)
 - **R109:** ~~removed: N record chunkRanges/chunkTokenCounts replaced by F record chunk list and C record token counts~~
-- **R110:** (inferred) AddFile computes trigram counts per chunk (map[uint32]int) from chunk Content, not raw file bytes
 
 ## Feature: MaxDBs Option
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **~~R101:~~** (Retired T56 — see R666) `Options.MaxDBs` sets the LMDB max named databases; defaults to 2; used by both `Create` and `Open`
 
 ## Feature: Encoding
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R123:** ~~removed: old C record BigEndian replaced by varint encoding~~
 
 ## Feature: WithVerify Post-filter
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R124:** `WithVerify()` search option: after trigram intersection, re-chunk the file using stored strategy to recover chunk content, verify each query term appears as a case-insensitive substring; discard chunks that fail
 - **R125:** Query tokenization for verify: split on spaces; double-quoted strings are a single term with quotes stripped (e.g. `"hello world" foo` → terms `hello world`, `foo`)
 - **R126:** CLI `-verify` flag on search command passes `WithVerify()` to the library
 
 ## Feature: Chunk Struct and Generator Contract
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R128:** `Chunk` struct: `Range []byte` (opaque, string semantics) + `Content []byte` (text to trigram-index) + `Attrs []Pair` (optional per-chunk metadata, nil by default); Range and Content are reusable buffers — caller must copy before next yield
 - **R295:** `Pair` struct: `Key []byte, Value []byte` — opaque key-value pair; allows duplicate keys; mirrors DB wire format
@@ -318,7 +316,7 @@
 - **R134:** Verify and regex verification re-chunk the file using stored strategy, match by range to find chunk content
 
 ## Feature: Dynamic Trigram Filtering
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R135:** `TrigramCount` struct: `Trigram uint32, Count int` — pairs a trigram code with its corpus document frequency
 - **R136:** `TrigramFilter` type: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — caller-supplied function deciding which query trigrams to search with
@@ -334,7 +332,7 @@
 - **R145:** ~~removed: A record and BuildIndex fully removed~~
 
 ## Feature: FileLength in F Record
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R146:** F record stores `fileLength` (varint): file size in bytes at index time
 - **R147:** `AddFile` and `Reindex` set `fileLength` from the content they already read
@@ -342,7 +340,7 @@
 - **R149:** ~~removed: N record migration not needed — F records are the new format~~
 
 ## Feature: AppendChunks API
-**Source:** specs/main.md
+**Source:** specs/append.md
 
 - **R150:** `AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error` adds chunks to an existing file without full reindex
 - **R151:** `content` parameter is only the appended bytes, not the full file
@@ -361,7 +359,7 @@
 - **R164:** (inferred) `AppendChunks` runs in a single bbolt write transaction — all updates are atomic
 
 ## Feature: Chunker Offset Support
-**Source:** specs/main.md
+**Source:** specs/append.md
 
 - **R165:** When `WithBaseLine(n)` is non-zero, `AppendChunks` adjusts line-based Range values by adding the base line offset after chunking
 - **R166:** Range adjustment is string-level: parse "start-end", add base, re-format — works for any chunker producing `N-N` ranges
@@ -369,7 +367,7 @@
 - **R168:** (inferred) ChunkFunc signature is unchanged — offset handling is AppendChunks' responsibility, not the chunker's
 
 ## Feature: Markdown Chunker
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R169:** `chunk-markdown`: paragraph-based splitting for markdown files; exported as `MarkdownChunkFunc`
 - **R170:** A heading line (`#`...) always starts a new chunk
@@ -394,7 +392,7 @@
 - **R570:** If no tag-only or content chunks follow the heading (e.g. consecutive headings, or heading at end of file), the heading chunk is emitted unchanged
 
 ## Feature: Per-token Trigram Generation
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R178:** Literal search trims leading and trailing whitespace from the query before trigram extraction
 - **R179:** Literal search parses query into terms using `parseQueryTerms` before trigram extraction — unquoted words split on spaces, quoted phrases as single terms
@@ -403,7 +401,7 @@
 - **R182:** (inferred) Query term order does not affect search results — "daneel olivaw" and "olivaw daneel" return the same set
 
 ## Feature: Multi-Regex Post-Filtering
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R183:** `WithRegexFilter(patterns ...string) SearchOption` adds AND post-filters — every pattern must match chunk content for the chunk to be kept
 - **R184:** `WithExceptRegex(patterns ...string) SearchOption` adds subtract post-filters — any match rejects the chunk
@@ -421,7 +419,7 @@
 - **R196:** (inferred) When no regex filters or except-regex filters are supplied, behavior is unchanged from current
 
 ## Feature: Chunk Context Retrieval
-**Source:** specs/main.md
+**Source:** specs/retrieval.md
 
 - **R197:** `GetChunks(fpath, targetRange string, before, after int) ([]ChunkResult, error)` retrieves the target chunk and up to N positional neighbors before and after
 - **R198:** Target chunk identified by exact string match of range label against the F record's chunk list (location field)
@@ -435,7 +433,7 @@
 - **R206:** (inferred) Expansion unit is chunks (strategy-agnostic), not lines or bytes — range labels are opaque
 
 ## Feature: Composable --contains and --regex
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R207:** CLI `--contains` string flag provides an explicit FTS text query for the `search` subcommand
 - **R208:** When `--contains` is used with `--regex`, `Search(containsText)` is called with the positional-arg regex pattern added as a `WithRegexFilter` post-filter
@@ -445,7 +443,7 @@
 - **R212:** (inferred) Error if no query is determinable — no positional args and no `--contains`
 
 ## Feature: AddFile Duplicate Guard
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R213:** `addFileInTxn` checks for existing N records (via `FinalKey` lookup) before allocating a new fileid
 - **R214:** If the file is already indexed, `AddFile` and `AddFileWithContent` return `ErrAlreadyIndexed`
@@ -454,7 +452,7 @@
 - **R217:** (inferred) The guard is a check, not a policy — no automatic reindex or append behavior
 
 ## Feature: Chunk Filtering
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R255:** `ChunkFilter` type: `func(chunk CRecord) bool` — receives full C record during candidate evaluation
 - **R256:** `WithChunkFilter(fn ChunkFilter) SearchOption` — called after T record intersection, before scoring; C record already loaded on hot path, zero extra I/O
@@ -464,21 +462,21 @@
 - **R260:** ChunkFilter applies to `Search`, `SearchRegex`, and `ScoreFile`
 
 ## Feature: File-Level Token Bag
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R261:** F record aggregated token bag is the union of all chunk tokens with summed counts
 - **R262:** Token bag maintained incrementally: AddFile/Reindex rebuilds, AppendChunks merges new chunk tokens
 - **R263:** Enables file-level scoring and pre-filtering without reading every chunk's C record
 
 ## Feature: Overlap Scoring
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R269:** `ScoreOverlap` score function: count of matching query trigrams, no normalization (OR semantics)
 - **R270:** Fits `ScoreFunc` signature directly — pure function, no extra state
 - **R271:** `WithOverlap()` search option: sugar for `WithScoring(ScoreOverlap)`
 
 ## Feature: BM25 Scoring
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R272:** `ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc` — closure factory capturing IDF and avgdl
 - **R273:** BM25 formula: `idf(t) * (tf * (k1+1)) / (tf + k1 * (1 - b + b * dl/avgdl))` with k1=1.2, b=0.75
@@ -489,7 +487,7 @@
 - **R278:** (inferred) IDF per trigram: `df(t)` derived from T record value length; `N` from totalChunks I record counter
 
 ## Feature: Proximity Reranking
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R279:** `WithProximityRerank(topN int) SearchOption` — post-filter that reranks top-N results by query term proximity in chunk text
 - **R280:** Proximity bonus: `1 / (1 + minSpan)` where minSpan is the smallest token window containing all query terms
@@ -497,7 +495,7 @@
 - **R282:** Applied after scoring, before final sort; works with Search, SearchMulti, and ScoreFile
 
 ## Feature: Multi-Strategy Search
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R283:** `SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error)`
 - **R284:** Candidate collection (trigram intersection, T record reads, C record reads, chunk filters) computed once in a single View transaction
@@ -509,7 +507,7 @@
 - **R290:** (inferred) Post-filters (verify, regex, proximity rerank) applied per strategy's result set after scoring
 
 ## Feature: Per-Query Chunk Cache
-**Source:** specs/main.md
+**Source:** specs/chunk-cache.md
 
 - **R297:** `ChunkCache` struct: per-query cache for file content and chunked data — avoids redundant file reads and re-chunking
 - **R298:** `NewChunkCache() *ChunkCache` factory method on DB
@@ -529,14 +527,14 @@
 - **R494:** (inferred) Within a search, Retrieve deduplicates by chunkID via a `map[uint64][]byte` on searchConfig — same chunk content across multiple results is retrieved once
 
 ## Feature: searchConfig as Search Pipeline Receiver
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R487:** `searchConfig` embeds `*DB` — search pipeline functions become methods on `*searchConfig`
 - **R488:** Search entry points (`Search`, `SearchRegex`, `SearchMulti`, `ScoreFile`, `SearchFuzzy`) build a `searchConfig` then dispatch to its methods
 - **R489:** (inferred) Pure structural refactor — no behavior change, no new functionality beyond method receiver conversion
 
 ## Feature: Bracket Chunker
-**Source:** specs/main.md
+**Source:** specs/chunk-bracket.md
 
 - **R307:** `BracketLang` struct: configurable lexical rules per language — line comments, block comments, bracket groups (strings expressed as bracket groups)
 - **~~R308:~~** (Retired T1 — see R309) `StringDelim` struct: `Open`, `Close`, `Escape` strings — supports asymmetric delimiters (e.g. `[[`/`]]`) and escapeless raw strings (empty Escape)
@@ -564,7 +562,7 @@
 - **R622:** `nil` and `[]string{}` are semantically distinct for `AllowedInner` and `AllowedParent`: `nil` means "no restriction"; an empty non-nil slice means "restriction with empty list"
 
 ## Feature: Indent Chunker
-**Source:** specs/main.md
+**Source:** specs/chunk-indent.md
 
 - **R325:** Reuses `BracketLang` for comment/string configuration (Brackets field ignored)
 - **R326:** Scope detection: a line indented further than the previous non-blank line opens a new scope
@@ -579,7 +577,7 @@
 - **R335:** (inferred) Comment and string handling required to avoid false scope detection inside literals
 
 ## Feature: Fuzzy Search
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R336:** `WithLoose() SearchOption` — enables OR semantics at the term level for candidate collection
 - **R337:** Fuzzy candidate set is the union of all terms' trigram candidate sets (a chunk matches if it contains any term's trigrams)
@@ -593,14 +591,14 @@
 - **R345:** (inferred) When `WithLoose` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default loose term-match scoring is bypassed
 
 ## Feature: Fileid Filtering
-**Source:** specs/main.md
+**Source:** specs/overlay.md
 
 - **R346:** `WithOnly(ids map[uint64]struct{}) SearchOption` — keep candidate chunks only if at least one of their fileids is in the set
 - **R347:** `WithExcept(ids map[uint64]struct{}) SearchOption` — discard candidate chunks if any of their fileids is in the set
 - **R348:** Both apply during candidate evaluation (same phase as ChunkFilter)
 
 ## Feature: Temporary Documents (tmp:// Overlay)
-**Source:** specs/main.md
+**Source:** specs/overlay.md
 
 - **R349:** In-memory overlay on `*DB` holds tmp:// documents alongside the index — never touches the index
 - **R350:** Temporary document paths use `tmp://` URI scheme (e.g. `tmp://abc123/scoring-notes`); path is opaque to microfts2
@@ -709,20 +707,20 @@
 - **R427:** (inferred) `collectTrigramUnion` reused from SearchMulti candidate expansion for T record OR-union
 
 ## Feature: Record Counts
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R443:** `RecordCounts() (map[byte]RecordStats, error)` — method on DB returning per-prefix statistics
 - **R444:** Opens a read-only bbolt transaction, iterates all keys in the bucket, accumulates per-prefix stats
 - **R445:** `RecordStats` struct: `Count int64`, `KeyBytes int64`, `ValueBytes int64` — aggregate totals per prefix byte
 
 ## Feature: TrigramFilter totalChunks source
-**Source:** specs/main.md
+**Source:** specs/search.md
 
 - **R446:** `applyTrigramFilter` must read totalChunks from the I counter, not scan F records
 - **R447:** (inferred) Include overlay chunk count in totalChunks passed to TrigramFilter, same pattern as BM25Func
 
 ## Feature: FileID–Path Mapping
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R448:** `FileIDPaths() (map[uint64]string, error)` — method on DB returning fileid→path for all indexed files
 - **R449:** Lazily loaded on first call: scans F records with `UnmarshalFHeader`, caches result
@@ -731,21 +729,21 @@
 - **R455:** `pathToID` reverse cache (path→fileid) built alongside `pathCache`, used by `lookupFileByPath` to skip N record lookup
 
 ## Feature: Search Cache
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R456:** `NewSearchCache() func()` — enables FRecord caching on DB, returns cleanup function that clears the cache
 - **R457:** `readFRecord` checks `frecordCache` before index read; caches result on miss
 - **R458:** (inferred) Cache is keyed by fileid; same fileid returns same FRecord without re-read
 
 ## Feature: Partial F Record Unmarshal
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R451:** `UnmarshalFHeader(data)` decodes ModTime, ContentHash, FileLength, Strategy, and Names from F record value
 - **R452:** Stops before Chunks and Tokens — does not allocate or decode those arrays
 - **R453:** `StaleFiles` uses `UnmarshalFHeader` instead of `UnmarshalFValue`
 
 ## Feature: DB Copy and Cache Invalidation
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R459:** `Copy() *DB` — shallow copy sharing the index, overlay, and chunker registry; caches nil
 - **R460:** Copy shares `bolt`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
@@ -755,7 +753,7 @@
 - **R464:** `InvalidateCaches` does NOT reset `overlayOnce`
 
 ## Feature: Chunk Processor Callback
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **R469:** `ChunkCallback` type: `func(chunkText string)` — receives clean chunk text during indexing
 - **R470:** `WithChunkCallback(fn ChunkCallback) IndexOption` — supplies callback for indexing methods
@@ -776,7 +774,7 @@
 - **R485:** (inferred) `collectChunks` and overlay `collectChunksFromContent` are the injection points for the callback
 
 ## Feature: Chunk Content Length
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R495:** C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
 - **R496:** `CRecord.ContentLen int` field — populated at index time from `len(chunk.Content)`, persisted in C record wire format
@@ -787,7 +785,7 @@
 - **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of the index
 
 ## Feature: FileChunker Interface
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R502:** `Chunker` interface has only `Chunks(path string, content []byte, yield func(Chunk) bool) error` — `ChunkText` is removed from this interface
 - ~~**R503:** `ChunkTexter` interface~~ — removed; superseded by `RandomAccessChunker` (R524)
@@ -813,7 +811,7 @@
 - ~~**R523:** Breaking change: callers type-asserting to `Chunker` for `ChunkText`~~ — removed with `ChunkTexter`
 
 ## Feature: Random-Access Chunk Retrieval
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R524:** `RandomAccessChunker` interface: `GetChunk(path string, data []byte, customData *any, chunk *Chunk) error` — optional, for direct chunk retrieval without linear scan from file start
 - **R525:** `customData` is a per-file scratch pointer; `*customData == nil` on first call; chunker lazily populates (e.g. line-offset table) and reuses across calls; lifetime matches enclosing `cachedFile` or single `DB.GetChunks` invocation
@@ -828,7 +826,7 @@
 - **R534:** `ChunkTexter` interface is removed — all code paths (interface definition, helpers `resolveChunkText`/`chunkTextByRange`/`chunkTextByRangeFile`, `FuncChunker.ChunkText`, `BracketChunker.ChunkText`, `IndentChunker.ChunkText`) deleted
 
 ## Feature: ChunkCache API Changes
-**Source:** specs/main.md
+**Source:** specs/chunk-cache.md
 
 - **R535:** `ChunkCache.ChunkTextWithId(fpath string, chunkID uint64) ([]byte, bool)` — fast-path retrieval for callers that already have a chunkID (e.g. SearchResult)
 - **R536:** `ChunkCache.ChunkText(fpath, rangeLabel string) ([]byte, bool)` — convenience wrapper; resolves chunkID from `rangeIds` map, delegates to `ChunkTextWithId`
@@ -843,7 +841,7 @@
 - **R545:** Deep-copy semantics preserved — Range, Content, and Attrs copied on store so downstream consumers get stable references
 
 ## Feature: Remove File with Callback
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **~~R546:~~** (Retired T61 — see R665) `RemoveCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs []uint64) error` — receives the write transaction and orphaned chunk IDs during file removal
 - **R547:** `RemoveFileWithCallback(fpath string, fn RemoveCallback) error` — removes a file with a caller callback for transactional cleanup
@@ -856,7 +854,7 @@
 - **R554:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `RemoveFile`
 
 ## Feature: Reindex File with Callback
-**Source:** specs/main.md
+**Source:** specs/indexing.md
 
 - **~~R555:~~** (Retired T62 — see R665) `ReindexCallback` type: `func(txn *lmdb.Txn, orphanedChunkIDs, newChunkIDs []uint64) error` — receives the write transaction, orphaned chunk IDs from removal, and new chunk IDs from re-indexing
 - **R556:** `ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)` — reindexes a file with a caller callback for transactional cleanup
@@ -869,7 +867,7 @@
 - **R673:** Reindex preserves chunkids for unchanged content. `reindexCore` re-chunks the new content, deletes only the old file's F and N records (path metadata, not its chunks), adds the new chunks (the old chunks' H records still exist, so a chunk whose content hash is unchanged is a dedup hit that keeps its chunkid while genuinely new content allocates a fresh chunkid), then drops the old fileid's occurrences from the old chunk list (content that survived was re-added under the new fileid and lives on; content gone from the file loses its last reference and orphan-cascades). Net effect: only new content allocates a chunkid and only removed content is orphaned, so chunkid-keyed external state (e.g. an EC embedding) survives an edit that leaves a chunk untouched
 
 ## Feature: Chunk Locator
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **R587:** `Chunk` struct gains a `Locator []byte` field: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }`
 - **R588:** `Locator` is a reusable buffer like `Range` and `Content` — the caller must copy before the next yield
@@ -881,7 +879,7 @@
 - **R594:** Built-in line-oriented chunkers may use the locator to encode byte-range coordinates so random-access retrieval avoids rebuilding line-offset tables
 
 ## Feature: C Record Fileid Refcounts
-**Source:** specs/main.md
+**Source:** specs/storage.md
 
 - **R595:** C record fileids list shape becomes `[n-fileids: varint] [[fileid: varint] [count: varint]]...` — paralleling the trigram and token shape
 - **R596:** Add-occurrence: increment count for the fileid in the chunk's C record (insert a new entry with count=1 if the fileid is absent)
@@ -891,7 +889,7 @@
 - **R600:** New chunks (first occurrence) write their C record with `[fileid, count=1]`
 
 ## Feature: AppendAwareChunker
-**Source:** specs/main.md
+**Source:** specs/append.md
 
 - **R601:** Optional `AppendAwareChunker` interface: `AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (replacedLast bool, err error)`
 - **R602:** `lastLocator` is the locator of the file's last existing chunk (nil if the file has no chunks yet)
@@ -905,7 +903,7 @@
 - **R610:** Current scope: `AppendAwareChunker` may replace at most one chunk (the last); replacing the last K is reserved for a future extension
 
 ## Feature: Tmp Overlay IndexedChunkCallback
-**Source:** ark request `microfts2-tmp-callback`
+**Source:** specs/overlay.md
 
 - **R611:** `WithIndexedChunkCallback` fires for tmp:// overlay paths via `AddTmpFile`, `UpdateTmpFile`, and `AppendTmpFile`, mirroring the persistent-path contract
 - **R612:** Callback fires once per genuinely-new chunk (hash dedup miss), in chunk order, after the overlay chunk has been created — never for dedup hits
@@ -915,14 +913,14 @@
 - **R616:** Overlay's `dedupOrCreateChunk` returns `(chunkID, isNew bool)` so callers can fire the callback only on creation, paralleling the persistent path's `nc != nil` check
 
 ## Feature: AppendChunks Silent-No-Op Guard
-**Source:** ark request `microfts2-appendaware-chunkers`
+**Source:** specs/append.md
 
 - **R623:** `DB.AppendChunks` returns `ErrAppendBoundary` when the registered chunker is not an `AppendAwareChunker` and produces zero chunks from non-empty `content`
 - **R624:** `ErrAppendBoundary` is an exported sentinel error so callers can detect this case via `errors.Is(err, ErrAppendBoundary)` and fall through to `Reindex` (or equivalent full refresh) instead of silently losing the appended bytes
 - **R625:** Empty `content` remains a successful no-op (`AppendChunks` returns `nil` without touching the F record) — the guard only fires when the chunker had bytes to chunk and produced nothing
 
 ## Feature: BracketChunker AppendAwareChunker
-**Source:** ark request `microfts2-appendaware-chunkers` and existing R607
+**Source:** specs/chunk-bracket.md
 
 - **R626:** `BracketChunker` implements `AppendAwareChunker` so code files in active development can be re-indexed incrementally without a full re-chunk
 - **R627:** `BracketChunker.AppendChunks` re-chunks from the previous last chunk's byte start (decoded from `lastLocator`) through end-of-file (reading the file from disk via `path`) so an append that completes a previously-partial bracket-block is recognised
@@ -931,38 +929,38 @@
 - **R630:** `BracketChunker.AppendChunks` adjusts each yielded chunk's `Range` (line numbers offset by newlines preceding the re-chunk start) and `Locator` (byte offsets shifted by the re-chunk start) so all emitted ranges/locators are absolute to the full file
 
 ## Feature: Shared Chunker Helpers
-**Source:** specs/main.md — AppendAwareChunker shared resume helper, FileChunker section
+**Source:** specs/chunking.md
 
 - **R631:** `appendByRechunkResume(path, lastLocator, newBytes, chunk, yield)` is an internal helper that implements the re-chunk-from-prior-start resume protocol for any text chunker whose chunks carry byte-range locators; it takes the chunker's content-based `Chunks` function as a parameter and applies the drop-or-replace logic plus the Range/Locator absolute-offset adjustment
 - **R632:** `fileChunksByRead(path, old, chunk, yield)` is an internal helper that implements the `FileChunker` interface for content-based text chunkers: read the file, compute the SHA-256, return early with no yields when `old` is non-zero and matches the new hash, otherwise delegate to the chunker's content-based `Chunks`
 - **R633:** `LineChunker`, `MarkdownChunker`, `BracketChunker`, and `IndentChunker` use `appendByRechunkResume` to implement `AppendAwareChunker`; they use `fileChunksByRead` to implement `FileChunker`
 
 ## Feature: LineChunker AppendAwareChunker
-**Source:** specs/main.md — chunk-lines
+**Source:** specs/chunking.md
 
 - **R634:** `LineChunker` implements `AppendAwareChunker` so an append that completes a previously-trailing partial line correctly merges into one chunk instead of stranding a fragment
 - **R635:** `LineChunker.AppendChunks` reuses the shared re-chunk-from-prior-start resume protocol — the byte-range locator already encodes whether the previous tail ended with a newline, so no separate "ends-with-newline" flag is needed
 
 ## Feature: Text Chunkers FileChunker
-**Source:** specs/main.md — chunk-lines, chunk-markdown, chunk-bracket
+**Source:** specs/chunking.md
 
 - **R636:** `LineChunker`, `MarkdownChunker`, `BracketChunker`, and `IndentChunker` implement `FileChunker` (via `fileChunksByRead`) so callers can stat-skip the file based on a known content hash without pre-reading the bytes
 
 ## Feature: IndentChunker AppendAwareChunker
-**Source:** specs/main.md — Indent Chunker section, ark request `microfts2-appendaware-chunkers` (O16 follow-through)
+**Source:** specs/chunk-indent.md
 
 - **R637:** `IndentChunker` implements `AppendAwareChunker` so an append that extends an indent scope, attaches new leading comments, or completes a scope that ran to EOF is recognised across the append boundary
 - **R638:** `IndentChunker.AppendChunks` reuses the shared `appendByRechunkResume` resume protocol — indent chunk locators are already byte ranges (R594), so no per-chunker resume state is needed
 
 ## Feature: ChunkerMetadata
-**Source:** specs/main.md
+**Source:** specs/api.md
 
 - **R639:** Optional `ChunkerMetadata` interface — `IsWritable() bool` and `CommentSyntax() string` — exposes per-chunker editability and line-comment delimiter to callers (notably ark's curation workshop). Kept separate from `Chunker` so existing external implementations are unaffected; callers type-assert and apply the defaults `IsWritable=true, CommentSyntax=""` when the interface isn't satisfied
 - **R640:** `LineChunker` and `MarkdownChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax=""` (plain text and markdown carry no comment delimiter)
 - **R641:** `bracketChunker` and `indentChunker` implement `ChunkerMetadata` returning `IsWritable=true` and `CommentSyntax` set to the first entry of `BracketLang.LineComments` (or `""` when the slice is empty)
 
 ## Feature: Per-chunker content transform
-**Source:** specs/main.md
+**Source:** specs/chunking.md
 
 - **~~R642:~~** (Retired T7 — no replacement) `ContentTransform` type — `func(c *Chunk)` — an optional per-chunker hook that mutates a chunk in place, rewriting `Content` and optionally appending to `Attrs`
 - **~~R643:~~** (Retired T8 — no replacement) `AddChunker(name, c, transform)` accepts a third argument `transform ContentTransform`; passing `nil` registers no transform (the common case)
@@ -984,7 +982,7 @@
 - **~~R659:~~** (Retired T16 — no replacement) `WithIndexedChunkCallback` delivers the original chunker `Content` together with the derived `Attrs` (matching the C record), consistent with the retrieval paths
 
 ## Feature: LMDB→BBolt Migration
-**Source:** specs/migrations/lmdb-to-bbolt.md
+**Source:** specs/migrations/complete/001-lmdb-to-bbolt.md
 
 - **R660:** microfts2 binds `go.etcd.io/bbolt` (pure Go) instead of `github.com/bmatsuo/lmdb-go` (CGO); the package builds with `CGO_ENABLED=0`. The single-writer/multi-reader concurrency model is unchanged.
 - **R661:** microfts2 owns a single `*bbolt.DB` and exposes it via `func (db *DB) DB() *bbolt.DB` (replaces `Env() *lmdb.Env`, R91); the host process opens microfts2 first and shares this handle with other libraries in the same process.
