@@ -100,4 +100,8 @@ Completed migrations live in `specs/migrations/complete/`, numbered in landing
 order. None in flight.
 
 - [`complete/001-lmdb-to-bbolt.md`](migrations/complete/001-lmdb-to-bbolt.md) —
-  LMDB → bbolt store port (v0.4.0).
+  LMDB → bbolt store port (2026-06-12, v0.4.0).
+- [`complete/002-bigram-index-removed.md`](migrations/complete/002-bigram-index-removed.md)
+  — the retired bigram index spec (removed 2026-03-22; recorded later, so its
+  number is recording order, not landing order). Kept so retired requirements
+  R379–R416 resolve. Describes behavior microfts2 no longer has.

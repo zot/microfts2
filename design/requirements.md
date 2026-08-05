@@ -650,7 +650,7 @@
 - **R442:** Empty chunk result from chunking is a no-op — returns fileid, nil
 
 ## Feature: Bigram Index (removed)
-**Source:** BIGRAM.md
+**Source:** specs/migrations/complete/002-bigram-index-removed.md
 
 - **~~R379:~~** (Retired T17 — no replacement) Bigram indexing is on by default; `--no-bigrams` flag at `init` disables it
 - **~~R380:~~** (Retired T18 — no replacement) Bigram enabled/disabled setting stored in an I record; checked at index time to gate B record writes and C record bigram section
