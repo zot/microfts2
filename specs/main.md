@@ -860,7 +860,7 @@ type TrigramFilter func(trigrams []TrigramCount, totalChunks int) []TrigramCount
 microfts2 ships stock filter functions:
 
 - `FilterAll`: uses every query trigram, no filtering.
-- `FilterByRatio(maxRatio float64)`: skips trigrams appearing in more than `maxRatio` of total chunks. E.g., `FilterByRatio(0.50)` skips trigrams in >50% of chunks.
+- `FilterByRatio(maxRatio float64)`: skips trigrams appearing in more than `maxRatio` of total chunks. E.g., `FilterByRatio(0.50)` skips trigrams in >50% of chunks. Below two chunks ratio filtering cannot discriminate — every trigram present is in 100% of chunks — so the filter returns all trigrams unmodified rather than skipping them all, which would make every query unanswerable on a one-chunk index.
 - `FilterBestN(n int)`: keeps the N trigrams with the lowest document frequency. Good for long queries where only the most discriminating trigrams matter.
 
 ### Trigram count lookup

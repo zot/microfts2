@@ -303,10 +303,17 @@ func FilterAll(trigrams []TrigramCount, _ int) []TrigramCount {
 	return trigrams
 }
 
+// CRC: crc-DB.md | Seq: seq-search.md | R141, R674
 // FilterByRatio returns a TrigramFilter that skips trigrams appearing in more
 // than maxRatio of total chunks. E.g., 0.50 skips trigrams in >50% of chunks.
+// Below two chunks every present trigram is in 100% of chunks, so the ratio
+// cannot discriminate; filtering there would drop every trigram and make each
+// query unanswerable, so the filter passes them all through instead.
 func FilterByRatio(maxRatio float64) TrigramFilter {
 	return func(trigrams []TrigramCount, totalChunks int) []TrigramCount {
+		if totalChunks < 2 {
+			return trigrams
+		}
 		threshold := int(float64(totalChunks) * maxRatio)
 		var keep []TrigramCount
 		for _, t := range trigrams {

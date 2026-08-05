@@ -205,6 +205,18 @@
 **Expected:** only even chunkids < 100 survive
 **Refs:** crc-DB.md, R257
 
+## Test: FilterByRatio on a one-chunk index
+**Purpose:** ratio filtering cannot discriminate below two chunks, so the filter returns every trigram rather than dropping them all
+**Input:** call `FilterByRatio(0.50)` directly with one TrigramCount of Count 1 and totalChunks 1; also drive it end-to-end via Search with WithTrigramFilter on a DB holding a single chunk
+**Expected:** the direct call returns the trigram unmodified; the search finds the chunk instead of returning zero results
+**Refs:** crc-DB.md, seq-search.md, R674
+
+## Test: FilterByRatio still discriminates at low ratios
+**Purpose:** the degenerate-case guard must not become a floor — a rare trigram below the ratio is still skipped on a real corpus
+**Input:** call `FilterByRatio(0.0)` and `FilterByRatio(0.01)` directly with a TrigramCount of Count 1 and totalChunks 50
+**Expected:** both return empty — the trigram exceeds the ratio and is skipped, unaffected by the totalChunks < 2 guard
+**Refs:** crc-DB.md, seq-search.md, R141, R674
+
 ## Test: file-level token bag
 **Purpose:** F record token bag is aggregated from chunks
 **Input:** add a multi-line file, read FRecord

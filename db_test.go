@@ -1368,6 +1368,52 @@ func TestDBSearchWithTrigramFilter(t *testing.T) {
 	}
 }
 
+// CRC: crc-DB.md | Seq: seq-search.md | R674
+// A one-chunk index cannot be discriminated by ratio: every trigram present is
+// in 100% of chunks. Filtering there would drop them all and leave every query
+// unanswerable, so FilterByRatio passes them through untouched.
+func TestFilterByRatioSingleChunk(t *testing.T) {
+	tris := []TrigramCount{{Trigram: 0x616263, Count: 1}}
+
+	for _, totalChunks := range []int{0, 1} {
+		got := FilterByRatio(0.50)(tris, totalChunks)
+		if len(got) != 1 {
+			t.Errorf("FilterByRatio(0.50) with totalChunks=%d: got %d trigrams, want 1",
+				totalChunks, len(got))
+		}
+	}
+
+	// End to end: a DB holding exactly one chunk must still be searchable.
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "only.txt", "hello world\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := db.Search("hello", WithTrigramFilter(FilterByRatio(0.50)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 {
+		t.Errorf("single-chunk search: got %d results, want 1", len(sr.Results))
+	}
+}
+
+// CRC: crc-DB.md | Seq: seq-search.md | R141, R674
+// The degenerate-case guard must not become a floor. A max(1, threshold) floor
+// fires whenever maxRatio < 1/totalChunks — at any corpus size, not just the
+// degenerate one — so it would keep these trigrams the contract says to skip.
+func TestFilterByRatioDiscriminatesAtLowRatios(t *testing.T) {
+	tris := []TrigramCount{{Trigram: 0x616263, Count: 1}}
+
+	for _, maxRatio := range []float64{0.0, 0.01} {
+		got := FilterByRatio(maxRatio)(tris, 50)
+		if len(got) != 0 {
+			t.Errorf("FilterByRatio(%v) with totalChunks=50, Count=1: got %d trigrams, want 0",
+				maxRatio, len(got))
+		}
+	}
+}
+
 func TestDBScoreFileWithTrigramFilter(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "test.txt", "hello world\nfoo bar baz\n")

@@ -326,7 +326,8 @@
 - **R138:** ~~removed: no backward compat needed — default is FilterAll~~
 - **R139:** `WithTrigramFilter` applies to both `Search` and `ScoreFile`
 - **R140:** `FilterAll` stock filter: returns all trigrams unmodified (disables filtering)
-- **R141:** `FilterByRatio(maxRatio float64)` stock filter: skips trigrams appearing in more than `maxRatio` of total chunks
+- **R141:** `FilterByRatio(maxRatio float64)` stock filter: for `totalChunks >= 2`, skips trigrams appearing in more than `maxRatio` of total chunks
+- **R674:** `FilterByRatio` returns all trigrams unmodified when `totalChunks < 2` — below two chunks every present trigram is in 100% of chunks, so ratio filtering cannot discriminate and skipping them all would make every query unanswerable
 - **R142:** `FilterBestN(n int)` stock filter: keeps the N trigrams with the lowest document frequency
 - **R143:** Trigram document frequencies retrieved via per-query T record reads (typically 3-10 index reads per query)
 - **R144:** Total chunk count derived from the database (sum of file chunk counts from F records, or maintained as a counter)
