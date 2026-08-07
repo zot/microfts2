@@ -49,7 +49,7 @@ Search computes the query's trigrams, optionally filters them via a caller-suppl
 
 **Single-tree design:** All records live in one bbolt bucket, distinguished by a prefix byte. Trigram frequency counts (sparse C records), file metadata, settings, and the inverted trigram-to-chunk mapping share the one tree, maintained incrementally on every add/remove.
 
-**Dynamic trigram filtering:** Query trigram selection is handled at search time via `TrigramFilter` functions. Stock filters include `FilterAll` (use all trigrams), `FilterByRatio` (skip high-frequency trigrams), and `FilterBestN` (keep N most selective). Callers can supply custom filters.
+**Dynamic trigram filtering:** Query trigram selection is handled at search time via `TrigramFilter` functions. Stock filters include `FilterAll` (use all trigrams), `FilterByRatio(maxRatio, minCount)` (skip trigrams that are both high-frequency and expensive to scan), and `FilterBestN` (keep N most selective). Callers can supply custom filters.
 
 **Staleness detection:** Each indexed file records its modification time and SHA-256 hash. Checking mod time first avoids hashing unchanged files. The `-r` flag refreshes stale files before any command.
 

@@ -303,13 +303,29 @@ func FilterAll(trigrams []TrigramCount, _ int) []TrigramCount {
 	return trigrams
 }
 
-// CRC: crc-DB.md | Seq: seq-search.md | R141, R674
-// FilterByRatio returns a TrigramFilter that skips trigrams appearing in more
-// than maxRatio of total chunks. E.g., 0.50 skips trigrams in >50% of chunks.
+// CRC: crc-DB.md | Seq: seq-search.md | R141, R674, R675
+// FilterByRatio returns a TrigramFilter that skips a trigram only when it is
+// both non-discriminating and expensive to scan: appearing in more than
+// maxRatio of total chunks AND having at least minCount postings.
+//
+// The two clauses measure different things deliberately. Discrimination is
+// relative, so a ratio is the right instrument; scan cost is absolute, and a
+// ratio tracks it only while the corpus is large enough that a fraction of it
+// is itself a large number. Without minCount the rule discards a 6-posting
+// trigram on a 10-chunk corpus while keeping a 97,000-posting one on a large
+// corpus. A minCount of 0 or 1 disables the cost clause and reproduces pure
+// ratio filtering, since a trigram past the threshold already has at least one
+// posting. The clause changes a verdict only where
+// int(totalChunks*maxRatio) < count < minCount, which is non-empty only for
+// totalChunks < minCount/maxRatio.
+//
 // Below two chunks every present trigram is in 100% of chunks, so the ratio
 // cannot discriminate; filtering there would drop every trigram and make each
-// query unanswerable, so the filter passes them all through instead.
-func FilterByRatio(maxRatio float64) TrigramFilter {
+// query unanswerable, so the filter passes them all through instead. That
+// guard is independent of minCount — it rests on the ratio carrying no
+// information, not on the scan being cheap — so folding it into the cost
+// clause would let a caller passing minCount 0 reopen the defect.
+func FilterByRatio(maxRatio float64, minCount int) TrigramFilter {
 	return func(trigrams []TrigramCount, totalChunks int) []TrigramCount {
 		if totalChunks < 2 {
 			return trigrams
@@ -317,7 +333,7 @@ func FilterByRatio(maxRatio float64) TrigramFilter {
 		threshold := int(float64(totalChunks) * maxRatio)
 		var keep []TrigramCount
 		for _, t := range trigrams {
-			if t.Count <= threshold {
+			if t.Count <= threshold || t.Count < minCount {
 				keep = append(keep, t)
 			}
 		}

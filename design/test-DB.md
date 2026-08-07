@@ -206,16 +206,34 @@
 **Refs:** crc-DB.md, R257
 
 ## Test: FilterByRatio on a one-chunk index
-**Purpose:** ratio filtering cannot discriminate below two chunks, so the filter returns every trigram rather than dropping them all
-**Input:** call `FilterByRatio(0.50)` directly with one TrigramCount of Count 1 and totalChunks 1; also drive it end-to-end via Search with WithTrigramFilter on a DB holding a single chunk
+**Purpose:** ratio filtering cannot discriminate below two chunks, so the filter returns every trigram rather than dropping them all — and it does so independently of the cost clause
+**Input:** call `FilterByRatio(0.50, 0)` directly with one TrigramCount of Count 1 and totalChunks 1; also drive it end-to-end via Search with WithTrigramFilter on a DB holding a single chunk. `minCount` is 0 deliberately, so the cost clause cannot be what rescues the trigram
 **Expected:** the direct call returns the trigram unmodified; the search finds the chunk instead of returning zero results
 **Refs:** crc-DB.md, seq-search.md, R674
 
 ## Test: FilterByRatio still discriminates at low ratios
 **Purpose:** the degenerate-case guard must not become a floor — a rare trigram below the ratio is still skipped on a real corpus
-**Input:** call `FilterByRatio(0.0)` and `FilterByRatio(0.01)` directly with a TrigramCount of Count 1 and totalChunks 50
+**Input:** call `FilterByRatio(0.0, 0)` and `FilterByRatio(0.01, 0)` directly with a TrigramCount of Count 1 and totalChunks 50
 **Expected:** both return empty — the trigram exceeds the ratio and is skipped, unaffected by the totalChunks < 2 guard
 **Refs:** crc-DB.md, seq-search.md, R141, R674
+
+## Test: FilterByRatio rescues cheap postings on a small corpus
+**Purpose:** the cost clause is what distinguishes this rule from pure ratio filtering — a posting list too small to be worth avoiding is kept even though it dominates the corpus
+**Input:** call `FilterByRatio(0.50, 32)` directly with a TrigramCount of Count 6 and totalChunks 10 (threshold 5, so the ratio clause alone would skip it)
+**Expected:** the trigram is kept — it exceeds the ratio but has fewer than 32 postings, so it fails the cost clause and is not skipped
+**Refs:** crc-DB.md, seq-search.md, R141, R675
+
+## Test: FilterByRatio cost clause is inert above its reach
+**Purpose:** `minCount` must not change verdicts once the corpus exceeds `minCount / maxRatio`, or it would be a second threshold rather than a floor on scan cost
+**Input:** call `FilterByRatio(0.50, 32)` at totalChunks 200 — above the reach bound of 64 — across Counts 20, 50 and 150, which straddle both `minCount` and the threshold of 100
+**Expected:** every verdict matches `FilterByRatio(0.50, 0)` on the same input (keep, keep, skip). The middle count is load-bearing: a cost clause applied in the wrong direction, skipping because `count >= minCount` rather than rescuing because `count < minCount`, diverges only there
+**Refs:** crc-DB.md, seq-search.md, R675
+
+## Test: FilterByRatio with minCount 0 or 1 is pure ratio filtering
+**Purpose:** the generalization must be lossless — the old one-parameter semantics stays reachable inside the new signature
+**Input:** call `FilterByRatio(0.50, 0)` and `FilterByRatio(0.50, 1)` across a table of (Count, totalChunks) pairs spanning both sides of the threshold
+**Expected:** both agree with the pure ratio rule `count <= int(totalChunks × maxRatio)` on every pair, since a trigram past the threshold already has at least one posting
+**Refs:** crc-DB.md, seq-search.md, R675
 
 ## Test: file-level token bag
 **Purpose:** F record token bag is aggregated from chunks

@@ -189,7 +189,7 @@ Chunk filters compose: multiple `WithChunkFilter` calls accumulate (AND semantic
 
 TrigramCount: `{ Trigram uint32, Count int }` — trigram code with its corpus document frequency
 TrigramFilter: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — selects which query trigrams to search with
-Stock filters: `FilterAll` (use all), `FilterByRatio(maxRatio float64)` (skip high-frequency), `FilterBestN(n int)` (keep N lowest-frequency)
+Stock filters: `FilterAll` (use all), `FilterByRatio(maxRatio float64, minCount int)` (skip trigrams that are both high-frequency and expensive to scan), `FilterBestN(n int)` (keep N lowest-frequency)
 
 ## Append options
 

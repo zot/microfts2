@@ -324,8 +324,9 @@
 - **R138:** ~~removed: no backward compat needed — default is FilterAll~~
 - **R139:** `WithTrigramFilter` applies to both `Search` and `ScoreFile`
 - **R140:** `FilterAll` stock filter: returns all trigrams unmodified (disables filtering)
-- **R141:** `FilterByRatio(maxRatio float64)` stock filter: for `totalChunks >= 2`, skips trigrams appearing in more than `maxRatio` of total chunks
-- **R674:** `FilterByRatio` returns all trigrams unmodified when `totalChunks < 2` — below two chunks every present trigram is in 100% of chunks, so ratio filtering cannot discriminate and skipping them all would make every query unanswerable
+- **R141:** `FilterByRatio(maxRatio float64, minCount int)` stock filter: for `totalChunks >= 2`, skips a trigram only when it is both non-discriminating and expensive to scan — appearing in more than `maxRatio` of total chunks **and** having at least `minCount` postings
+- **R675:** `FilterByRatio`'s `minCount` clause measures scan cost in absolute postings rather than as a fraction of the corpus; it changes a verdict only where `int(totalChunks × maxRatio) < count < minCount`, which is non-empty only for `totalChunks < minCount / maxRatio`, and a `minCount` of 0 or 1 reproduces pure ratio filtering
+- **R674:** `FilterByRatio` returns all trigrams unmodified when `totalChunks < 2` — below two chunks every present trigram is in 100% of chunks, so ratio filtering cannot discriminate and skipping them all would make every query unanswerable. This guard is independent of `minCount` (R675) and must not be folded into it: it rests on the ratio carrying no information, not on the scan being cheap, so collapsing them would let a caller passing `minCount` 0 reopen the defect
 - **R142:** `FilterBestN(n int)` stock filter: keeps the N trigrams with the lowest document frequency
 - **R143:** Trigram document frequencies retrieved via per-query T record reads (typically 3-10 index reads per query)
 - **R144:** Total chunk count derived from the database (sum of file chunk counts from F records, or maintained as a counter)

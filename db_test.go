@@ -1358,27 +1358,29 @@ func TestDBSearchWithTrigramFilter(t *testing.T) {
 		t.Error("FilterBestN(1): expected results")
 	}
 
-	// FilterByRatio(0.0) should filter everything (no trigram appears in 0% of chunks)
-	sr, err = db.Search("hello", WithTrigramFilter(FilterByRatio(0.0)))
+	// FilterByRatio(0.0, 0) should filter everything (no trigram appears in 0% of chunks)
+	sr, err = db.Search("hello", WithTrigramFilter(FilterByRatio(0.0, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sr.Results) != 0 {
-		t.Errorf("FilterByRatio(0.0): got %d results, want 0", len(sr.Results))
+		t.Errorf("FilterByRatio(0.0, 0): got %d results, want 0", len(sr.Results))
 	}
 }
 
 // CRC: crc-DB.md | Seq: seq-search.md | R674
 // A one-chunk index cannot be discriminated by ratio: every trigram present is
 // in 100% of chunks. Filtering there would drop them all and leave every query
-// unanswerable, so FilterByRatio passes them through untouched.
+// unanswerable, so FilterByRatio passes them through untouched. minCount is 0
+// throughout, so the cost clause cannot be what rescues the trigram — this
+// pins the guard as independent of minCount rather than a special case of it.
 func TestFilterByRatioSingleChunk(t *testing.T) {
 	tris := []TrigramCount{{Trigram: 0x616263, Count: 1}}
 
 	for _, totalChunks := range []int{0, 1} {
-		got := FilterByRatio(0.50)(tris, totalChunks)
+		got := FilterByRatio(0.50, 0)(tris, totalChunks)
 		if len(got) != 1 {
-			t.Errorf("FilterByRatio(0.50) with totalChunks=%d: got %d trigrams, want 1",
+			t.Errorf("FilterByRatio(0.50, 0) with totalChunks=%d: got %d trigrams, want 1",
 				totalChunks, len(got))
 		}
 	}
@@ -1389,7 +1391,7 @@ func TestFilterByRatioSingleChunk(t *testing.T) {
 	if _, err := db.AddFile(fp, "line"); err != nil {
 		t.Fatal(err)
 	}
-	sr, err := db.Search("hello", WithTrigramFilter(FilterByRatio(0.50)))
+	sr, err := db.Search("hello", WithTrigramFilter(FilterByRatio(0.50, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1406,10 +1408,83 @@ func TestFilterByRatioDiscriminatesAtLowRatios(t *testing.T) {
 	tris := []TrigramCount{{Trigram: 0x616263, Count: 1}}
 
 	for _, maxRatio := range []float64{0.0, 0.01} {
-		got := FilterByRatio(maxRatio)(tris, 50)
+		got := FilterByRatio(maxRatio, 0)(tris, 50)
 		if len(got) != 0 {
-			t.Errorf("FilterByRatio(%v) with totalChunks=50, Count=1: got %d trigrams, want 0",
+			t.Errorf("FilterByRatio(%v, 0) with totalChunks=50, Count=1: got %d trigrams, want 0",
 				maxRatio, len(got))
+		}
+	}
+}
+
+// CRC: crc-DB.md | Seq: seq-search.md | R141, R675
+// The cost clause is what separates this rule from pure ratio filtering. On a
+// 10-chunk corpus the ratio alone calls a 6-posting scan too expensive; six
+// postings is not expensive at any corpus size, so the trigram is kept.
+func TestFilterByRatioRescuesCheapPostings(t *testing.T) {
+	tris := []TrigramCount{{Trigram: 0x616263, Count: 6}}
+
+	// Ratio clause alone (minCount 0): threshold is 5, so 6 is skipped.
+	if got := FilterByRatio(0.50, 0)(tris, 10); len(got) != 0 {
+		t.Errorf("FilterByRatio(0.50, 0) with totalChunks=10, Count=6: got %d trigrams, want 0", len(got))
+	}
+
+	// With the cost clause: 6 postings is below minCount, so it is kept.
+	if got := FilterByRatio(0.50, 32)(tris, 10); len(got) != 1 {
+		t.Errorf("FilterByRatio(0.50, 32) with totalChunks=10, Count=6: got %d trigrams, want 1", len(got))
+	}
+}
+
+// CRC: crc-DB.md | Seq: seq-search.md | R675
+// minCount is a floor on scan cost, not a second threshold: above the reach
+// bound totalChunks >= minCount/maxRatio it must not change any verdict. The
+// counts below straddle both minCount and the threshold, so a cost clause
+// applied in the wrong direction — skipping because count >= minCount rather
+// than rescuing because count < minCount — diverges on the middle case.
+func TestFilterByRatioCostClauseInertAboveReach(t *testing.T) {
+	// Reach bound is 32/0.50 = 64; totalChunks 200 is well above it, and the
+	// threshold there (100) is above minCount, which is what makes it inert.
+	const totalChunks = 200
+
+	for _, count := range []int{20, 50, 150} {
+		tris := []TrigramCount{{Trigram: 0x616263, Count: count}}
+		withCost := FilterByRatio(0.50, 32)(tris, totalChunks)
+		pureRatio := FilterByRatio(0.50, 0)(tris, totalChunks)
+		if len(withCost) != len(pureRatio) {
+			t.Errorf("above reach bound, Count=%d: minCount=32 gave %d trigrams, minCount=0 gave %d — want equal",
+				count, len(withCost), len(pureRatio))
+		}
+		want := 0
+		if count <= 100 {
+			want = 1
+		}
+		if len(withCost) != want {
+			t.Errorf("FilterByRatio(0.50, 32) with totalChunks=%d, Count=%d: got %d trigrams, want %d",
+				totalChunks, count, len(withCost), want)
+		}
+	}
+}
+
+// CRC: crc-DB.md | Seq: seq-search.md | R675
+// The generalization must be lossless: minCount 0 and 1 both reproduce the
+// old one-parameter semantics, since a trigram past the threshold already has
+// at least one posting.
+func TestFilterByRatioMinCountZeroOrOneIsPureRatio(t *testing.T) {
+	cases := []struct{ count, totalChunks int }{
+		{1, 50}, {6, 10}, {5, 10}, {150, 200}, {100, 200}, {97116, 196841}, {1, 2},
+	}
+
+	for _, minCount := range []int{0, 1} {
+		for _, c := range cases {
+			tris := []TrigramCount{{Trigram: 0x616263, Count: c.count}}
+			got := FilterByRatio(0.50, minCount)(tris, c.totalChunks)
+			want := 0
+			if c.count <= int(float64(c.totalChunks)*0.50) {
+				want = 1
+			}
+			if len(got) != want {
+				t.Errorf("FilterByRatio(0.50, %d) with totalChunks=%d, Count=%d: got %d trigrams, want %d",
+					minCount, c.totalChunks, c.count, len(got), want)
+			}
 		}
 	}
 }
