@@ -217,3 +217,70 @@ func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, op
 - If `fn` returns a non-nil error, the entire transaction aborts — remove, add, and caller's changes all roll back
 - If `fn` is nil, behavior is identical to `Reindex`
 - Cache invalidation (pathCache, pathToID) happens after the transaction commits, same as `Reindex`
+
+# Two-Phase Indexing: Compute Off the Write Actor
+
+`AddFile`, `AddFileWithContent`, and the `Reindex` family compute *and* store in a
+single call: they read the file, chunk it, and for each chunk compute the dedup hash,
+trigrams, and tokens — then open a write transaction and store the result. The
+per-chunk compute is CPU-bound and touches no transaction, but it runs inside the same
+call that holds the write transaction, and the computed chunk data is unexported, so a
+caller cannot compute ahead of time.
+
+A consumer that indexes many files concurrently — ark moves file indexing onto per-file
+actors with chunk-granularity preemption — needs to run the compute off its single
+write-actor slot and hand microfts2 only the store step. This splits each fused entry
+into a **compute** phase and a **store** phase, joined by an opaque prepared handle.
+
+## Compute — transaction-free, safe from any goroutine
+
+```go
+func (db *DB) PrepareFile(fpath, strategy string, opts ...IndexOption) (*PreparedFile, error)
+func (db *DB) PrepareContent(fpath, strategy string, content []byte, opts ...IndexOption) (*PreparedFile, error)
+```
+
+- Reads (`PrepareFile`) or accepts (`PrepareContent`) the content, runs the chunker, and
+  computes each chunk's hash, trigrams, and tokens.
+- Opens **no** bbolt transaction and is safe to call from any goroutine, provided the
+  DB's chunking configuration — registered strategies, the chunker registry, the
+  trigram/case-fold settings — is not mutated concurrently. Register strategies before
+  computing; do not call `AddChunker` or add a strategy while a compute is in flight.
+- Returns an opaque `*PreparedFile`. The caller cannot inspect or forge it; it carries the
+  collected per-chunk data plus the file's mod time, content hash, and byte length. The
+  H/T/W/C/F record layout stays private to microfts2.
+- `WithChunkCallback` fires during compute, in chunk order — that is when chunk text
+  exists. (`WithIndexedChunkCallback` fires during store; see below.)
+
+A `PreparedFile` is consumed by a single store call: storing releases the chunk content
+it holds. To retry after a failed store, re-prepare.
+
+## Store — the only step that opens a write transaction
+
+```go
+func (db *DB) StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)
+func (db *DB) ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)
+```
+
+- `StorePrepared` performs a fresh add: allocates the fileid, writes the N and F records,
+  dedups each chunk by H record, and updates the C/T/W records and corpus counters. The
+  `ErrAlreadyIndexed` duplicate guard is preserved.
+- `ReindexPrepared` performs a content-diff reindex (see "When reindexing a file"): the
+  same store, preceded by deleting the old path metadata and followed by dropping the old
+  fileid's occurrences so unchanged content keeps its chunkid. **The removal set is derived
+  inside the transaction from the committed F record — the caller does not supply it.**
+  Chunk refcounts are shared across files, so the orphan cascade must be computed against
+  committed state; a caller-supplied removal set computed off-actor could race a concurrent
+  store of the same content.
+- `WithIndexedChunkCallback`, `WithRemovedChunkCallback`, and the `ReindexCallback` fire
+  during store, inside the write transaction, with the same semantics as on the fused
+  methods.
+
+The fileid lifecycle and the H/T/W/C/F invariants stay owned by microfts2 in the store
+phase; the prepared handle never carries those records, only derived per-chunk data.
+
+## The fused methods are thin wrappers
+
+`AddFile`, `AddFileWithContent`, and the `Reindex` family remain and are unchanged for
+existing callers: each is compute-then-store in one call (`PrepareFile` then
+`StorePrepared`, or `PrepareFile` then `ReindexPrepared`). Splitting the API adds the
+two-phase entry points; it does not remove or alter the one-call forms.

@@ -73,9 +73,9 @@ Notes:
 
 - `nil` and `[]string{}` are semantically distinct for `AllowedInner` and `AllowedParent`. `nil` means "no restriction"; an empty (but non-nil) slice means "restriction with an empty list." Users should be deliberate about which they write.
 - A traditional symmetric string (e.g. C `"..."`): `Open: ["\""]`, `Close: ["\""]`, `Escape: "\\"`, `AllowedInner: []string{}`.
-- A raw string (e.g. Go backticks): `Open: ["`"]`, `Close: ["`"]`, `Escape: ""`, `AllowedInner: []string{}`.
-- A JavaScript template literal: `Open: ["`"]`, `Close: ["`"]`, `Escape: "\\"`, `AllowedInner: []string{"${"}`.
-- A JavaScript `${` interpolation: `Open: ["${"]`, `Close: ["}"]`, `AllowedParent: []string{"`"}` (recognized only inside backquote groups; everywhere else `${` is plain text).
+- A raw string (e.g. Go backticks): ``Open: ["`"]``, ``Close: ["`"]``, `Escape: ""`, `AllowedInner: []string{}`.
+- A JavaScript template literal: ``Open: ["`"]``, ``Close: ["`"]``, `Escape: "\\"`, `AllowedInner: []string{"${"}`.
+- A JavaScript `${` interpolation: `Open: ["${"]`, `Close: ["}"]`, ``AllowedParent: []string{"`"}`` (recognized only inside backquote groups; everywhere else `${` is plain text).
 - A code bracket (e.g. `{`): `Open: ["{"]`, `Close: ["}"]`. `AllowedInner` and `AllowedParent` left nil.
 
 Built-in language configs are provided as package-level variables (e.g. `LangGo`, `LangC`, `LangPython`). Users can construct custom `BracketLang` values.

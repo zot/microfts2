@@ -1343,18 +1343,7 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	// Yield callback shared by both paths: validates UTF-8, fires callback, collects chunk data.
 	var chunks []collectedChunk
 	var utf8Err error
-	yield := func(c Chunk) bool {
-		if !utf8.Valid(c.Content) {
-			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
-			return false
-		}
-		// R473: fire callback with the chunk content after UTF-8 validation
-		if cb != nil {
-			cb(string(c.Content))
-		}
-		chunks = append(chunks, db.indexChunk(c)) // R656
-		return true
-	}
+	yield := db.collectYield(fpath, cb, &chunks, &utf8Err)
 
 	var data []byte
 	var hash [32]byte
@@ -1391,28 +1380,157 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	return chunks, data, modTime, hash, nil
 }
 
-// Seq: seq-add.md | R118
-func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback, ich IndexedChunkCallback) (uint64, []byte, error) {
+// collectYield builds the shared per-chunk yield used by the compute paths:
+// validate UTF-8, fire the text callback, then collect the indexed chunk.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R473, R656, R683
+func (db *DB) collectYield(fpath string, cb ChunkCallback, out *[]collectedChunk, utf8Err *error) func(Chunk) bool {
+	return func(c Chunk) bool {
+		if !utf8.Valid(c.Content) {
+			*utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
+			return false
+		}
+		if cb != nil {
+			cb(string(c.Content))
+		}
+		*out = append(*out, db.indexChunk(c))
+		return true
+	}
+}
+
+// PreparedFile is an opaque, single-use handle carrying a file's computed chunks
+// and metadata. It is produced off the write actor by PrepareFile/PrepareContent
+// and consumed once by StorePrepared/ReindexPrepared; the H/T/W/C/F record layout
+// stays private. Storing releases the chunk content it holds, so a second store
+// fails — re-prepare to retry.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R676, R679
+type PreparedFile struct {
+	fpath      string
+	strategy   string
+	chunks     []collectedChunk
+	data       []byte
+	modTime    int64
+	hash       [32]byte
+	fileLength int64
+	consumed   bool
+}
+
+// errPreparedConsumed is returned when a prepared handle is stored a second time. // R679
+var errPreparedConsumed = errors.New("microfts2: prepared handle already consumed")
+
+// prepareFile is the shared compute for PrepareFile and the fused add/reindex.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R676, R678
+func (db *DB) prepareFile(fpath, strategy string, cb ChunkCallback) (*PreparedFile, error) {
 	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
+	return &PreparedFile{fpath: fpath, strategy: strategy, chunks: chunks, data: data, modTime: modTime, hash: hash, fileLength: int64(len(data))}, nil
+}
 
+// PrepareFile computes a file's chunks off the write actor: read and chunk the
+// file, then per chunk compute the dedup hash, trigrams, and tokens. It opens no
+// bbolt transaction and is safe from any goroutine while the chunking
+// configuration is not mutated. WithChunkCallback fires here.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R676, R678, R683
+func (db *DB) PrepareFile(fpath, strategy string, opts ...IndexOption) (*PreparedFile, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o.applyIndex(&cfg)
+	}
+	return db.prepareFile(fpath, strategy, cfg.chunkCallback)
+}
+
+// PrepareContent is PrepareFile over caller-supplied bytes instead of reading
+// disk. The strategy must be a content-based Chunker; modTime is left zero, as a
+// content-prepared file carries no on-disk timestamp.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R677, R678
+func (db *DB) PrepareContent(fpath, strategy string, content []byte, opts ...IndexOption) (*PreparedFile, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o.applyIndex(&cfg)
+	}
+	chunks, hash, err := db.collectChunksBytes(fpath, strategy, content, cfg.chunkCallback)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedFile{fpath: fpath, strategy: strategy, chunks: chunks, data: content, hash: hash, fileLength: int64(len(content))}, nil
+}
+
+// collectChunksBytes chunks caller-supplied content with a content-based Chunker.
+// Transaction-free. R677
+func (db *DB) collectChunksBytes(fpath, strategy string, data []byte, cb ChunkCallback) ([]collectedChunk, [32]byte, error) {
+	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
+		return nil, [32]byte{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
+	}
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
+		return nil, [32]byte{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
+	}
+	ch, ok := chunker.(Chunker)
+	if !ok {
+		return nil, [32]byte{}, fmt.Errorf("chunker strategy %q requires a content-based Chunker for PrepareContent", strategy)
+	}
+	var chunks []collectedChunk
+	var utf8Err error
+	if err := ch.Chunks(fpath, data, db.collectYield(fpath, cb, &chunks, &utf8Err)); err != nil {
+		return nil, [32]byte{}, err
+	}
+	if utf8Err != nil {
+		return nil, [32]byte{}, utf8Err
+	}
+	if len(chunks) == 0 {
+		return nil, [32]byte{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
+	}
+	return chunks, contentHash(data), nil
+}
+
+// storePrepared is the shared store for StorePrepared and the fused add.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R679, R680
+func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, error) {
+	if p.consumed {
+		return 0, errPreparedConsumed
+	}
 	var fileid uint64
-	err = db.bolt.Update(func(tx *bbolt.Tx) error {
+	err := db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		var txnErr error
-		fileid, _, txnErr = db.addFileInTxn(bucketWrap{b}, fpath, strategy, chunks, modTime, hash, int64(len(data)), ich)
+		fileid, _, txnErr = db.addFileInTxn(bucketWrap{b}, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
 		return txnErr
 	})
-	if err == nil && db.pathCache != nil {
-		db.pathCache[fileid] = fpath
-		db.pathToID[fpath] = fileid
+	if err != nil {
+		return 0, err
 	}
-	return fileid, data, err
+	p.consumed = true
+	if db.pathCache != nil {
+		db.pathCache[fileid] = p.fpath
+		db.pathToID[p.fpath] = fileid
+	}
+	return fileid, nil
+}
+
+// StorePrepared stores a prepared file as a fresh add on the write actor: one
+// write transaction doing the ErrAlreadyIndexed guard, fileid allocation, and
+// the H/C/T/W/F record work. WithIndexedChunkCallback fires here.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R680, R683, R684
+func (db *DB) StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o.applyIndex(&cfg)
+	}
+	return db.storePrepared(p, cfg.indexedChunkCallback)
+}
+
+// Seq: seq-add.md | R118, R684
+func (db *DB) addFileCore(fpath, strategy string, cb ChunkCallback, ich IndexedChunkCallback) (uint64, []byte, error) {
+	p, err := db.prepareFile(fpath, strategy, cb)
+	if err != nil {
+		return 0, nil, err
+	}
+	fileid, err := db.storePrepared(p, ich)
+	return fileid, p.data, err
 }
 
 // resolveChunker returns the chunker for a strategy (Chunker, FileChunker, or both), or nil.
@@ -1857,36 +1975,37 @@ func (db *DB) ReindexWithContent(fpath, strategy string, opts ...IndexOption) (u
 	return db.reindexCore(fpath, strategy, cfg.chunkCallback, nil, cfg.indexedChunkCallback, cfg.removedChunkCallback)
 }
 
-// CRC: crc-DB.md | R556, R673
-func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexCallback, ich IndexedChunkCallback, rmcb RemovedChunkCallback) (uint64, []byte, error) {
-	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
-	if err != nil {
-		return 0, nil, err
+// reindexPrepared is the shared content-diff store for ReindexPrepared and the
+// fused Reindex family.
+//
+// R673: add the new chunks before dropping the old file's occurrences so
+// unchanged content keeps its chunkid. Only F+N metadata is deleted up front
+// (freeing the path for the re-add); the old chunks' H records survive into
+// addFileInTxn, so a chunk whose content hash is unchanged dedup-hits and reuses
+// its chunkid while new content allocates a fresh one. Dropping the old fileid's
+// occurrences afterward keeps surviving content (re-added under the new fileid)
+// and orphans content gone from the file. The removal set is derived here,
+// in-txn, from the committed F record — never supplied by the caller.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#3 | R556, R673, R681, R682
+func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedChunkCallback, rmcb RemovedChunkCallback) (uint64, error) {
+	if p.consumed {
+		return 0, errPreparedConsumed
 	}
-
-	// R673: add the new chunks before dropping the old file's occurrences so
-	// unchanged content keeps its chunkid. Only F+N metadata is deleted up
-	// front (freeing the path for the re-add); the old chunks' H records
-	// survive into addFileInTxn, so a chunk whose content hash is unchanged
-	// dedup-hits and reuses its chunkid while new content allocates a fresh
-	// one. Dropping the old fileid's occurrences afterward keeps surviving
-	// content (re-added under the new fileid) and orphans content gone from
-	// the file.
 	var fileid uint64
-	err = db.bolt.Update(func(tx *bbolt.Tx) error {
+	err := db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		th := bucketWrap{b}
-		oldFileID, oldFrec, err := db.lookupFileByPath(th, fpath)
+		oldFileID, oldFrec, err := db.lookupFileByPath(th, p.fpath)
 		if err != nil {
 			return err
 		}
-		db.deleteFileMeta(th, oldFileID, fpath)
+		db.deleteFileMeta(th, oldFileID, p.fpath)
 		var newChunkIDs []uint64
 		var txnErr error
-		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, fpath, strategy, chunks, modTime, hash, int64(len(data)), ich)
+		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
 		if txnErr != nil {
 			return txnErr
 		}
@@ -1899,14 +2018,39 @@ func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexC
 		}
 		return nil
 	})
-	if err == nil && db.pathToID != nil {
-		if oldID, ok := db.pathToID[fpath]; ok {
+	if err != nil {
+		return 0, err
+	}
+	p.consumed = true
+	if db.pathToID != nil {
+		if oldID, ok := db.pathToID[p.fpath]; ok {
 			delete(db.pathCache, oldID)
 		}
-		db.pathCache[fileid] = fpath
-		db.pathToID[fpath] = fileid
+		db.pathCache[fileid] = p.fpath
+		db.pathToID[p.fpath] = fileid
 	}
-	return fileid, data, err
+	return fileid, nil
+}
+
+// ReindexPrepared stores a prepared file as a content-diff reindex on the write
+// actor. WithIndexedChunkCallback and WithRemovedChunkCallback fire here.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#3 | R681, R682, R683, R684
+func (db *DB) ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, error) {
+	var cfg indexConfig
+	for _, o := range opts {
+		o.applyIndex(&cfg)
+	}
+	return db.reindexPrepared(p, nil, cfg.indexedChunkCallback, cfg.removedChunkCallback)
+}
+
+// CRC: crc-DB.md | R556, R673
+func (db *DB) reindexCore(fpath, strategy string, cb ChunkCallback, rcb ReindexCallback, ich IndexedChunkCallback, rmcb RemovedChunkCallback) (uint64, []byte, error) {
+	p, err := db.prepareFile(fpath, strategy, cb)
+	if err != nil {
+		return 0, nil, err
+	}
+	fileid, err := db.reindexPrepared(p, rcb, ich, rmcb)
+	return fileid, p.data, err
 }
 
 // --- ChunkCallback ---
@@ -2116,81 +2260,58 @@ func WithRemovedChunkCallback(fn RemovedChunkCallback) interface {
 	}
 }
 
-// AppendChunks adds chunks to an existing file without full reindex.
-// content is only the appended bytes, not the full file.
-// CRC: crc-DB.md | Seq: seq-append.md
-// R150, R151, R152, R153, R154, R155, R156, R157, R163, R164, R165, R166, R167, R168, R604, R605, R606, R608
-func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error {
-	var cfg appendConfig
-	for _, o := range opts {
-		o.applyAppend(&cfg)
-	}
+// ErrAppendTailMoved is returned by AppendPrepared when the committed F record's
+// last locator no longer matches the tail the prepared append was computed
+// against. R688
+var ErrAppendTailMoved = errors.New("microfts2: append tail moved since prepare")
 
+// PreparedAppend is an opaque, single-use handle for a computed append, produced
+// by PrepareAppend and consumed once by AppendPrepared. It carries the new
+// chunks, whether the append replaces the file's last chunk, and the last
+// locator compute assumed — which AppendPrepared validates against the committed
+// F record.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#4 | R685, R686
+type PreparedAppend struct {
+	strategy     string
+	chunks       []collectedChunk
+	replacedLast bool
+	lastLocator  []byte
+	consumed     bool
+}
+
+// appendCollect is the transaction-free append compute shared by PrepareAppend
+// and the fused AppendChunks: resolve the chunker, dispatch AppendAwareChunker
+// (or plain Chunker), collect the new chunks, apply the ErrAppendBoundary guard,
+// and adjust line ranges by baseLine.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#4 | R605, R606, R623, R624, R625, R656, R685
+func (db *DB) appendCollect(path string, lastLocator, content []byte, strategy string, cb ChunkCallback, baseLine int) ([]collectedChunk, bool, error) {
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
-		return fmt.Errorf("chunker strategy %q not registered", strategy)
+		return nil, false, fmt.Errorf("chunker strategy %q not registered", strategy)
 	}
 	chunker, ok := resolved.(Chunker)
 	if !ok {
-		return fmt.Errorf("chunker strategy %q does not support content-based chunking (implements FileChunker only)", strategy)
+		return nil, false, fmt.Errorf("chunker strategy %q does not support content-based chunking (implements FileChunker only)", strategy)
 	}
 	appendAware, _ := resolved.(AppendAwareChunker)
 
-	// Read existing F record (and last entry's locator for AppendAwareChunker dispatch)
-	var frec FRecord
-	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
-		if b == nil {
-			return fmt.Errorf("bucket %q not found", db.dbName)
-		}
-		var err error
-		frec, err = db.readFRecord(bucketWrap{b}, fileid)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("fileid %d not found: %w", fileid, err)
-	}
-
-	filename := ""
-	if len(frec.Names) > 0 {
-		filename = frec.Names[0]
-	}
-	var lastLocator []byte
-	if len(frec.Chunks) > 0 {
-		lastLocator = frec.Chunks[len(frec.Chunks)-1].Locator
-	}
-
-	// Yield closure shared by both dispatch paths
 	var newChunks []collectedChunk
 	var utf8Err error
-	yield := func(c Chunk) bool {
-		if !utf8.Valid(c.Content) {
-			utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8", c.Range)
-			return false
-		}
-		if cfg.chunkCallback != nil {
-			cfg.chunkCallback(string(c.Content))
-		}
-		newChunks = append(newChunks, db.indexChunk(c)) // R656
-		return true
-	}
+	yield := db.collectYield(path, cb, &newChunks, &utf8Err)
 
 	// Dispatch: AppendAwareChunker fast path or default Chunker (R605, R606)
 	var replacedLast bool
+	var err error
 	if appendAware != nil {
-		var aerr error
-		replacedLast, aerr = appendAware.AppendChunks(filename, lastLocator, content, yield)
-		if aerr != nil {
-			return aerr
-		}
-		// @note: add FileChunks case here
+		replacedLast, err = appendAware.AppendChunks(path, lastLocator, content, yield)
 	} else {
-		if err := chunker.Chunks(filename, content, yield); err != nil {
-			return err
-		}
+		err = chunker.Chunks(path, content, yield)
+	}
+	if err != nil {
+		return nil, false, err
 	}
 	if utf8Err != nil {
-		return utf8Err
+		return nil, false, utf8Err
 	}
 	if len(newChunks) == 0 && !replacedLast {
 		// Empty input is a legitimate no-op. Non-empty input with a non-AppendAware
@@ -2198,25 +2319,62 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		// boundary the chunker can't recognise in isolation — surface it instead
 		// of silently dropping data and leaving the F record stale. R623, R624, R625
 		if appendAware == nil && len(content) > 0 {
-			return fmt.Errorf("AppendChunks: chunker %q produced zero chunks from %d-byte content: %w", strategy, len(content), ErrAppendBoundary)
+			return nil, false, fmt.Errorf("AppendChunks: chunker %q produced zero chunks from %d-byte content: %w", strategy, len(content), ErrAppendBoundary)
 		}
-		return nil
+		return nil, false, nil
 	}
 
 	// Adjust ranges if baseLine is set (R165, R166). Only meaningful for default-path
 	// line-based chunkers — AppendAwareChunker is expected to emit absolute ranges itself.
-	if cfg.baseLine > 0 && appendAware == nil {
+	if baseLine > 0 && appendAware == nil {
 		for i := range newChunks {
-			adjusted, err := adjustRange(string(newChunks[i].Range), cfg.baseLine)
+			adjusted, err := adjustRange(string(newChunks[i].Range), baseLine)
 			if err != nil {
-				return fmt.Errorf("adjust range %q: %w", string(newChunks[i].Range), err)
+				return nil, false, fmt.Errorf("adjust range %q: %w", string(newChunks[i].Range), err)
 			}
 			newChunks[i].Range = []byte(adjusted)
 		}
 	}
+	return newChunks, replacedLast, nil
+}
 
-	// Single atomic write transaction (R164)
-	return db.bolt.Update(func(tx *bbolt.Tx) error {
+// PrepareAppend computes an append off the write actor. The caller supplies the
+// file's path and the last chunk's locator (the AppendAwareChunker resume
+// state), so compute reads no committed state and opens no transaction.
+// WithAppendChunkCallback and WithBaseLine apply here.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#4 | R685, R686
+func (db *DB) PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error) {
+	var cfg appendConfig
+	for _, o := range opts {
+		o.applyAppend(&cfg)
+	}
+	chunks, replacedLast, err := db.appendCollect(path, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedAppend{
+		strategy:     strategy,
+		chunks:       chunks,
+		replacedLast: replacedLast,
+		lastLocator:  append([]byte(nil), lastLocator...),
+	}, nil
+}
+
+// appendPrepared is the shared append store for AppendPrepared and the fused
+// AppendChunks. When the prepared append replaces the last chunk, it verifies
+// the committed tail still matches the assumed locator (ErrAppendTailMoved)
+// before the drop-and-replace.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R164, R604, R608, R687, R688
+func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig) error {
+	if p.consumed {
+		return errPreparedConsumed
+	}
+	// Empty, non-replacing append is a legitimate no-op (R625).
+	if len(p.chunks) == 0 && !p.replacedLast {
+		p.consumed = true
+		return nil
+	}
+	err := db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
@@ -2227,6 +2385,18 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			return err
 		}
 
+		// R688: reject a prepared append whose assumed tail no longer matches the
+		// committed F record — only meaningful when the last chunk is replaced.
+		if p.replacedLast {
+			var committedLast []byte
+			if len(frec.Chunks) > 0 {
+				committedLast = frec.Chunks[len(frec.Chunks)-1].Locator
+			}
+			if !bytes.Equal(committedLast, p.lastLocator) {
+				return ErrAppendTailMoved
+			}
+		}
+
 		// Build file-level token bag from existing chunks before any drop
 		fileBag := make(map[string]int)
 		mergeTokenBag(fileBag, frec.Tokens)
@@ -2235,7 +2405,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		// tokens from this file's bag; then either rewrite C with one fewer
 		// occurrence or cascade orphan cleanup. // R604, R608
 		var droppedRemoved, droppedTokens int64
-		if replacedLast && len(frec.Chunks) > 0 {
+		if p.replacedLast && len(frec.Chunks) > 0 {
 			last := frec.Chunks[len(frec.Chunks)-1]
 			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
 				return err
@@ -2245,8 +2415,8 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 
 		var newChunksTW []newChunkTW
 
-		for i := range newChunks {
-			ch := newChunks[i]
+		for i := range p.chunks {
+			ch := p.chunks[i]
 			chunkid, nc, crec, err := db.dedupOrCreateChunk(th, ch, fileid)
 			if err != nil {
 				return err
@@ -2260,7 +2430,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 			}
 			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: string(ch.Range), Locator: ch.Locator})
 			mergeTokenBag(fileBag, ch.tokens)
-			newChunks[i].Content = nil // release content after C record write (and after callback fire)
+			p.chunks[i].Content = nil // release content after C record write (and after callback fire)
 		}
 
 		// Coalesced T/W/B record updates
@@ -2298,6 +2468,67 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 
 		return b.Put(makeFKey(fileid), frec.MarshalValue())
 	})
+	if err != nil {
+		return err
+	}
+	p.consumed = true
+	return nil
+}
+
+// AppendPrepared stores a prepared append on the write actor. Store-time options
+// apply here: WithContentHash, WithModTime, WithFileLength,
+// WithIndexedChunkCallback, WithRemovedChunkCallback.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R687, R688
+func (db *DB) AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error {
+	var cfg appendConfig
+	for _, o := range opts {
+		o.applyAppend(&cfg)
+	}
+	return db.appendPrepared(fileid, p, cfg)
+}
+
+// AppendChunks adds chunks to an existing file without full reindex.
+// content is only the appended bytes, not the full file. It reads the file's
+// current tail, then composes PrepareAppend + AppendPrepared in one call.
+// CRC: crc-DB.md | Seq: seq-append.md, seq-prepare-store.md#4, seq-prepare-store.md#5
+// R150, R151, R152, R153, R154, R155, R156, R157, R163, R164, R165, R166, R167, R168, R604, R605, R606, R608, R689
+func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error {
+	var cfg appendConfig
+	for _, o := range opts {
+		o.applyAppend(&cfg)
+	}
+
+	// Read the file's name and current tail locator — what PrepareAppend takes as
+	// parameters. The prepared path supplies these off-actor instead.
+	var filename string
+	var lastLocator []byte
+	err := db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		if b == nil {
+			return fmt.Errorf("bucket %q not found", db.dbName)
+		}
+		frec, err := db.readFRecord(bucketWrap{b}, fileid)
+		if err != nil {
+			return err
+		}
+		if len(frec.Names) > 0 {
+			filename = frec.Names[0]
+		}
+		if len(frec.Chunks) > 0 {
+			lastLocator = frec.Chunks[len(frec.Chunks)-1].Locator
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("fileid %d not found: %w", fileid, err)
+	}
+
+	chunks, replacedLast, err := db.appendCollect(filename, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
+	if err != nil {
+		return err
+	}
+	p := &PreparedAppend{strategy: strategy, chunks: chunks, replacedLast: replacedLast, lastLocator: lastLocator}
+	return db.appendPrepared(fileid, p, cfg)
 }
 
 // adjustRange parses a "start-end" range string and adds baseLine to both values.

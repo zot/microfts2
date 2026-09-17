@@ -99,7 +99,7 @@
 
 ## Test: except-regex subtract
 **Purpose:** WithExceptRegex rejects chunks matching any pattern
-**Input:** add files with chunks "@status: open task", "@status: completed task". Search "task" with WithExceptRegex("@status:.*completed")
+**Input:** add files with chunks "@status: open task", "@status: completed task". Search "task" with `WithExceptRegex("@status:.*completed")`
 **Expected:** only "@status: open task" survives — "completed" chunk is subtracted
 **Refs:** crc-DB.md, seq-search.md, R184, R188, R189
 
@@ -330,3 +330,77 @@
 **Input:** create DB, add file, modify file on disk, call RefreshStale with WithChunkCallback
 **Expected:** callback fires for each chunk of the reindexed file
 **Refs:** crc-DB.md, R479
+
+## Test: PrepareFile plus StorePrepared equals AddFile
+**Purpose:** the two-phase add produces the same index as the fused AddFile (R676, R680, R684)
+**Input:** two DBs from the same fixture; on one call AddFile(path, strategy); on the other call StorePrepared(PrepareFile(path, strategy)). Compare RecordCounts per prefix and a search across both
+**Expected:** identical RecordCounts per prefix and identical search results
+**Refs:** crc-DB.md, seq-prepare-store.md#1, seq-prepare-store.md#2, R676, R680, R684
+**Code:** db_test.go
+**Fire alarm:** in StorePrepared, drop the last prepared chunk before addFileInTxn — the split DB has one fewer C/F chunk than the AddFile DB and the RecordCounts comparison goes red
+**Inject:** db.go:StorePrepared
+**Pulled:** 2026-09-17 — rang (AddFile=[45 393 585] vs split=[32 312 457])
+
+## Test: PrepareContent plus StorePrepared indexes caller bytes
+**Purpose:** compute from caller-supplied bytes, not disk (R677)
+**Input:** call StorePrepared(PrepareContent(name, strategy, []byte(content))) where the content is not present on disk at name; search for a substring
+**Expected:** the content is indexed and searchable although no file was read from disk
+**Refs:** crc-DB.md, seq-prepare-store.md#1, R677
+**Code:** db_test.go
+
+## Test: PrepareFile opens no write transaction
+**Purpose:** compute is transaction-free — it writes no records (R678)
+**Input:** create DB, add one file to populate it, snapshot RecordCounts; call PrepareFile(path, strategy) and discard the handle; snapshot RecordCounts again
+**Expected:** RecordCounts is unchanged across the PrepareFile call — no fileid allocated, no records written
+**Refs:** crc-DB.md, seq-prepare-store.md#1, R678
+**Code:** db_test.go
+**Fire alarm:** make PrepareFile allocate a fileid or write the N chain (a stray write) — the post-call RecordCounts differ and the assertion goes red
+**Inject:** db.go:PrepareFile
+**Pulled:** 2026-09-17 — rang (RecordCounts 22→23 after PrepareFile)
+
+## Test: ReindexPrepared preserves chunkids for unchanged content
+**Purpose:** the two-phase reindex is a content diff — unchanged content keeps its chunkid, and the removal set is derived in-txn (R681, R682)
+**Input:** add a 3-line file; record the chunkid of line 2. Edit line 1 only; ReindexPrepared(PrepareFile(editedPath, strategy)). Re-read line 2's chunkid
+**Expected:** line 2's chunkid is unchanged (dedup hit under the fresh fileid); line 1's old chunk orphan-cascades; line 1's new content gets a fresh chunkid
+**Refs:** crc-DB.md, seq-prepare-store.md#3, R681, R682, R673
+**Code:** db_test.go
+**Fire alarm:** reverse the R673 order in reindexPrepared — drop the old fileid's occurrences before storing the new chunks — so an unchanged line's chunk loses its last reference and orphans before the re-add, forcing a fresh chunkid; the chunkid-stability assertion goes red
+**Inject:** db.go:reindexPrepared
+**Pulled:** 2026-09-17 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6)
+
+## Test: PrepareAppend plus AppendPrepared equals AppendChunks
+**Purpose:** the two-phase append produces the same index as the fused AppendChunks (R685, R687, R689)
+**Input:** two DBs with the same base file; on one call AppendChunks(fileid, content, strategy); on the other call AppendPrepared(fileid, PrepareAppend(path, lastLocator, content, strategy)) with lastLocator read from the base file's F record. Compare RecordCounts and search
+**Expected:** identical chunk lists, RecordCounts, and search results
+**Refs:** crc-DB.md, seq-prepare-store.md#4, seq-prepare-store.md#5, R685, R687, R689
+**Code:** db_test.go
+
+## Test: AppendPrepared refuses a moved tail
+**Purpose:** the tail-locator guard rejects a prepared append computed against a stale tail (R688)
+**Input:** add a file with a line strategy whose last line has no trailing newline (so an append replaces it). PrepareAppend against the current last locator. Before storing, mutate the file's tail with a real AppendChunks (moving the tail). Then call AppendPrepared with the stale handle
+**Expected:** AppendPrepared returns ErrAppendTailMoved (errors.Is); the F record is left intact — the stale drop-and-replace is not applied
+**Refs:** crc-DB.md, seq-prepare-store.md#5, R688
+**Code:** db_test.go
+**Fire alarm:** defeat the last-locator comparison in appendPrepared (guard it with `if false`, build-safe) — the stale append is applied against the moved tail; the errors.Is(ErrAppendTailMoved) assertion goes red (nil error)
+**Inject:** db.go:appendPrepared
+**Pulled:** 2026-09-17 — rang (expected ErrAppendTailMoved, got <nil>)
+
+## Test: PrepareAppend opens no write transaction
+**Purpose:** append compute is transaction-free (R685)
+**Input:** add a file; snapshot RecordCounts; call PrepareAppend(path, lastLocator, content, strategy) and discard the handle; snapshot again
+**Expected:** RecordCounts unchanged across the call
+**Refs:** crc-DB.md, seq-prepare-store.md#4, R685
+**Code:** db_test.go
+**Fire alarm:** make PrepareAppend open a write txn and touch a counter — the post-call RecordCounts differ; assertion red
+**Inject:** db.go:PrepareAppend
+**Pulled:** 2026-09-17 — rang (RecordCounts 22→23 after PrepareAppend)
+
+## Test: a PreparedFile is single-use
+**Purpose:** storing a handle twice is rejected rather than silently corrupting (R679)
+**Input:** p := PrepareFile(path, strategy); StorePrepared(p) succeeds; call StorePrepared(p) again
+**Expected:** the second store returns a non-nil error (handle already consumed); it does not write a second, malformed file
+**Refs:** crc-DB.md, seq-prepare-store.md#2, R679
+**Code:** db_test.go
+**Fire alarm:** remove the consumed check in storePrepared — without it the second store hits ErrAlreadyIndexed (masking the guard), so the test asserts errors.Is(err, errPreparedConsumed) specifically and goes red on ErrAlreadyIndexed
+**Inject:** db.go:storePrepared
+**Pulled:** 2026-09-17 — rang (got "file already indexed", want errPreparedConsumed; test strengthened to the specific sentinel during this pull)

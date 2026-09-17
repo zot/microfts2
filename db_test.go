@@ -1,6 +1,7 @@
 package microfts2
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -382,6 +383,275 @@ func TestReindexPreservesUnchangedChunkIDs(t *testing.T) {
 	}
 	if !foundNew {
 		t.Errorf("new chunkid %d not in reported newIDs %v", gotIDs[1], newIDs)
+	}
+}
+
+// --- Two-phase compute/store split (R676-R689) ---
+
+// newLineDB creates a fresh DB in dir/name with the "line" strategy registered.
+func newLineDB(t *testing.T, dir, name string) *DB {
+	t.Helper()
+	db, err := Create(filepath.Join(dir, name), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.AddStrategyFunc("line", LineChunkFunc)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// recordSig sums Count/KeyBytes/ValueBytes across all record prefixes — a
+// deterministic fingerprint of the whole index for equivalence/no-write checks.
+func recordSig(t *testing.T, db *DB) [3]int64 {
+	t.Helper()
+	counts, err := db.RecordCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sig [3]int64
+	for _, s := range counts {
+		sig[0] += s.Count
+		sig[1] += s.KeyBytes
+		sig[2] += s.ValueBytes
+	}
+	return sig
+}
+
+// tailReplaceChunker yields one chunk whose Locator is its content bytes, and
+// whose append always replaces the last chunk (replacedLast=true) — used to
+// exercise the AppendPrepared tail-locator guard (R688).
+type tailReplaceChunker struct{}
+
+func (tailReplaceChunker) Chunks(path string, content []byte, yield func(Chunk) bool) error {
+	yield(Chunk{Range: []byte("1-1"), Locator: append([]byte(nil), content...), Content: append([]byte(nil), content...)})
+	return nil
+}
+
+func (tailReplaceChunker) AppendChunks(path string, lastLocator, newBytes []byte, yield func(Chunk) bool) (bool, error) {
+	yield(Chunk{Range: []byte("1-1"), Locator: append([]byte(nil), newBytes...), Content: append([]byte(nil), newBytes...)})
+	return true, nil
+}
+
+// TestPrepareStoreEqualsAddFile: the two-phase add produces the same index as
+// the fused AddFile. R676, R680, R684
+func TestPrepareStoreEqualsAddFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeTestFile(t, dir, "doc.txt", "alpha one\nbeta two\ngamma three\n")
+	dbA := newLineDB(t, dir, "a")
+	dbB := newLineDB(t, dir, "b")
+
+	if _, err := dbA.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := dbB.PrepareFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbB.StorePrepared(p); err != nil {
+		t.Fatal(err)
+	}
+	if sa, sb := recordSig(t, dbA), recordSig(t, dbB); sa != sb {
+		t.Errorf("record signature differs: AddFile=%v split=%v", sa, sb)
+	}
+}
+
+// TestPrepareContentIndexesCallerBytes: compute from caller-supplied bytes, not
+// disk. R677
+func TestPrepareContentIndexesCallerBytes(t *testing.T) {
+	db, _ := testDB(t)
+	// "virtual.txt" is never written to disk.
+	p, err := db.PrepareContent("virtual.txt", "line", []byte("zeta line\neta line\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.StorePrepared(p); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := db.Search("zeta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) == 0 {
+		t.Error("content from PrepareContent is not searchable")
+	}
+}
+
+// TestPrepareFileNoWrite: compute opens no write transaction — it writes no
+// records. R678
+func TestPrepareFileNoWrite(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	before := recordSig(t, db)
+	other := writeTestFile(t, dir, "other.txt", "gamma\ndelta\n")
+	if _, err := db.PrepareFile(other, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if after := recordSig(t, db); before != after {
+		t.Errorf("PrepareFile wrote records: before=%v after=%v", before, after)
+	}
+}
+
+// TestReindexPreparedPreservesChunkIDs: the two-phase reindex is a content diff
+// — unchanged content keeps its chunkid. R681, R682
+func TestReindexPreparedPreservesChunkIDs(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "notes.md", "alpha first line\nbeta second line\ngamma third line\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIDs := []uint64{before.Chunks[0].ChunkID, before.Chunks[1].ChunkID, before.Chunks[2].ChunkID}
+
+	writeTestFile(t, dir, "notes.md", "alpha first line\nbeta SECOND edited\ngamma third line\n")
+	p, err := db.PrepareFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFileid, err := db.ReindexPrepared(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := db.FileInfoByID(newFileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Chunks) != 3 {
+		t.Fatalf("expected 3 chunks after reindex, got %d", len(after.Chunks))
+	}
+	if after.Chunks[0].ChunkID != oldIDs[0] {
+		t.Errorf("line 1 chunkid changed: was %d, now %d", oldIDs[0], after.Chunks[0].ChunkID)
+	}
+	if after.Chunks[2].ChunkID != oldIDs[2] {
+		t.Errorf("line 3 chunkid changed: was %d, now %d", oldIDs[2], after.Chunks[2].ChunkID)
+	}
+	if after.Chunks[1].ChunkID == oldIDs[1] {
+		t.Errorf("edited line 2 should have a new chunkid, still %d", after.Chunks[1].ChunkID)
+	}
+}
+
+// TestPrepareAppendEqualsAppendChunks: the two-phase append produces the same
+// index as the fused AppendChunks. R685, R687, R689
+func TestPrepareAppendEqualsAppendChunks(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\ngamma\n")
+	dbA := newLineDB(t, dir, "a")
+	dbB := newLineDB(t, dir, "b")
+	fidA, err := dbA.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fidB, err := dbB.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	add := []byte("delta\nepsilon\n")
+	if err := dbA.AppendChunks(fidA, add, "line", WithBaseLine(3)); err != nil {
+		t.Fatal(err)
+	}
+
+	fb, err := dbB.FileInfoByID(fidB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastLoc []byte
+	if len(fb.Chunks) > 0 {
+		lastLoc = fb.Chunks[len(fb.Chunks)-1].Locator
+	}
+	p, err := dbB.PrepareAppend(fp, lastLoc, add, "line", WithBaseLine(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbB.AppendPrepared(fidB, p); err != nil {
+		t.Fatal(err)
+	}
+	if sa, sb := recordSig(t, dbA), recordSig(t, dbB); sa != sb {
+		t.Errorf("append signature differs: fused=%v split=%v", sa, sb)
+	}
+}
+
+// TestAppendPreparedRefusesMovedTail: the tail-locator guard rejects a prepared
+// append computed against a stale tail, leaving the F record intact. R688
+func TestAppendPreparedRefusesMovedTail(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddChunker("tail", tailReplaceChunker{})
+	fp := writeTestFile(t, dir, "doc.txt", "aaa")
+	fileid, err := db.AddFile(fp, "tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastLoc := fi.Chunks[len(fi.Chunks)-1].Locator
+
+	// Prepare an append that replaces the last chunk, against the current tail.
+	p, err := db.PrepareAppend(fp, lastLoc, []byte("bbb"), "tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Move the tail out from under the prepared handle.
+	if err := db.AppendChunks(fileid, []byte("ccc"), "tail"); err != nil {
+		t.Fatal(err)
+	}
+	// The stale prepared append must be refused.
+	if err := db.AppendPrepared(fileid, p); !errors.Is(err, ErrAppendTailMoved) {
+		t.Fatalf("expected ErrAppendTailMoved, got %v", err)
+	}
+	// The F record is intact: still the "ccc" tail, one chunk.
+	fi2, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fi2.Chunks) != 1 || !bytes.Equal(fi2.Chunks[0].Locator, []byte("ccc")) {
+		t.Errorf("F record corrupted after refused append: %d chunks, tail=%q", len(fi2.Chunks), fi2.Chunks[0].Locator)
+	}
+}
+
+// TestPrepareAppendNoWrite: append compute opens no write transaction. R685
+func TestPrepareAppendNoWrite(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\n")
+	fileid, err := db.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastLoc := fi.Chunks[len(fi.Chunks)-1].Locator
+	before := recordSig(t, db)
+	if _, err := db.PrepareAppend(fp, lastLoc, []byte("gamma\ndelta\n"), "line"); err != nil {
+		t.Fatal(err)
+	}
+	if after := recordSig(t, db); before != after {
+		t.Errorf("PrepareAppend wrote records: before=%v after=%v", before, after)
+	}
+}
+
+// TestPreparedFileSingleUse: storing a handle twice is rejected rather than
+// silently corrupting. R679
+func TestPreparedFileSingleUse(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\n")
+	p, err := db.PrepareFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.StorePrepared(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.StorePrepared(p); !errors.Is(err, errPreparedConsumed) {
+		t.Errorf("second StorePrepared: got %v, want errPreparedConsumed", err)
 	}
 }
 

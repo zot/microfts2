@@ -83,10 +83,10 @@ Splits on blank lines and heading transitions:
 - Non-heading text between boundaries is one chunk
 - Blank lines are boundaries only — they are not included in any chunk's content
 - Gaps between chunks are expected; each chunk's range notes its precise position in the file
-- Fenced code blocks (opening `` ``` `` or `~~~`, with optional info string) suppress blank-line splitting — all lines from the opening fence through the matching closing fence are part of the current chunk, not a new one
+- Fenced code blocks (opening ```` ``` ```` or ```` ~~~ ````, with optional info string) suppress blank-line splitting — all lines from the opening fence through the matching closing fence are part of the current chunk, not a new one
 - A fence opening does not start a new chunk — it continues the current paragraph/chunk
 - Blank lines inside a fenced code block are not boundaries
-- Fence matching: a closing fence is a line starting with the same character (`` ` `` or `~`) repeated at least as many times as the opening fence, with no other non-whitespace content
+- Fence matching: a closing fence is a line starting with the same character (`` ` `` or ``~``) repeated at least as many times as the opening fence, with no other non-whitespace content
 
 Headline merging: a heading absorbs following tag-only chunks and one content chunk into a single merged chunk.
 - A tag line is any line whose first character is `@`

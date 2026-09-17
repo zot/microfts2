@@ -72,7 +72,7 @@ Input:
 let s = `hello ${name} world`;
 ```
 
-Mode stack and tokens (code = top-level code mode, ` = inside backquote restricted mode, ${ = inside interpolation code mode):
+Mode stack and tokens (code = top-level code mode, `` ` `` = inside backquote restricted mode, ${ = inside interpolation code mode):
 
 ```
 position    text                stack-top      action

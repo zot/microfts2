@@ -379,10 +379,10 @@
 - **R177:** Blank lines are boundaries only — not included in any chunk's content; gaps between chunks are expected
 - **R175:** CLI subcommand `microfts chunk-markdown <file>` outputs `range\tcontent` per chunk
 - **R176:** Registered as a built-in func strategy alongside other built-in chunkers
-- **R465:** Fenced code blocks (opening `` ``` `` or `~~~`, with optional info string) suppress blank-line splitting — all lines from fence open through matching close belong to the current chunk
+- **R465:** Fenced code blocks (opening ```` ``` ```` or ```` ~~~ ````, with optional info string) suppress blank-line splitting — all lines from fence open through matching close belong to the current chunk
 - **R466:** A fence opening does not start a new chunk — it continues the current paragraph/chunk
 - **R467:** Blank lines inside a fenced code block are not chunk boundaries
-- **R468:** Fence matching: closing fence is a line starting with the same character (`` ` `` or `~`) repeated at least as many times as the opening, with no other non-whitespace content
+- **R468:** Fence matching: closing fence is a line starting with the same character (`` ` `` or ``~``) repeated at least as many times as the opening, with no other non-whitespace content
 - **R563:** Headline merging: after a heading chunk, consecutive tag-only chunks and one following content chunk are absorbed into a single merged chunk
 - **R564:** A tag line is any line whose first character is `@`
 - **R565:** A tag-only chunk is one where every line starts with `@`
@@ -998,3 +998,25 @@
 - **R670:** `cmd/bigram-estimate` is removed (dead tooling reaching through `Env()` with its own DBI opens and cursors); `cmd/microfts` is unchanged (goes through the DB API).
 - **R671:** `db_test.go` validates the port: the standalone-env test helper uses `bbolt.Open` on a temp file, and the `Env()`-non-nil assertion becomes a `DB()`-non-nil check; create/open, add+search, remove/reindex (incl. raw-tx callbacks), record-counts, stale scans, and fileid/path-cache coverage must pass.
 - **R672:** `Options.Timeout` (`time.Duration`) is passed to `bbolt.Open` as `bbolt.Options.Timeout` in both `Open` and `Create`. Zero blocks until the lock frees (bbolt default, preserving prior behavior); a non-zero value returns `bbolt.ErrTimeout` if the file lock can't be acquired in time. The index is single-process, so a bounded timeout lets a second opener (e.g. a host CLI while a server holds the DB) fail fast instead of hanging.
+
+## Feature: Two-Phase Indexing (Compute/Store Split)
+**Source:** specs/indexing.md
+
+- **R676:** `PrepareFile(fpath, strategy string, opts ...IndexOption) (*PreparedFile, error)` reads and chunks a file and returns an opaque `*PreparedFile` holding each chunk's dedup hash, trigram counts, and tokens plus the file's mod time, content hash, and byte length; it opens no bbolt transaction.
+- **R677:** `PrepareContent(fpath, strategy string, content []byte, opts ...IndexOption) (*PreparedFile, error)` produces the same `*PreparedFile` from caller-supplied bytes instead of reading from disk, opening no bbolt transaction.
+- **R678:** `PrepareFile` and `PrepareContent` are safe to call from any goroutine as long as the DB's chunking configuration (registered strategies, chunker registry, trigram/case-fold settings) is not mutated concurrently.
+- **R679:** `*PreparedFile` is opaque — it exposes no fields a caller can inspect or forge — and is consumed by a single store call; the store releases the chunk content the handle holds, so reuse requires re-preparing.
+- **R680:** `StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a fresh add in one write transaction — allocating the fileid, writing N and F records, deduping each chunk by H record, and updating C/T/W records and corpus counters — and preserves the `ErrAlreadyIndexed` duplicate guard.
+- **R681:** `ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a content-diff reindex in one write transaction: it stores the prepared chunks and drops the old fileid's occurrences so unchanged content keeps its chunkid.
+- **R682:** `ReindexPrepared` derives the old-chunk removal set inside the write transaction from the committed F record; the caller does not supply it, because chunk refcounts are shared across files and the orphan cascade must be consistent with committed state.
+- **R683:** In the two-phase API, `WithChunkCallback` fires during compute (off the write transaction) while `WithIndexedChunkCallback`, `WithRemovedChunkCallback`, and the `ReindexCallback` fire during store (inside the write transaction).
+- **R684:** `AddFile`, `AddFileWithContent`, and the `Reindex` family remain unchanged for existing callers and are implemented as compute-then-store (`PrepareFile` then `StorePrepared` or `ReindexPrepared`) in a single call.
+
+## Feature: Two-Phase Append (Compute/Store Split)
+**Source:** specs/append.md
+
+- **R685:** `PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error)` chunks `content` against the caller-supplied `lastLocator` and returns an opaque `*PreparedAppend` holding each new chunk's dedup hash, trigram counts, and tokens; it opens no bbolt transaction and reads no committed state.
+- **R686:** `*PreparedAppend` records whether the append replaces the last existing chunk (`replacedLast`) and the `lastLocator` compute assumed, so the store phase can validate the file tail.
+- **R687:** `AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error` applies the prepared append in one write transaction — drop-and-replace cleanup, chunk dedup, T/W updates, corpus counters, and F-record update — as `AppendChunks` does.
+- **R688:** When the prepared append replaces the last chunk, `AppendPrepared` verifies the committed last locator equals the one compute assumed and refuses with `ErrAppendTailMoved` if it has changed; a pure append (no last-chunk replacement) performs no tail check.
+- **R689:** `AppendChunks` remains unchanged for existing callers and is implemented as `PrepareAppend` — reading the current tail from the F record — followed by `AppendPrepared` in a single call.

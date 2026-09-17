@@ -84,3 +84,52 @@ When `replacedLast` is true, `AppendChunks`:
 3. If the C record's fileids list is now empty, deletes the C record, removes the chunkid from each T record (by trigram) and W record (by token), and deletes the H record. Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper.
 
 A chunker may, in principle, replace more than just the last chunk. The current spec scope is single-last-chunk replacement; a future extension could allow replacing the last K chunks if a use case appears.
+
+# Two-Phase Append: Compute Off the Write Actor
+
+`AppendChunks` splits the same way as the indexing methods (see indexing.md,
+"Two-Phase Indexing: Compute Off the Write Actor"), with one added dependency: an
+`AppendAwareChunker` dispatches on the file's tail — the last existing chunk's locator —
+so the append compute needs that locator. To keep compute transaction-free, the tail is a
+**caller-supplied input**, not read from the database during compute.
+
+## Compute — transaction-free
+
+```go
+func (db *DB) PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error)
+```
+
+- Chunks `content` against `lastLocator` (an `AppendAwareChunker`'s resume state; ignored
+  for a plain `Chunker`) and computes each new chunk's hash, trigrams, and tokens.
+- Records whether the append replaces the last existing chunk (the `replacedLast` outcome
+  of `AppendAwareChunker.AppendChunks`) and the `lastLocator` it assumed, so the store
+  phase can validate the tail.
+- Opens **no** bbolt transaction. `path` and `lastLocator` are supplied by the caller
+  precisely so that compute reads no committed state: a compute that opened even a read
+  transaction would re-couple it to the database, which is the coupling the split exists to
+  remove. The caller — ark's per-file actor — owns the file's tail and passes it in.
+- Returns an opaque `*PreparedAppend`, consumed by a single `AppendPrepared` call.
+- `WithAppendChunkCallback` fires during compute.
+
+## Store — on the write actor
+
+```go
+func (db *DB) AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error
+```
+
+- Applies the prepared append inside the write transaction: re-reads the F record, and —
+  when the handle replaces the last chunk — verifies the committed last locator still
+  equals the one compute assumed, refusing with `ErrAppendTailMoved` if the tail has moved
+  since compute. Then performs the drop-and-replace cleanup, chunk dedup, T/W updates,
+  corpus counters, and F-record update, exactly as `AppendChunks` does.
+- The tail-locator check guards only the `replacedLast` case: a pure append (no
+  last-chunk replacement) has no tail chunk to invalidate and relies on the caller
+  serializing appends to the file (ark's per-file actor). The `ErrAppendBoundary` guard
+  and the base-line range adjustment behave as they do for `AppendChunks`.
+
+```go
+var ErrAppendTailMoved = errors.New("append tail moved since prepare")
+```
+
+`AppendChunks` remains and is unchanged: it reads the current tail from the F record, then
+computes and stores in one call — `PrepareAppend` followed by `AppendPrepared`.

@@ -62,8 +62,8 @@ as T records).
 ### C Record Extension
 
 When bigrams are enabled, C records include a bigram counts section
-after the existing trigram counts: `[n-bigrams:varint]
-[[bigram:2] [count:varint]]...`. When bigrams are disabled, this
+after the existing trigram counts:
+`[n-bigrams:varint] [[bigram:2] [count:varint]]...`. When bigrams are disabled, this
 section is absent — the I record flag tells the reader whether to
 expect it.
 
