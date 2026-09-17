@@ -404,3 +404,53 @@
 **Fire alarm:** remove the consumed check in storePrepared — without it the second store hits ErrAlreadyIndexed (masking the guard), so the test asserts errors.Is(err, errPreparedConsumed) specifically and goes red on ErrAlreadyIndexed
 **Inject:** db.go:storePrepared
 **Pulled:** 2026-09-17 — rang (got "file already indexed", want errPreparedConsumed; test strengthened to the specific sentinel during this pull)
+
+## Test: SplitFile hash equals sha256 of chunk content
+**Purpose:** the split owns the authoritative content hash — SplitChunk.Hash is SHA-256 over Chunk.Content, the same value the store dedups by (R690, R693)
+**Input:** SplitFile a multi-chunk fixture; for each returned SplitChunk compute sha256(sc.Chunk.Content) directly and compare to sc.Hash
+**Expected:** every SplitChunk.Hash equals the independently computed sha256 of its Content
+**Refs:** crc-DB.md, seq-prepare-store.md#6, R690, R693
+**Code:** db_test.go
+**Fire alarm:** in splitYield, hash the chunk's Range instead of its Content — the recomputed sha256(Content) no longer matches sc.Hash and the assertion goes red
+**Inject:** db.go:splitYield
+**Pulled:** 2026-09-17 — rang (chunk 2 Hash != sha256(Content))
+
+## Test: Split plus PrepareChunk plus AssembleFile equals PrepareFile
+**Purpose:** the per-chunk compute assembles the same `*PreparedFile` as the fused PrepareFile, so both store to an identical index (R690, R694, R695, R696, R699)
+**Input:** two DBs from the same fixture. On one: StorePrepared(PrepareFile(path, strategy)). On the other: SplitFile(path, strategy), build a PreparedEntry per SplitChunk with Grams=PrepareChunk(sc.Chunk.Content), then StorePrepared(AssembleFile(path, strategy, entries, meta)). Compare RecordCounts per prefix and a search across both
+**Expected:** identical RecordCounts per prefix and identical search results
+**Refs:** crc-DB.md, seq-prepare-store.md#6, seq-prepare-store.md#8, R694, R695, R696, R699
+**Code:** db_test.go
+**Fire alarm:** in the fused-only entriesFromSplits, drop the trailing entry — the fused PrepareFile then has one fewer chunk than the manual Split+PrepareChunk+AssembleFile path, so the RecordCounts/search comparison goes red. (Injecting into the shared AssembleFile moves both sides equally and does NOT ring.)
+**Inject:** db.go:entriesFromSplits
+**Pulled:** 2026-09-17 — rang (PrepareFile search empty vs manual path); verified this drop also rings TestSplitAppendAssembleEqualsPrepareAppend
+
+## Test: reused grams across identical content in two files index correctly
+**Purpose:** a `*PreparedChunk` is content-pure and reusable — the same grams value assembled into two files with identical content produces a correct index, with positions taken from each split (R694, R698)
+**Input:** two files A and B whose content shares an identical chunk (same bytes, different byte offset / Range in each). SplitFile both. Call PrepareChunk once on the shared chunk's Content and feed that single `*PreparedChunk` into the PreparedEntry for that chunk in BOTH files' AssembleFile calls. StorePrepared both. Search for a substring of the shared chunk and for a substring unique to each file's other chunks; also confirm the shared chunk dedups to one chunkid
+**Expected:** the shared content is found in both files at each file's correct Range; the shared chunk resolves to a single chunkid (dedup); each file's non-shared chunks index independently — reusing the grams did not transplant positions
+**Refs:** crc-DB.md, seq-prepare-store.md#6, R694, R698
+**Code:** db_test.go
+**Fire alarm:** add a Range field to `*PreparedChunk` and have collectedFromEntries cache/read it instead of entry.Chunk.Range — the grams token reused across two files carries file A's position into file B, so B's shared chunk resolves to A's Range and the position assertion goes red
+**Inject:** db.go:collectedFromEntries, db.go:PreparedChunk
+**Pulled:** 2026-09-17 — rang (shared chunk missing in B: A=1 B=0)
+
+## Test: SplitFile and PrepareChunk open no write transaction
+**Purpose:** the split and per-chunk-prepare steps are transaction-free — they write no records (R690, R694)
+**Input:** create DB, add one file to populate it, snapshot RecordCounts; call SplitFile(path, strategy) and PrepareChunk on one of its chunks, discarding both results; snapshot RecordCounts again
+**Expected:** RecordCounts is unchanged across the calls — no fileid allocated, no records written
+**Refs:** crc-DB.md, seq-prepare-store.md#6, R690, R694
+**Code:** db_test.go
+**Fire alarm:** make PrepareChunk open a bbolt Update txn and Put a per-chunk (content-keyed) record — the post-call RecordCounts differ and the assertion goes red. The injection MUST be content-keyed: AddFile now composes through PrepareChunk, so a fixed-key stray write lands during the setup AddFile (before the baseline snapshot) and is masked.
+**Inject:** db.go:PrepareChunk
+**Pulled:** 2026-09-17 — rang (content-keyed stray Put; RecordCounts 24->25)
+
+## Test: SplitAppend plus PrepareChunk plus AssembleAppend equals PrepareAppend
+**Purpose:** the per-chunk append assembles the same `*PreparedAppend` as the fused PrepareAppend, so both store an identical append (R692, R697, R699)
+**Input:** two DBs with the same base file. On one: AppendPrepared(fileid, PrepareAppend(path, lastLocator, content, strategy)). On the other: SplitAppend(path, lastLocator, content, strategy) -> entries via PrepareChunk per chunk -> AppendPrepared(fileid, AssembleAppend(path, strategy, entries, replacedLast, lastLocator)). lastLocator read from the base file's F record on both. Compare chunk lists, RecordCounts, and search
+**Expected:** identical chunk lists, RecordCounts per prefix, and search results; both carry the same replacedLast into the store phase
+**Refs:** crc-DB.md, seq-prepare-store.md#7, R692, R697, R699
+**Code:** db_test.go
+**Fire alarm:** in AssembleAppend, hardcode replacedLast=false — a prepared append that should replace the tail no longer does. Guarded by the replacedLast-exercising tests (TestAppendPreparedRefusesMovedTail plus the markdown/bracket append-aware tests), NOT by this equivalence test: the line strategy never sets replacedLast, and AssembleAppend is shared by both compared paths. This test's own chunk-count equivalence is guarded by the entriesFromSplits fused-path drop (verified).
+**Inject:** db.go:AssembleAppend
+**Pulled:** 2026-09-17 — rang (replacedLast=false -> TestAppendPreparedRefusesMovedTail + markdown/bracket object)

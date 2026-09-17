@@ -1323,27 +1323,75 @@ func (db *DB) AddFileWithContent(fpath, strategy string, opts ...IndexOption) (u
 	return db.addFileCore(fpath, strategy, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
-// collectChunks reads a file, runs the chunker, and returns the collected chunks.
-// CRC: crc-DB.md | R485, R513, R520
-func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collectedChunk, []byte, int64, [32]byte, error) {
+// SplitChunk is one chunk produced by a split: its Chunk (Range, Locator,
+// Content, Attrs) and the content hash microfts2 dedups by. The split owns this
+// authoritative hash (SHA-256 over Chunk.Content) — it is neither caller-supplied
+// nor recomputed in PrepareChunk — so a caller keying a reuse map on it dedups by
+// exactly the hash the store uses.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R690, R693
+type SplitChunk struct {
+	Chunk Chunk
+	Hash  [32]byte
+}
+
+// FileMeta is the file-level metadata a store needs, computed once by a split.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R690
+type FileMeta struct {
+	ModTime     int64
+	ContentHash [32]byte
+	FileLength  int64
+}
+
+// splitYield builds the per-chunk yield for the split step: validate UTF-8, fire
+// the text callback, then collect the chunk with its content hash — no grams.
+// Copies Range/Locator/Content/Attrs so the SplitChunk outlives the chunker's
+// buffers, exactly as indexChunk does.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R473, R683, R690, R693
+func (db *DB) splitYield(fpath string, cb ChunkCallback, out *[]SplitChunk, utf8Err *error) func(Chunk) bool {
+	return func(c Chunk) bool {
+		if !utf8.Valid(c.Content) {
+			*utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
+			return false
+		}
+		if cb != nil {
+			cb(string(c.Content))
+		}
+		*out = append(*out, SplitChunk{
+			Chunk: Chunk{
+				Range:   append([]byte(nil), c.Range...),
+				Locator: append([]byte(nil), c.Locator...),
+				Content: append([]byte(nil), c.Content...),
+				Attrs:   CopyPairs(c.Attrs),
+			},
+			Hash: sha256.Sum256(c.Content),
+		})
+		return true
+	}
+}
+
+// splitFile reads a file, runs the chunker, and returns each chunk with its
+// content hash (no grams) plus the file's raw bytes and FileMeta. The
+// transaction-free split shared by SplitFile (public) and the fused prepareFile.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R485, R513, R520, R690, R693
+func (db *DB) splitFile(fpath, strategy string, cb ChunkCallback) ([]SplitChunk, []byte, FileMeta, error) {
 	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
-		return nil, nil, 0, [32]byte{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
+		return nil, nil, FileMeta{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
 	}
 
 	modTime, err := fileModTime(fpath)
 	if err != nil {
-		return nil, nil, 0, [32]byte{}, err
+		return nil, nil, FileMeta{}, err
 	}
 
 	chunker := db.resolveChunker(strategy)
 	if chunker == nil {
-		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
+		return nil, nil, FileMeta{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
 	}
 
-	// Yield callback shared by both paths: validates UTF-8, fires callback, collects chunk data.
-	var chunks []collectedChunk
+	// Yield callback shared by both paths: validates UTF-8, fires callback, hashes.
+	var splits []SplitChunk
 	var utf8Err error
-	yield := db.collectYield(fpath, cb, &chunks, &utf8Err)
+	yield := db.splitYield(fpath, cb, &splits, &utf8Err)
 
 	var data []byte
 	var hash [32]byte
@@ -1355,46 +1403,155 @@ func (db *DB) collectChunks(fpath, strategy string, cb ChunkCallback) ([]collect
 	if ch, ok := chunker.(Chunker); ok {
 		data, err = os.ReadFile(fpath)
 		if err != nil {
-			return nil, nil, 0, [32]byte{}, err
+			return nil, nil, FileMeta{}, err
 		}
 		if err := ch.Chunks(fpath, data, yield); err != nil {
-			return nil, nil, 0, [32]byte{}, err
+			return nil, nil, FileMeta{}, err
 		}
 		hash = contentHash(data)
 	} else if fc, ok := chunker.(FileChunker); ok {
 		hash, err = fc.FileChunks(fpath, [32]byte{}, yield)
 		if err != nil {
-			return nil, nil, 0, [32]byte{}, err
+			return nil, nil, FileMeta{}, err
 		}
 	} else {
-		return nil, nil, 0, [32]byte{}, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", strategy)
+		return nil, nil, FileMeta{}, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", strategy)
 	}
 
 	if utf8Err != nil {
-		return nil, nil, 0, [32]byte{}, utf8Err
+		return nil, nil, FileMeta{}, utf8Err
 	}
-	if len(chunks) == 0 {
-		return nil, nil, 0, [32]byte{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
+	if len(splits) == 0 {
+		return nil, nil, FileMeta{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
 	}
 
-	return chunks, data, modTime, hash, nil
+	return splits, data, FileMeta{ModTime: modTime, ContentHash: hash, FileLength: int64(len(data))}, nil
 }
 
-// collectYield builds the shared per-chunk yield used by the compute paths:
-// validate UTF-8, fire the text callback, then collect the indexed chunk.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R473, R656, R683
-func (db *DB) collectYield(fpath string, cb ChunkCallback, out *[]collectedChunk, utf8Err *error) func(Chunk) bool {
-	return func(c Chunk) bool {
-		if !utf8.Valid(c.Content) {
-			*utf8Err = fmt.Errorf("chunk %q contains invalid UTF-8 in %s", c.Range, fpath)
-			return false
-		}
-		if cb != nil {
-			cb(string(c.Content))
-		}
-		*out = append(*out, db.indexChunk(c))
-		return true
+// SplitFile splits a file into content-hashed chunks off the write actor: resolve
+// the chunker, read and chunk the file, hash each chunk (SHA-256 over Content),
+// and return the []SplitChunk with a FileMeta. It extracts no trigrams or tokens
+// and opens no bbolt transaction.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R690, R693
+func (db *DB) SplitFile(fpath, strategy string) ([]SplitChunk, FileMeta, error) {
+	splits, _, meta, err := db.splitFile(fpath, strategy, nil)
+	return splits, meta, err
+}
+
+// splitContent chunks caller-supplied content with a content-based Chunker,
+// returning each chunk with its content hash and FileMeta (ModTime zero — content
+// carries no on-disk timestamp). Transaction-free. Shared by SplitContent
+// (public) and PrepareContent.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R677, R691, R693
+func (db *DB) splitContent(fpath, strategy string, data []byte, cb ChunkCallback) ([]SplitChunk, FileMeta, error) {
+	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
+		return nil, FileMeta{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
 	}
+	chunker := db.resolveChunker(strategy)
+	if chunker == nil {
+		return nil, FileMeta{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
+	}
+	ch, ok := chunker.(Chunker)
+	if !ok {
+		return nil, FileMeta{}, fmt.Errorf("chunker strategy %q requires a content-based Chunker for PrepareContent", strategy)
+	}
+	var splits []SplitChunk
+	var utf8Err error
+	if err := ch.Chunks(fpath, data, db.splitYield(fpath, cb, &splits, &utf8Err)); err != nil {
+		return nil, FileMeta{}, err
+	}
+	if utf8Err != nil {
+		return nil, FileMeta{}, utf8Err
+	}
+	if len(splits) == 0 {
+		return nil, FileMeta{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
+	}
+	return splits, FileMeta{ContentHash: contentHash(data), FileLength: int64(len(data))}, nil
+}
+
+// SplitContent is SplitFile over caller-supplied bytes instead of reading disk;
+// it opens no bbolt transaction. The strategy must be a content-based Chunker.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R691, R693
+func (db *DB) SplitContent(fpath, strategy string, content []byte) ([]SplitChunk, FileMeta, error) {
+	return db.splitContent(fpath, strategy, content, nil)
+}
+
+// PreparedChunk is one chunk's content-pure grams: trigram counts and tokens. It
+// carries no hash and no position/chunker data (Range/Locator/Attrs), so a caller
+// may cache and reuse it keyed by content hash across scans and files.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R694
+type PreparedChunk struct {
+	triCounts map[uint32]int
+	tokens    []TokenEntry
+}
+
+// PrepareChunk computes one chunk's content-pure grams — trigram counts and
+// tokens — into an opaque *PreparedChunk. It is a pure function of content and the
+// DB's trigram configuration, computes no hash and no positions, and opens no
+// bbolt transaction, so a consumer may cache the result by content hash and reuse
+// it across scans and files.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R694
+func (db *DB) PrepareChunk(content []byte) *PreparedChunk {
+	return &PreparedChunk{
+		triCounts: db.trigrams.TrigramCounts(content),
+		tokens:    tokenizeCounts(content),
+	}
+}
+
+// PreparedEntry pairs one split chunk's Chunk and Hash with its computed grams; an
+// ordered []PreparedEntry is the input to AssembleFile/AssembleAppend.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R695
+type PreparedEntry struct {
+	Chunk Chunk
+	Hash  [32]byte
+	Grams *PreparedChunk
+}
+
+// collectedFromEntries builds the internal []collectedChunk from ordered
+// PreparedEntry values: positions/Attrs from each entry.Chunk (the current split's
+// positions, never the grams token), hash from entry.Hash, grams from entry.Grams.
+// A single *PreparedChunk reused across entries shares its (read-only in the store)
+// triCounts/tokens, which is what makes grams reusable by content hash.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R695, R698
+func collectedFromEntries(entries []PreparedEntry) []collectedChunk {
+	chunks := make([]collectedChunk, len(entries))
+	for i, e := range entries {
+		chunks[i] = collectedChunk{
+			Chunk:     e.Chunk,
+			hash:      e.Hash,
+			triCounts: e.Grams.triCounts,
+			tokens:    e.Grams.tokens,
+		}
+	}
+	return chunks
+}
+
+// entriesFromSplits computes grams for each split chunk (PrepareChunk) and pairs
+// them into PreparedEntry values in order — the per-chunk compute the fused
+// Prepare* entries run with no reuse map.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#8 | R694, R695, R699
+func (db *DB) entriesFromSplits(splits []SplitChunk) []PreparedEntry {
+	entries := make([]PreparedEntry, len(splits))
+	for i, sc := range splits {
+		entries[i] = PreparedEntry{Chunk: sc.Chunk, Hash: sc.Hash, Grams: db.PrepareChunk(sc.Chunk.Content)}
+	}
+	return entries
+}
+
+// AssembleFile pairs the ordered PreparedEntry list and FileMeta into the same
+// opaque *PreparedFile that StorePrepared/ReindexPrepared accept. Positions and
+// Attrs come from each entry.Chunk, grams from entry.Grams, hash from entry.Hash;
+// it opens no bbolt transaction and leaves the store side unchanged.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6 | R696, R698
+func (db *DB) AssembleFile(fpath, strategy string, entries []PreparedEntry, meta FileMeta) (*PreparedFile, error) {
+	return &PreparedFile{
+		fpath:      fpath,
+		strategy:   strategy,
+		chunks:     collectedFromEntries(entries),
+		modTime:    meta.ModTime,
+		hash:       meta.ContentHash,
+		fileLength: meta.FileLength,
+	}, nil
 }
 
 // PreparedFile is an opaque, single-use handle carrying a file's computed chunks
@@ -1417,14 +1574,22 @@ type PreparedFile struct {
 // errPreparedConsumed is returned when a prepared handle is stored a second time. // R679
 var errPreparedConsumed = errors.New("microfts2: prepared handle already consumed")
 
-// prepareFile is the shared compute for PrepareFile and the fused add/reindex.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R676, R678
+// prepareFile is the shared compute for PrepareFile and the fused add/reindex,
+// run as the composition SplitFile -> PrepareChunk per chunk -> AssembleFile. It
+// carries the raw file bytes on the handle for callers that return content
+// (AddFileWithContent, ReindexWithContent); AssembleFile itself is content-free.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6, seq-prepare-store.md#8 | R676, R678, R699
 func (db *DB) prepareFile(fpath, strategy string, cb ChunkCallback) (*PreparedFile, error) {
-	chunks, data, modTime, hash, err := db.collectChunks(fpath, strategy, cb)
+	splits, data, meta, err := db.splitFile(fpath, strategy, cb)
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedFile{fpath: fpath, strategy: strategy, chunks: chunks, data: data, modTime: modTime, hash: hash, fileLength: int64(len(data))}, nil
+	p, err := db.AssembleFile(fpath, strategy, db.entriesFromSplits(splits), meta)
+	if err != nil {
+		return nil, err
+	}
+	p.data = data
+	return p, nil
 }
 
 // PrepareFile computes a file's chunks off the write actor: read and chunk the
@@ -1441,47 +1606,25 @@ func (db *DB) PrepareFile(fpath, strategy string, opts ...IndexOption) (*Prepare
 }
 
 // PrepareContent is PrepareFile over caller-supplied bytes instead of reading
-// disk. The strategy must be a content-based Chunker; modTime is left zero, as a
-// content-prepared file carries no on-disk timestamp.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#1 | R677, R678
+// disk, run as the composition SplitContent -> PrepareChunk per chunk ->
+// AssembleFile. The strategy must be a content-based Chunker; modTime is left
+// zero, as a content-prepared file carries no on-disk timestamp.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#6, seq-prepare-store.md#8 | R677, R678, R699
 func (db *DB) PrepareContent(fpath, strategy string, content []byte, opts ...IndexOption) (*PreparedFile, error) {
 	var cfg indexConfig
 	for _, o := range opts {
 		o.applyIndex(&cfg)
 	}
-	chunks, hash, err := db.collectChunksBytes(fpath, strategy, content, cfg.chunkCallback)
+	splits, meta, err := db.splitContent(fpath, strategy, content, cfg.chunkCallback)
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedFile{fpath: fpath, strategy: strategy, chunks: chunks, data: content, hash: hash, fileLength: int64(len(content))}, nil
-}
-
-// collectChunksBytes chunks caller-supplied content with a content-based Chunker.
-// Transaction-free. R677
-func (db *DB) collectChunksBytes(fpath, strategy string, data []byte, cb ChunkCallback) ([]collectedChunk, [32]byte, error) {
-	if _, ok := db.settings.ChunkingStrategies[strategy]; !ok {
-		return nil, [32]byte{}, fmt.Errorf("unknown chunking strategy: %s", strategy)
+	p, err := db.AssembleFile(fpath, strategy, db.entriesFromSplits(splits), meta)
+	if err != nil {
+		return nil, err
 	}
-	chunker := db.resolveChunker(strategy)
-	if chunker == nil {
-		return nil, [32]byte{}, fmt.Errorf("chunker strategy %q not registered (re-register with AddChunker after Open)", strategy)
-	}
-	ch, ok := chunker.(Chunker)
-	if !ok {
-		return nil, [32]byte{}, fmt.Errorf("chunker strategy %q requires a content-based Chunker for PrepareContent", strategy)
-	}
-	var chunks []collectedChunk
-	var utf8Err error
-	if err := ch.Chunks(fpath, data, db.collectYield(fpath, cb, &chunks, &utf8Err)); err != nil {
-		return nil, [32]byte{}, err
-	}
-	if utf8Err != nil {
-		return nil, [32]byte{}, utf8Err
-	}
-	if len(chunks) == 0 {
-		return nil, [32]byte{}, fmt.Errorf("%w: %s", ErrNoChunks, fpath)
-	}
-	return chunks, contentHash(data), nil
+	p.data = content
+	return p, nil
 }
 
 // storePrepared is the shared store for StorePrepared and the fused add.
@@ -2279,12 +2422,13 @@ type PreparedAppend struct {
 	consumed     bool
 }
 
-// appendCollect is the transaction-free append compute shared by PrepareAppend
-// and the fused AppendChunks: resolve the chunker, dispatch AppendAwareChunker
-// (or plain Chunker), collect the new chunks, apply the ErrAppendBoundary guard,
-// and adjust line ranges by baseLine.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#4 | R605, R606, R623, R624, R625, R656, R685
-func (db *DB) appendCollect(path string, lastLocator, content []byte, strategy string, cb ChunkCallback, baseLine int) ([]collectedChunk, bool, error) {
+// splitAppend is the transaction-free append split shared by SplitAppend
+// (public), the fused PrepareAppend, and AppendChunks: resolve the chunker,
+// dispatch AppendAwareChunker (or plain Chunker), collect the new chunks with
+// content hashes, apply the ErrAppendBoundary guard, and adjust line ranges by
+// baseLine. It reads no committed state — the tail is the caller's lastLocator.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R605, R606, R623, R624, R625, R692, R693
+func (db *DB) splitAppend(path string, lastLocator, content []byte, strategy string, cb ChunkCallback, baseLine int) ([]SplitChunk, bool, error) {
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
 		return nil, false, fmt.Errorf("chunker strategy %q not registered", strategy)
@@ -2295,9 +2439,9 @@ func (db *DB) appendCollect(path string, lastLocator, content []byte, strategy s
 	}
 	appendAware, _ := resolved.(AppendAwareChunker)
 
-	var newChunks []collectedChunk
+	var newChunks []SplitChunk
 	var utf8Err error
-	yield := db.collectYield(path, cb, &newChunks, &utf8Err)
+	yield := db.splitYield(path, cb, &newChunks, &utf8Err)
 
 	// Dispatch: AppendAwareChunker fast path or default Chunker (R605, R606)
 	var replacedLast bool
@@ -2328,36 +2472,56 @@ func (db *DB) appendCollect(path string, lastLocator, content []byte, strategy s
 	// line-based chunkers — AppendAwareChunker is expected to emit absolute ranges itself.
 	if baseLine > 0 && appendAware == nil {
 		for i := range newChunks {
-			adjusted, err := adjustRange(string(newChunks[i].Range), baseLine)
+			adjusted, err := adjustRange(string(newChunks[i].Chunk.Range), baseLine)
 			if err != nil {
-				return nil, false, fmt.Errorf("adjust range %q: %w", string(newChunks[i].Range), err)
+				return nil, false, fmt.Errorf("adjust range %q: %w", string(newChunks[i].Chunk.Range), err)
 			}
-			newChunks[i].Range = []byte(adjusted)
+			newChunks[i].Chunk.Range = []byte(adjusted)
 		}
 	}
 	return newChunks, replacedLast, nil
 }
 
-// PrepareAppend computes an append off the write actor. The caller supplies the
-// file's path and the last chunk's locator (the AppendAwareChunker resume
-// state), so compute reads no committed state and opens no transaction.
+// SplitAppend splits appended content into content-hashed chunks off the write
+// actor. The caller supplies the file's path and the last chunk's locator (the
+// AppendAwareChunker resume state), so it reads no committed state and opens no
+// bbolt transaction. The ErrAppendBoundary guard fires here exactly as in
+// AppendChunks. Returns the new []SplitChunk and the replacedLast outcome.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R692, R693
+func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string) ([]SplitChunk, bool, error) {
+	return db.splitAppend(path, lastLocator, content, strategy, nil, 0)
+}
+
+// AssembleAppend pairs the ordered PreparedEntry list into the same opaque
+// *PreparedAppend that AppendPrepared accepts, recording replacedLast and
+// lastLocator for the store phase's ErrAppendTailMoved tail check. Positions and
+// Attrs come from each entry.Chunk; it opens no bbolt transaction.
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R697, R698
+func (db *DB) AssembleAppend(path, strategy string, entries []PreparedEntry, replacedLast bool, lastLocator []byte) (*PreparedAppend, error) {
+	return &PreparedAppend{
+		strategy:     strategy,
+		chunks:       collectedFromEntries(entries),
+		replacedLast: replacedLast,
+		lastLocator:  append([]byte(nil), lastLocator...),
+	}, nil
+}
+
+// PrepareAppend computes an append off the write actor, run as the composition
+// SplitAppend -> PrepareChunk per chunk -> AssembleAppend. The caller supplies the
+// file's path and the last chunk's locator (the AppendAwareChunker resume state),
+// so compute reads no committed state and opens no transaction.
 // WithAppendChunkCallback and WithBaseLine apply here.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#4 | R685, R686
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7, seq-prepare-store.md#8 | R685, R686, R699
 func (db *DB) PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error) {
 	var cfg appendConfig
 	for _, o := range opts {
 		o.applyAppend(&cfg)
 	}
-	chunks, replacedLast, err := db.appendCollect(path, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
+	splits, replacedLast, err := db.splitAppend(path, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedAppend{
-		strategy:     strategy,
-		chunks:       chunks,
-		replacedLast: replacedLast,
-		lastLocator:  append([]byte(nil), lastLocator...),
-	}, nil
+	return db.AssembleAppend(path, strategy, db.entriesFromSplits(splits), replacedLast, lastLocator)
 }
 
 // appendPrepared is the shared append store for AppendPrepared and the fused
@@ -2523,11 +2687,14 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		return fmt.Errorf("fileid %d not found: %w", fileid, err)
 	}
 
-	chunks, replacedLast, err := db.appendCollect(filename, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
+	splits, replacedLast, err := db.splitAppend(filename, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
 	if err != nil {
 		return err
 	}
-	p := &PreparedAppend{strategy: strategy, chunks: chunks, replacedLast: replacedLast, lastLocator: lastLocator}
+	p, err := db.AssembleAppend(filename, strategy, db.entriesFromSplits(splits), replacedLast, lastLocator)
+	if err != nil {
+		return err
+	}
 	return db.appendPrepared(fileid, p, cfg)
 }
 
@@ -3953,8 +4120,9 @@ func (db *DB) AddStrategyFunc(name string, fn ChunkFunc) error {
 // indexChunk builds a collectedChunk from a yielded chunk: the dedup hash is
 // SHA-256 over the chunk's Content (R656, R657), the trigram/token index is
 // built from that same Content (full-text — nothing is stripped), and the
-// chunk's native Attrs are stored. Shared by collectChunks, AppendChunks, and
-// the overlay's collectChunksFromContent.
+// chunk's native Attrs are stored. Used by the overlay's collectChunksFromContent;
+// the disk/append compute paths reach the same result through the split
+// (splitYield hash) plus PrepareChunk (grams) decomposition.
 // CRC: crc-DB.md | Seq: seq-chunker-dispatch.md | R656, R657
 func (db *DB) indexChunk(c Chunk) collectedChunk {
 	return collectedChunk{

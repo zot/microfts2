@@ -133,3 +133,35 @@ var ErrAppendTailMoved = errors.New("append tail moved since prepare")
 
 `AppendChunks` remains and is unchanged: it reads the current tail from the F record, then
 computes and stores in one call — `PrepareAppend` followed by `AppendPrepared`.
+
+# Per-Chunk Append: Split, Prepare, Assemble
+
+`PrepareAppend` computes a whole append in one call. The same per-chunk decomposition the
+indexing methods gain (see indexing.md, "Per-Chunk Compute: Split, Prepare, Assemble") applies
+to append, so ark's per-file actor can hash, decide, and (re)compute the appended chunks one at
+a time — reusing computed grams across scans by content hash exactly as for a fresh index. The
+store phase (`AppendPrepared`) and the opaque `*PreparedAppend` it consumes are unchanged.
+
+```go
+func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string) ([]SplitChunk, bool /* replacedLast */, error)
+func (db *DB) AssembleAppend(path, strategy string, entries []PreparedEntry, replacedLast bool, lastLocator []byte) (*PreparedAppend, error)
+```
+
+- `SplitAppend` chunks `content` against the caller-supplied `lastLocator` — dispatching to
+  `AppendAwareChunker.AppendChunks` when the chunker implements it, else the plain `Chunker` —
+  and returns the new chunks as `[]SplitChunk` (each with `Hash` = SHA-256 over `Content`, as
+  `SplitFile` does) plus the `replacedLast` outcome. Like `PrepareAppend` it opens no bbolt
+  transaction and reads no committed state; the tail is the caller's `lastLocator`. The
+  `ErrAppendBoundary` guard fires here exactly as in `AppendChunks`: a boundary-sensitive
+  chunker that yields zero chunks from non-empty `content` returns `ErrAppendBoundary`.
+- `PrepareChunk` (indexing.md) computes each appended chunk's grams — the same content-pure
+  token an index uses; append needs no separate per-chunk prepare.
+- `AssembleAppend` collects the `PreparedEntry` values, `replacedLast`, and the assumed
+  `lastLocator` into the same opaque `*PreparedAppend` that `AppendPrepared` accepts, recording
+  `replacedLast` and `lastLocator` so the store phase can run its `ErrAppendTailMoved` tail
+  check. It opens no bbolt transaction, and — like `AssembleFile` — takes each chunk's
+  positions and `Attrs` from `entry.Chunk`, never from the grams token.
+
+`PrepareAppend` is now the fused form: `SplitAppend` → `PrepareChunk` per chunk →
+`AssembleAppend`, with its public signature unchanged. `AppendChunks` in turn remains
+`PrepareAppend` (reading the current tail from the F record) followed by `AppendPrepared`.

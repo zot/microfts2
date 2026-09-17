@@ -284,3 +284,109 @@ phase; the prepared handle never carries those records, only derived per-chunk d
 existing callers: each is compute-then-store in one call (`PrepareFile` then
 `StorePrepared`, or `PrepareFile` then `ReindexPrepared`). Splitting the API adds the
 two-phase entry points; it does not remove or alter the one-call forms.
+
+# Per-Chunk Compute: Split, Prepare, Assemble
+
+`PrepareFile` and `PrepareContent` compute a whole file's chunks in one call: they chunk,
+then hash and extract grams for every chunk with no resume point, and the resulting
+`*PreparedFile` is opaque, so a caller cannot inspect a chunk's hash, fill the handle
+incrementally, or feed a previously computed chunk back in. A consumer that wants a
+*preemptible* indexing loop — ark runs a per-file actor that abandons a superseded scan
+after at most one chunk's compute, and keeps a content-hash → computed-grams map so a
+rapidly edited file converges instead of re-computing the whole file each pass — needs the
+compute phase itself decomposed to per-chunk granularity.
+
+The whole-file compute therefore factors into three steps: **split**, **prepare a chunk**,
+and **assemble**. The store phase (`StorePrepared` / `ReindexPrepared`) and the opaque
+`*PreparedFile` it consumes are unchanged; only the compute side is opened up.
+
+## Split — cheap, transaction-free, hashes each chunk
+
+```go
+// SplitChunk is one chunk of a split file: its Chunk (Range, Locator, Content, Attrs)
+// and the content hash microfts2 dedups by.
+type SplitChunk struct {
+    Chunk Chunk
+    Hash  [32]byte // SHA-256 over Chunk.Content
+}
+
+// FileMeta is the file-level metadata a store needs, computed once by the split.
+type FileMeta struct {
+    ModTime     int64
+    ContentHash [32]byte
+    FileLength  int64
+}
+
+func (db *DB) SplitFile(fpath, strategy string) ([]SplitChunk, FileMeta, error)
+func (db *DB) SplitContent(fpath, strategy string, content []byte) ([]SplitChunk, FileMeta, error)
+```
+
+- Resolves the strategy's chunker and runs it, exactly as the compute phase does, but stops
+  at chunk boundaries: it does *not* extract trigrams or tokens. `SplitFile` reads the file;
+  `SplitContent` takes caller-supplied bytes.
+- Computes each chunk's `Hash` as SHA-256 over `Chunk.Content` — the same content hash
+  microfts2 dedups by (see the "Chunk identity is content identity" theme). **The split owns
+  the hash — not the caller, and not the per-chunk prepare.** The split already has the
+  content in hand and SHA-256 is cheap beside trigram extraction, so computing it here keeps
+  the chunk-identity invariant (`Hash == sha256(Content)`) inside microfts2 and means a
+  caller's reuse map is keyed on exactly the hash the store dedups by, with no way to desync.
+- Opens no bbolt transaction. `FileMeta` carries the mod time, whole-file content hash, and
+  byte length the store phase records in the F record.
+
+## Prepare a chunk — the expensive, content-pure part
+
+```go
+// PreparedChunk is the computed grams for one chunk's content: trigram counts and
+// tokens. Opaque; carries no hash and no position/chunker data.
+type PreparedChunk struct { /* opaque: trigram counts + tokens */ }
+
+func (db *DB) PrepareChunk(content []byte) *PreparedChunk
+```
+
+- Extracts the trigram counts and tokens from one chunk's content — the genuinely expensive,
+  genuinely content-pure part of the old whole-file compute, and nothing else. It computes
+  **no hash** (the split did that) and holds **no** `Range`, `Locator`, or `Attrs` — those
+  are position- and chunker-dependent and come fresh from each split (see Assemble).
+- Opens no bbolt transaction and is a pure function of `content` and the DB's trigram
+  configuration (case-fold, byte aliases). Because the result depends only on the content, a
+  caller may cache it keyed by the chunk's content hash and reuse it across scans — and across
+  files — whenever the hash matches, under the same standing precondition as the whole-file
+  compute: the trigram configuration must not be mutated concurrently.
+
+## Assemble — pair split chunks with grams into the opaque handle
+
+```go
+// PreparedEntry pairs one split chunk (its Chunk and Hash) with its computed grams.
+type PreparedEntry struct {
+    Chunk Chunk
+    Hash  [32]byte
+    Grams *PreparedChunk
+}
+
+func (db *DB) AssembleFile(fpath, strategy string, entries []PreparedEntry, meta FileMeta) (*PreparedFile, error)
+```
+
+- Collects the per-chunk entries, in order, with the file's `FileMeta`, into the same opaque
+  `*PreparedFile` that `StorePrepared` and `ReindexPrepared` already accept. The store side is
+  untouched: assembly produces the existing handle, nothing more.
+- Takes each chunk's `Range`, `Locator`, and `Attrs` from `entry.Chunk` — the current split's
+  positions — never from the grams token. This is what lets a reused `*PreparedChunk` stay
+  correct: the grams are content-identical wherever the content appears, while the position
+  metadata is supplied fresh by whichever split produced this entry. So identical content in
+  two different files (or at two offsets) assembles into two correctly-positioned handles from
+  one cached grams value.
+
+## The whole-file compute is a composition
+
+`PrepareFile`, `PrepareContent`, and their append sibling are now the fused form of this
+split → per-chunk → assemble pipeline, and their public signatures are unchanged:
+
+- `PrepareFile(fpath, strategy)` = `SplitFile` → `PrepareChunk` for every chunk →
+  `AssembleFile`.
+- `PrepareContent(fpath, strategy, content)` = `SplitContent` → `PrepareChunk` per chunk →
+  `AssembleFile`.
+
+A caller that wants preemption or hash-reuse drives the three steps itself, deciding per chunk
+— against its own reuse map keyed on `SplitChunk.Hash` — whether to call `PrepareChunk` or feed
+a cached `*PreparedChunk` straight into a `PreparedEntry`. Either way the assembled handle
+enters the unchanged store phase.

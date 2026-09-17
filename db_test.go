@@ -2,6 +2,7 @@ package microfts2
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -652,6 +653,310 @@ func TestPreparedFileSingleUse(t *testing.T) {
 	}
 	if _, err := db.StorePrepared(p); !errors.Is(err, errPreparedConsumed) {
 		t.Errorf("second StorePrepared: got %v, want errPreparedConsumed", err)
+	}
+}
+
+// chunkIDByRange returns the ChunkID of the F record entry with the given range
+// label (Location), or 0 if absent.
+func chunkIDByRange(fi FRecord, rng string) uint64 {
+	for _, c := range fi.Chunks {
+		if c.Location == rng {
+			return c.ChunkID
+		}
+	}
+	return 0
+}
+
+// TestSplitFileHashEqualsSHA256: the split owns the authoritative content hash —
+// SplitChunk.Hash is SHA-256 over Chunk.Content, the value the store dedups by.
+// R690, R693
+func TestSplitFileHashEqualsSHA256(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha one\nbeta two\ngamma three\n")
+	splits, _, err := db.SplitFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(splits) != 3 {
+		t.Fatalf("expected 3 split chunks, got %d", len(splits))
+	}
+	for i, sc := range splits {
+		want := sha256.Sum256(sc.Chunk.Content)
+		if sc.Hash != want {
+			t.Errorf("chunk %d: Hash %x != sha256(Content) %x", i, sc.Hash, want)
+		}
+	}
+}
+
+// TestSplitPrepareChunkAssembleEqualsPrepareFile: the per-chunk compute assembles
+// the same *PreparedFile as the fused PrepareFile, so both store to an identical
+// index. R694, R695, R696, R699
+func TestSplitPrepareChunkAssembleEqualsPrepareFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeTestFile(t, dir, "doc.txt", "alpha one\nbeta two\ngamma three\n")
+	dbA := newLineDB(t, dir, "a")
+	dbB := newLineDB(t, dir, "b")
+
+	pa, err := dbA.PrepareFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbA.StorePrepared(pa); err != nil {
+		t.Fatal(err)
+	}
+
+	splits, meta, err := dbB.SplitFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]PreparedEntry, len(splits))
+	for i, sc := range splits {
+		entries[i] = PreparedEntry{Chunk: sc.Chunk, Hash: sc.Hash, Grams: dbB.PrepareChunk(sc.Chunk.Content)}
+	}
+	pb, err := dbB.AssembleFile(fp, "line", entries, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbB.StorePrepared(pb); err != nil {
+		t.Fatal(err)
+	}
+
+	if sa, sb := recordSig(t, dbA), recordSig(t, dbB); sa != sb {
+		t.Errorf("record signature differs: PrepareFile=%v split-compose=%v", sa, sb)
+	}
+	for name, db := range map[string]*DB{"PrepareFile": dbA, "split-compose": dbB} {
+		sr, err := db.Search("gamma")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sr.Results) == 0 {
+			t.Errorf("%s: search returned no results", name)
+		}
+	}
+}
+
+// TestReusedGramsAcrossTwoFiles: a *PreparedChunk is content-pure and reusable —
+// the same grams value assembled into two files with identical content produces a
+// correct index, with positions taken from each split. R694, R698
+func TestReusedGramsAcrossTwoFiles(t *testing.T) {
+	db, dir := testDB(t)
+	// Files A and B share the identical line "shared content line" at different
+	// ranges: line 1 of A, line 2 of B.
+	fpA := writeTestFile(t, dir, "a.txt", "shared content line\nunique alpha\n")
+	fpB := writeTestFile(t, dir, "b.txt", "unique beta\nshared content line\n")
+	shared := []byte("shared content line\n")
+
+	splitsA, metaA, err := db.SplitFile(fpA, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	splitsB, metaB, err := db.SplitFile(fpB, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Prepare the shared chunk's grams exactly once, in file A's pass.
+	var sharedGrams *PreparedChunk
+	entriesA := make([]PreparedEntry, len(splitsA))
+	for i, sc := range splitsA {
+		g := db.PrepareChunk(sc.Chunk.Content)
+		if bytes.Equal(sc.Chunk.Content, shared) {
+			sharedGrams = g
+		}
+		entriesA[i] = PreparedEntry{Chunk: sc.Chunk, Hash: sc.Hash, Grams: g}
+	}
+	if sharedGrams == nil {
+		t.Fatal("shared chunk not found in file A split")
+	}
+	// Reuse that single *PreparedChunk for the shared chunk in file B.
+	entriesB := make([]PreparedEntry, len(splitsB))
+	for i, sc := range splitsB {
+		g := db.PrepareChunk(sc.Chunk.Content)
+		if bytes.Equal(sc.Chunk.Content, shared) {
+			g = sharedGrams
+		}
+		entriesB[i] = PreparedEntry{Chunk: sc.Chunk, Hash: sc.Hash, Grams: g}
+	}
+
+	pa, err := db.AssembleFile(fpA, "line", entriesA, metaA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fidA, err := db.StorePrepared(pa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := db.AssembleFile(fpB, "line", entriesB, metaB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fidB, err := db.StorePrepared(pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The shared content is found in both files, each at its own Range — reusing
+	// the grams did not transplant file A's position into file B.
+	sr, err := db.Search("shared content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRange := map[string]string{}
+	for _, r := range sr.Results {
+		gotRange[r.Path] = r.Range
+	}
+	if gotRange[fpA] != "1-1" {
+		t.Errorf("file A shared chunk Range = %q, want 1-1", gotRange[fpA])
+	}
+	if gotRange[fpB] != "2-2" {
+		t.Errorf("file B shared chunk Range = %q, want 2-2", gotRange[fpB])
+	}
+
+	// The shared chunk dedups to a single chunkid across both files.
+	fiA, err := db.FileInfoByID(fidA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiB, err := db.FileInfoByID(fidB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedA := chunkIDByRange(fiA, "1-1")
+	sharedB := chunkIDByRange(fiB, "2-2")
+	if sharedA == 0 || sharedB == 0 {
+		t.Fatalf("shared chunk missing: A=%d B=%d", sharedA, sharedB)
+	}
+	if sharedA != sharedB {
+		t.Errorf("shared chunk did not dedup: chunkid A=%d B=%d", sharedA, sharedB)
+	}
+
+	// Each file's non-shared chunks index independently.
+	srA, err := db.Search("unique alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(srA.Results) != 1 || srA.Results[0].Path != fpA {
+		t.Errorf(`search "unique alpha" = %v, want only file A`, srA.Results)
+	}
+	srB, err := db.Search("unique beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(srB.Results) != 1 || srB.Results[0].Path != fpB {
+		t.Errorf(`search "unique beta" = %v, want only file B`, srB.Results)
+	}
+}
+
+// TestSplitFileNoWrite: the split and per-chunk-prepare steps are transaction-free
+// — they write no records. R690, R694
+func TestSplitFileNoWrite(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	before := recordSig(t, db)
+	other := writeTestFile(t, dir, "other.txt", "gamma\ndelta\n")
+	splits, _, err := db.SplitFile(other, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(splits) > 0 {
+		_ = db.PrepareChunk(splits[0].Chunk.Content)
+	}
+	if after := recordSig(t, db); before != after {
+		t.Errorf("SplitFile/PrepareChunk wrote records: before=%v after=%v", before, after)
+	}
+}
+
+// TestSplitAppendAssembleEqualsPrepareAppend: the per-chunk append assembles the
+// same *PreparedAppend as the fused PrepareAppend, so both store an identical
+// append. R692, R697, R699
+func TestSplitAppendAssembleEqualsPrepareAppend(t *testing.T) {
+	dir := t.TempDir()
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\nbeta\ngamma\n")
+	dbA := newLineDB(t, dir, "a")
+	dbB := newLineDB(t, dir, "b")
+	fidA, err := dbA.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fidB, err := dbB.AddFile(fp, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := []byte("delta\nepsilon\n")
+
+	// A: fused PrepareAppend + AppendPrepared.
+	faA, err := dbA.FileInfoByID(fidA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastLocA []byte
+	if len(faA.Chunks) > 0 {
+		lastLocA = faA.Chunks[len(faA.Chunks)-1].Locator
+	}
+	pa, err := dbA.PrepareAppend(fp, lastLocA, add, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbA.AppendPrepared(fidA, pa); err != nil {
+		t.Fatal(err)
+	}
+
+	// B: per-chunk SplitAppend -> PrepareChunk -> AssembleAppend + AppendPrepared.
+	faB, err := dbB.FileInfoByID(fidB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastLocB []byte
+	if len(faB.Chunks) > 0 {
+		lastLocB = faB.Chunks[len(faB.Chunks)-1].Locator
+	}
+	splits, replacedLast, err := dbB.SplitAppend(fp, lastLocB, add, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]PreparedEntry, len(splits))
+	for i, sc := range splits {
+		entries[i] = PreparedEntry{Chunk: sc.Chunk, Hash: sc.Hash, Grams: dbB.PrepareChunk(sc.Chunk.Content)}
+	}
+	pb, err := dbB.AssembleAppend(fp, "line", entries, replacedLast, lastLocB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbB.AppendPrepared(fidB, pb); err != nil {
+		t.Fatal(err)
+	}
+
+	// Identical chunk lists, RecordCounts, and search.
+	fiA, err := dbA.FileInfoByID(fidA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiB, err := dbB.FileInfoByID(fidB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fiA.Chunks) != len(fiB.Chunks) {
+		t.Fatalf("chunk-list length differs: fused=%d split=%d", len(fiA.Chunks), len(fiB.Chunks))
+	}
+	for i := range fiA.Chunks {
+		if fiA.Chunks[i].Location != fiB.Chunks[i].Location {
+			t.Errorf("chunk %d Location differs: fused=%q split=%q", i, fiA.Chunks[i].Location, fiB.Chunks[i].Location)
+		}
+	}
+	if sa, sb := recordSig(t, dbA), recordSig(t, dbB); sa != sb {
+		t.Errorf("append signature differs: fused=%v split=%v", sa, sb)
+	}
+	for name, db := range map[string]*DB{"fused": dbA, "split": dbB} {
+		sr, err := db.Search("epsilon")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sr.Results) == 0 {
+			t.Errorf("%s: appended content not searchable", name)
+		}
 	}
 }
 

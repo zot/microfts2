@@ -1,5 +1,5 @@
 # Sequence: Prepare / Store (Two-Phase Compute-Store Split)
-**Requirements:** R676, R677, R678, R679, R680, R681, R682, R683, R684, R685, R686, R687, R688, R689
+**Requirements:** R676, R677, R678, R679, R680, R681, R682, R683, R684, R685, R686, R687, R688, R689, R690, R691, R692, R693, R694, R695, R696, R697, R698, R699
 
 Participants: DB, Chunker, Trigrams
 
@@ -8,6 +8,11 @@ The compute entries (`Prepare*`) open no bbolt transaction; the store entries (`
 or `*PreparedAppend` is the only value that crosses between them. The store internals — H
 dedup, C/T/W/F record work, orphan cascade — are unchanged; see seq-add.md and
 seq-append.md. This sequence shows only the split boundary and what each side owns.
+
+Diagrams 6–8 decompose the compute phase to per-chunk granularity — split (hash only) →
+per-chunk prepare (grams only) → assemble (into the existing opaque handle). Diagrams 1 and 4
+remain the fused view of `PrepareFile`/`PrepareContent`/`PrepareAppend`; Diagram 8 shows they
+are exactly that pipeline run with no reuse map.
 
 Diagram 1 — Compute a file, transaction-free (`PrepareFile` / `PrepareContent`):
 
@@ -62,4 +67,37 @@ Diagram 5 — Store an append, one write txn (`AppendPrepared`):
   5.3. if p.replacedLast: verify the committed last entry's locator equals p.assumedLastLocator, else return ErrAppendTailMoved (R688)
   5.4. drop-and-replace the last chunk when p.replacedLast; store p's chunks — H dedup/insert, coalesced T/W, corpus counters, F update (R687)
   5.5. mark p consumed; return nil (R687)
+```
+
+Diagram 6 — Per-chunk file compute, caller-driven, all transaction-free (`SplitFile`/`SplitContent` -> `PrepareChunk` -> `AssembleFile`):
+
+```
+6. per-chunk file compute
+  6.1. SplitFile(fpath, strategy) / SplitContent(fpath, strategy, content): resolve chunker, obtain bytes, run chunker; per chunk compute Hash=SHA-256(Content); return []SplitChunk + FileMeta{modTime, contentHash, fileLength} — no grams, no txn (R690, R691, R693)
+  6.2. per SplitChunk, the caller decides against its reuse map keyed on SplitChunk.Hash:
+    6.2.1. miss: PrepareChunk(chunk.Content) -> opaque *PreparedChunk (trigram counts + tokens; no hash, no Range/Locator/Attrs), no txn (R694)
+    6.2.2. hit: reuse a cached *PreparedChunk for that hash — no recompute (R694)
+  6.3. build PreparedEntry{Chunk, Hash, Grams} per chunk, in order (R695)
+  6.4. AssembleFile(fpath, strategy, entries, meta): positions/Attrs from each entry.Chunk, grams from entry.Grams -> the existing opaque *PreparedFile; no txn (R696, R698)
+  6.5. the *PreparedFile enters the unchanged store phase — Diagram 2 or 3 (R699)
+```
+
+Diagram 7 — Per-chunk append, caller-driven, all transaction-free (`SplitAppend` -> `PrepareChunk` -> `AssembleAppend`):
+
+```
+7. per-chunk append
+  7.1. SplitAppend(path, lastLocator, content, strategy): dispatch AppendAwareChunker.AppendChunks (or plain Chunks) against lastLocator; per chunk Hash=SHA-256(Content); capture replacedLast; ErrAppendBoundary if not append-aware and zero chunks from non-empty content; return []SplitChunk + replacedLast — no txn, no committed state (R692, R693)
+  7.2. per SplitChunk: PrepareChunk(chunk.Content) or reuse a cached *PreparedChunk (R694)
+  7.3. build PreparedEntry per chunk, in order (R695)
+  7.4. AssembleAppend(path, strategy, entries, replacedLast, lastLocator): positions/Attrs from each entry.Chunk -> the existing opaque *PreparedAppend, recording replacedLast + lastLocator for the tail check; no txn (R697, R698)
+  7.5. the *PreparedAppend enters the unchanged store phase — Diagram 5 (R699)
+```
+
+Diagram 8 — The fused compute entries are this pipeline run with no reuse map (public signatures unchanged):
+
+```
+8. fused compute = split -> per-chunk -> assemble
+  8.1. PrepareFile(fpath, strategy) = SplitFile -> PrepareChunk for every chunk -> AssembleFile — Diagram 6 (R699)
+  8.2. PrepareContent(fpath, strategy, content) = SplitContent -> PrepareChunk per chunk -> AssembleFile (R699)
+  8.3. PrepareAppend(path, lastLocator, content, strategy) = SplitAppend -> PrepareChunk per chunk -> AssembleAppend — Diagram 7 (R699)
 ```

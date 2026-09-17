@@ -33,10 +33,12 @@ then open only the specs it points you to.
 ### Indexing
 - [`indexing.md`](indexing.md) — adding, removing, and reindexing files;
   duplicate guard; staleness detection; the chunk-processor, remove, and
-  reindex callbacks; the two-phase compute/store split for off-actor indexing.
+  reindex callbacks; the two-phase compute/store split for off-actor indexing,
+  and its per-chunk split/prepare/assemble decomposition for preemptible,
+  hash-reusable compute.
 - [`append.md`](append.md) — `AppendChunks`, the `AppendAwareChunker`
-  interface, chunker offset support, the `ErrAppendBoundary` guard, and the
-  two-phase append split.
+  interface, chunker offset support, the `ErrAppendBoundary` guard, the
+  two-phase append split, and its per-chunk decomposition.
 
 ### Search and retrieval
 - [`search.md`](search.md) — literal and regex search, scoring strategies
