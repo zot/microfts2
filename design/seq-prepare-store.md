@@ -1,5 +1,5 @@
 # Sequence: Prepare / Store (Two-Phase Compute-Store Split)
-**Requirements:** R676, R677, R678, R679, R680, R681, R682, R683, R684, R685, R686, R687, R688, R689, R690, R691, R692, R693, R694, R695, R696, R697, R698, R699
+**Requirements:** R676, R677, R678, R679, R680, R681, R682, R683, R684, R685, R686, R687, R688, R689, R690, R691, R692, R693, R694, R695, R696, R697, R698, R699, R700
 
 Participants: DB, Chunker, Trigrams
 
@@ -86,7 +86,7 @@ Diagram 7 — Per-chunk append, caller-driven, all transaction-free (`SplitAppen
 
 ```
 7. per-chunk append
-  7.1. SplitAppend(path, lastLocator, content, strategy): dispatch AppendAwareChunker.AppendChunks (or plain Chunks) against lastLocator; per chunk Hash=SHA-256(Content); capture replacedLast; ErrAppendBoundary if not append-aware and zero chunks from non-empty content; return []SplitChunk + replacedLast — no txn, no committed state (R692, R693)
+  7.1. SplitAppend(path, lastLocator, content, strategy, opts): dispatch AppendAwareChunker.AppendChunks (or plain Chunks) against lastLocator; per chunk Hash=SHA-256(Content); capture replacedLast; WithBaseLine offsets line-based ranges (default non-append-aware path) and WithAppendChunkCallback fires here, as PrepareAppend does; ErrAppendBoundary if not append-aware and zero chunks from non-empty content; return []SplitChunk + replacedLast — no txn, no committed state (R692, R693, R700)
   7.2. per SplitChunk: PrepareChunk(chunk.Content) or reuse a cached *PreparedChunk (R694)
   7.3. build PreparedEntry per chunk, in order (R695)
   7.4. AssembleAppend(path, strategy, entries, replacedLast, lastLocator): positions/Attrs from each entry.Chunk -> the existing opaque *PreparedAppend, recording replacedLast + lastLocator for the tail check; no txn (R697, R698)

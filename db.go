@@ -2487,9 +2487,13 @@ func (db *DB) splitAppend(path string, lastLocator, content []byte, strategy str
 // AppendAwareChunker resume state), so it reads no committed state and opens no
 // bbolt transaction. The ErrAppendBoundary guard fires here exactly as in
 // AppendChunks. Returns the new []SplitChunk and the replacedLast outcome.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R692, R693
-func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string) ([]SplitChunk, bool, error) {
-	return db.splitAppend(path, lastLocator, content, strategy, nil, 0)
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R692, R693, R700
+func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) ([]SplitChunk, bool, error) {
+	var cfg appendConfig
+	for _, o := range opts {
+		o.applyAppend(&cfg)
+	}
+	return db.splitAppend(path, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
 }
 
 // AssembleAppend pairs the ordered PreparedEntry list into the same opaque
@@ -2513,11 +2517,7 @@ func (db *DB) AssembleAppend(path, strategy string, entries []PreparedEntry, rep
 // WithAppendChunkCallback and WithBaseLine apply here.
 // CRC: crc-DB.md | Seq: seq-prepare-store.md#7, seq-prepare-store.md#8 | R685, R686, R699
 func (db *DB) PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error) {
-	var cfg appendConfig
-	for _, o := range opts {
-		o.applyAppend(&cfg)
-	}
-	splits, replacedLast, err := db.splitAppend(path, lastLocator, content, strategy, cfg.chunkCallback, cfg.baseLine)
+	splits, replacedLast, err := db.SplitAppend(path, lastLocator, content, strategy, opts...)
 	if err != nil {
 		return nil, err
 	}

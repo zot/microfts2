@@ -143,7 +143,7 @@ a time — reusing computed grams across scans by content hash exactly as for a 
 store phase (`AppendPrepared`) and the opaque `*PreparedAppend` it consumes are unchanged.
 
 ```go
-func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string) ([]SplitChunk, bool /* replacedLast */, error)
+func (db *DB) SplitAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) ([]SplitChunk, bool /* replacedLast */, error)
 func (db *DB) AssembleAppend(path, strategy string, entries []PreparedEntry, replacedLast bool, lastLocator []byte) (*PreparedAppend, error)
 ```
 
@@ -154,6 +154,13 @@ func (db *DB) AssembleAppend(path, strategy string, entries []PreparedEntry, rep
   transaction and reads no committed state; the tail is the caller's `lastLocator`. The
   `ErrAppendBoundary` guard fires here exactly as in `AppendChunks`: a boundary-sensitive
   chunker that yields zero chunks from non-empty `content` returns `ErrAppendBoundary`.
+  `SplitAppend` takes the same `...AppendOption` tail as `PrepareAppend` and honors
+  `WithBaseLine` — offsetting line-based chunk ranges via `adjustRange`, on the default
+  non-`AppendAwareChunker` path only, exactly as `PrepareAppend` does — and fires
+  `WithAppendChunkCallback` during the split. The variadic is source-compatible, so existing
+  zero-option callers are unchanged. This is what lets the per-chunk append path carry the
+  base-line offset that whole-append `PrepareAppend` already applied; without it a split
+  appended tail mis-ranges every chunk from line 1 rather than the file's existing line count.
 - `PrepareChunk` (indexing.md) computes each appended chunk's grams — the same content-pure
   token an index uses; append needs no separate per-chunk prepare.
 - `AssembleAppend` collects the `PreparedEntry` values, `replacedLast`, and the assumed

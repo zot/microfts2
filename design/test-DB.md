@@ -454,3 +454,13 @@
 **Fire alarm:** in AssembleAppend, hardcode replacedLast=false — a prepared append that should replace the tail no longer does. Guarded by the replacedLast-exercising tests (TestAppendPreparedRefusesMovedTail plus the markdown/bracket append-aware tests), NOT by this equivalence test: the line strategy never sets replacedLast, and AssembleAppend is shared by both compared paths. This test's own chunk-count equivalence is guarded by the entriesFromSplits fused-path drop (verified).
 **Inject:** db.go:AssembleAppend
 **Pulled:** 2026-09-17 — rang (replacedLast=false -> TestAppendPreparedRefusesMovedTail + markdown/bracket object)
+
+## Test: SplitAppend with base line offset
+**Purpose:** SplitAppend honors WithBaseLine, offsetting line-based ranges exactly as PrepareAppend does — the per-chunk append path carries the base-line offset (R700). Also guards that PrepareAppend forwards its opts to SplitAppend, since the recordSig-based equivalence tests are blind to range labels (chunkids are content hashes, so a mis-ranged chunk has the same signature)
+**Input:** add a 3-line file with the "line" strategy; read the last chunk's locator from the F record; call SplitAppend(path, lastLocator, "line4\nline5\n", "line", WithBaseLine(3)), then SplitAppend with no options, then PrepareAppend(..., WithBaseLine(3)) + AppendPrepared and read the stored F record
+**Expected:** with WithBaseLine(3) the two returned SplitChunk ranges are "4-4" and "5-5"; with no options they are "1-1" and "2-2" (so the option carries the offset); and after PrepareAppend+AppendPrepared the stored F-record chunk Locations are "4-4" and "5-5"
+**Refs:** crc-DB.md, seq-prepare-store.md#7, R700
+**Code:** db_test.go
+**Fire alarm:** two injections, each turns a "4-4" assertion red. (a) revert SplitAppend to drop its opts — `db.splitAppend(path, lastLocator, content, strategy, nil, 0)` — so the split ignores WithBaseLine and ranges come back "1-1"/"2-2". (b) drop the `opts...` forwarding in PrepareAppend's `db.SplitAppend(path, lastLocator, content, strategy)` call — the stored F-record ranges regress to "1-1"/"2-2" while recordSig equivalence stays green
+**Inject:** db.go:SplitAppend, db.go:PrepareAppend
+**Pulled:** 2026-09-18 — rang: (a) SplitAppend opts dropped -> split ranges and stored ranges both 1-1/2-2 (three assertions red); (b) PrepareAppend opts... forwarding dropped -> stored ranges 1-1/2-2 red while the SplitAppend-direct assertions stayed green, confirming the forwarding seam is guarded independently

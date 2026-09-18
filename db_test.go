@@ -2216,6 +2216,80 @@ func TestAppendChunksWithBaseLine(t *testing.T) {
 	}
 }
 
+// TestSplitAppendWithBaseLine: SplitAppend honors WithBaseLine, offsetting
+// line-based ranges exactly as PrepareAppend does, so the per-chunk append path
+// carries the base-line offset instead of ranging every chunk from line 1. R700
+func TestSplitAppendWithBaseLine(t *testing.T) {
+	db, dir := testDB(t)
+	fpath := writeTestFile(t, dir, "test.txt", "line1\nline2\nline3\n")
+
+	fileid, err := db.AddFile(fpath, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frec, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastLoc []byte
+	if len(frec.Chunks) > 0 {
+		lastLoc = frec.Chunks[len(frec.Chunks)-1].Locator
+	}
+	add := []byte("line4\nline5\n")
+
+	// With WithBaseLine(3) the split ranges are absolute: "4-4" and "5-5".
+	splits, _, err := db.SplitAppend(fpath, lastLoc, add, "line", WithBaseLine(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(splits) != 2 {
+		t.Fatalf("split count = %d, want 2", len(splits))
+	}
+	if got := string(splits[0].Chunk.Range); got != "4-4" {
+		t.Errorf("split 0 range = %q, want %q", got, "4-4")
+	}
+	if got := string(splits[1].Chunk.Range); got != "5-5" {
+		t.Errorf("split 1 range = %q, want %q", got, "5-5")
+	}
+
+	// Without the option the ranges are relative to the appended slice: "1-1"
+	// and "2-2". The contrast proves WithBaseLine is what carries the offset.
+	plain, _, err := db.SplitAppend(fpath, lastLoc, add, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(plain[0].Chunk.Range); got != "1-1" {
+		t.Errorf("no-option split 0 range = %q, want %q", got, "1-1")
+	}
+	if got := string(plain[1].Chunk.Range); got != "2-2" {
+		t.Errorf("no-option split 1 range = %q, want %q", got, "2-2")
+	}
+
+	// PrepareAppend forwards its options to SplitAppend, so the offset reaches
+	// the stored F record too. recordSig-based equivalence is blind to range
+	// labels (chunkids are content hashes), so this path needs a direct check.
+	p, err := db.PrepareAppend(fpath, lastLoc, add, "line", WithBaseLine(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AppendPrepared(fileid, p); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.FileInfoByID(fileid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Chunks) != 5 {
+		t.Fatalf("stored chunk count = %d, want 5", len(stored.Chunks))
+	}
+	if stored.Chunks[3].Location != "4-4" {
+		t.Errorf("PrepareAppend stored chunk 3 range = %q, want %q", stored.Chunks[3].Location, "4-4")
+	}
+	if stored.Chunks[4].Location != "5-5" {
+		t.Errorf("PrepareAppend stored chunk 4 range = %q, want %q", stored.Chunks[4].Location, "5-5")
+	}
+}
+
 func TestAppendChunksUpdatesMetadata(t *testing.T) {
 	db, dir := testDB(t)
 	fpath := writeTestFile(t, dir, "test.txt", "hello\n")
