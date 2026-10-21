@@ -393,7 +393,7 @@
 **Code:** db_test.go
 **Fire alarm:** make PrepareAppend open a write txn and touch a counter — the post-call RecordCounts differ; assertion red
 **Inject:** db.go:PrepareAppend
-**Pulled:** 2026-09-17 — rang (RecordCounts 22→23 after PrepareAppend)
+**Pulled:** 2026-09-18 — rang (RecordCounts 22→23 after an injected PrepareAppend write); re-pulled after PrepareAppend was restructured to delegate to SplitAppend (R700)
 
 ## Test: a PreparedFile is single-use
 **Purpose:** storing a handle twice is rejected rather than silently corrupting (R679)
