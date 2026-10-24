@@ -155,7 +155,7 @@ SearchResult: `{ Path string, Range string, Score float64, chunkID uint64, chunk
 SearchResults: `{ Results []SearchResult, Status IndexStatus }`
 IndexStatus: `{ Built bool }`
 ScoredChunk: `{ Range string, Score float64 }`
-ChunkResult: `{ Path string, Range string, Content string, Index int }` — a chunk with its content and position in the file's chunk list
+ChunkResult: `{ Path string, Range string, Content string, Index int, Attrs []Pair, Missing bool }` — a chunk with its content and position in the file's chunk list; `Missing` marks an F-record chunk the re-chunk did not produce (see retrieval.md)
 MultiSearchResult: `{ Strategy string, Results []SearchResult }` — one strategy's top-k results from SearchMulti
 
 ScoreFunc: `func(queryTrigrams []uint32, chunkCounts map[uint32]int, chunkTokenCount int) float64`

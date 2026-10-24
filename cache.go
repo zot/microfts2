@@ -130,6 +130,15 @@ func (cc *ChunkCache) GetChunks(fpath, targetRange string, before, after int) ([
 		fce := cf.fileChunks[i]
 		idx, ok := cf.byRange[fce.Location]
 		if !ok {
+			// R702: the re-chunk produced no chunk with this range — report it
+			// missing so the window keeps its shape and the caller sees the stale file.
+			results = append(results, ChunkResult{
+				Path:    fpath,
+				Range:   fce.Location,
+				Index:   i,
+				Attrs:   streamAttrs[fce.ChunkID],
+				Missing: true,
+			})
 			continue
 		}
 		ch := cf.chunks[idx]

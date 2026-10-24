@@ -69,7 +69,7 @@ The per-file cache entry gains positional access and random-access scratch:
 2. Locate `targetPos`: positional index of `targetRange` in `fileChunks`.
 3. Compute window `lo, hi` around `targetPos`, clamped to bounds.
 4. For each `i` in `[lo, hi]`: get `fileChunks[i].Location` and `fileChunks[i].ChunkID`. If `byRange[Location]` hit, use cached content. Miss: read C record by ChunkID, pre-fill Chunk, call `GetChunk` (fast path) or fall back to the streaming path. Store result in `chunks` + `byRange`.
-5. Assemble `[]ChunkResult` in positional order.
+5. Assemble `[]ChunkResult` in positional order. A window entry with no cached chunk after retrieval is returned missing (see retrieval.md), never skipped.
 
 ## ChunkTextWithId / ChunkText behavior
 

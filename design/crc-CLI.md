@@ -1,5 +1,5 @@
 # CLI
-**Requirements:** R1, R34, R39, R41, R49, R50, R57, R58, R59, R60, R61, R62, R70, R71, R72, R73, R74, R89, R100, R108, R126, R132, R133, R175, R192, R193, R194, R195, R204, R205, R207, R208, R209, R210, R211, R212, R219, R344, R426
+**Requirements:** R1, R34, R39, R41, R49, R50, R57-62, R70-74, R89, R100, R108, R126, R132, R133, R175, R192-195, R204, R205, R207-212, R219, R344, R426, R704
 
 Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB, formats output.
 
@@ -20,7 +20,7 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 - chunk-lines-overlap: output `range\tcontent` for overlapping line windows (--lines, --overlap)
 - chunk-words-overlap: output `range\tcontent` for overlapping word windows (--words, --overlap, --pattern)
 - chunk-markdown: output `range\tcontent` for markdown paragraph-based chunking
-- chunks: retrieve target chunk + neighbors, output JSONL with path/range/content/index per chunk; --before N, --after N (default 0)
+- chunks: retrieve target chunk + neighbors, output JSONL with path/range/content/index per chunk, plus missing: true on a missing chunk (R704); --before N, --after N (default 0)
 
 ## Collaborators
 - DB: all operations delegate to DB (chunk-* commands are standalone, no DB needed)

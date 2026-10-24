@@ -1,4 +1,5 @@
 # Test Design: DB
+**Requirements:** R701-703
 **Source:** crc-DB.md
 
 ## Test: create and open
@@ -144,6 +145,46 @@
 **Input:** add a file, GetChunks(fpath, "999-999", 0, 0)
 **Expected:** returns error
 **Refs:** crc-DB.md, seq-chunks.md, R203
+
+## Test: get chunks after a chunker rule change matches by range
+**Purpose:** a window entry gets the re-chunked chunk with its own range, never the one at its position; an entry the new rules no longer produce is reported missing rather than substituted or dropped
+**Input:** index a 5-line file ("a","DROP","c","d","e") with the line chunker, then re-register the strategy with a chunker that skips the DROP line; GetChunks(fpath, "4-4", 0, 0) and GetChunks(fpath, "3-3", 1, 1)
+**Expected:** "4-4" returns content "d\n" at index 3 (the positional match returned "e\n"); the window around "3-3" returns three results in F-record order — "2-2" with Missing set, empty content, index 1; "3-3" "c\n"; "4-4" "d\n"
+**Refs:** crc-DB.md, seq-chunks.md, R701, R702, R703
+**Code:** db_test.go
+**Fire alarm:** restore the positional match in the streaming path (take the yielded chunk at the window's position instead of the one whose Range matches); red is "4-4" returning "e\n" and "2-2" carrying "c\n" instead of Missing
+**Inject:** db.go:windowMatcher.yield
+**Pulled:** 2026-10-24 — rang: "4-4" got "e\n"; the tmp test also red (shared matcher)
+
+## Test: ChunkCache GetChunks reports a stale entry as missing
+**Purpose:** the cached window keeps its shape — a window entry with no cached chunk becomes a Missing result instead of being skipped
+**Input:** same file and chunker swap as above; NewChunkCache().GetChunks(fpath, "3-3", 1, 1)
+**Expected:** three results; "2-2" has Missing set and empty content; "3-3" and "4-4" carry "c\n" and "d\n"
+**Refs:** crc-ChunkCache.md, seq-chunker-dispatch.md, R702
+**Code:** db_test.go
+**Fire alarm:** put back the `continue` on a byRange miss in ChunkCache.GetChunks; red is two results instead of three
+**Inject:** cache.go:ChunkCache.GetChunks
+**Pulled:** 2026-10-24 — rang: expected 3 chunks, got 2
+
+## Test: a missing chunk keeps its stored attrs
+**Purpose:** a Missing result carries the F-record chunk's stored Attrs on both the DB streaming path and ChunkCache, so a caller can still label a stale chunk
+**Input:** index the 5-line file with a line chunker that tags each chunk `text=<line>`, swap in the DROP-skipping chunker; GetChunks(fpath, "3-3", 1, 1) via DB and via NewChunkCache
+**Expected:** on both, the first result is Missing with Attrs `text=DROP`
+**Refs:** crc-DB.md, crc-ChunkCache.md, R702
+**Code:** db_test.go
+**Fire alarm:** clear Attrs on the Missing result (DB), or omit streamAttrs from the cache's Missing result; red is "missing chunk should carry its stored attrs", got []
+**Inject:** db.go:windowMatcher.results, cache.go:ChunkCache.GetChunks
+**Pulled:** 2026-10-24 — rang on both sites
+
+## Test: streaming retrieval stops once the window is found
+**Purpose:** matching by range must not cost a read to end of file — the chunker is stopped once every window range has been yielded
+**Input:** index a 5-line file, swap in a line chunker that counts yields; GetChunks(fpath, "2-2", 0, 0)
+**Expected:** exactly 2 yields
+**Refs:** crc-DB.md, seq-chunks.md, R701
+**Code:** db_test.go
+**Fire alarm:** make windowMatcher.yield always return true; red is 5 yields instead of 2
+**Inject:** db.go:windowMatcher.yield
+**Pulled:** 2026-10-24 — rang: got 5
 
 ## Test: get chunks file not in database
 **Purpose:** error on unknown file

@@ -142,3 +142,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T60: R218 retired by R662 (2026-06-15 lmdb-to-bbolt: R218 LMDB API/contract -> R662 bbolt)
 - T61: R546 retired by R665 (2026-06-15 lmdb-to-bbolt: R546 LMDB API/contract -> R665 bbolt)
 - T62: R555 retired by R665 (2026-06-15 lmdb-to-bbolt: R555 LMDB API/contract -> R665 bbolt)
+- T63: R201 retired by R703 (2026-10-24 getchunks-range-match: ChunkResult gains Attrs (already present) and Missing)

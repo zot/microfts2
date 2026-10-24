@@ -1,5 +1,5 @@
 # Sequence: Chunk Context Retrieval
-**Requirements:** R197, R198, R199, R200, R201, R202, R203, R204, R205, R206, R236
+**Requirements:** R197-200, R202-206, R236, R701-704
 
 Participants: CLI, DB
 
@@ -33,8 +33,10 @@ CLI                                       DB
  |                            if err: return error
  |                                         |
  |                            run Chunker.Chunks on file
- |                            collect chunks[lo..hi] with content
- |                            (copy content, match by index)
+ |                            keep chunks whose Range is a window entry's
+ |                            (match by range, never by position)
+ |                            stop once every window range is found
+ |                            unmatched entry -> Missing result
  |                                         |
  | <-- []ChunkResult (in positional order)  |
  |                                         |
@@ -43,5 +45,5 @@ CLI                                       DB
  |                 content, index}          |
 ```
 
-ChunkResult struct: Path string, Range string, Content string, Index int
-CLI output: one JSON object per line (JSONL)
+ChunkResult struct: Path string, Range string, Content string, Index int, Attrs []Pair, Missing bool
+CLI output: one JSON object per line (JSONL); `missing: true` on a missing chunk

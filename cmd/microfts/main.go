@@ -559,6 +559,7 @@ func cmdChunks() {
 		fatal("chunks", err)
 	}
 
+	// R704: ChunkResult's missing field (omitempty) marks a stale chunk in the JSONL.
 	enc := json.NewEncoder(os.Stdout)
 	for _, c := range chunks {
 		enc.Encode(c)

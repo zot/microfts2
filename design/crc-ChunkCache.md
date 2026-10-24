@@ -1,5 +1,5 @@
 # ChunkCache
-**Requirements:** R297, R298, R299, R300, R301, R302, R303, R304, R305, R306, R370, R486, R514, R529, R535, R536, R537, R538, R539, R540, R541, R542, R543, R544, R545, R655
+**Requirements:** R297-306, R370, R486, R514, R529, R535-545, R655, R701, R702
 
 Per-query cache for file content and chunked data. Avoids redundant file reads and re-chunking when processing search results. Dispatches to RandomAccessChunker fast path when available; otherwise streams chunks from the start, caching what's encountered.
 
@@ -17,7 +17,7 @@ Per-query cache for file content and chunked data. Avoids redundant file reads a
 
 ## Does
 - NewChunkCache(): create cache with DB reference
-- GetChunks(fpath, targetRange, before, after): resolve file via ensureFile; locate targetPos in fileChunks; compute window [lo, hi]; for each i in window: resolve fileChunks[i].Location via byRange on hit, else retrieve (fast path via GetChunk + C record, or streaming fallback); assemble []ChunkResult in positional order
+- GetChunks(fpath, targetRange, before, after): resolve file via ensureFile; locate targetPos in fileChunks; compute window [lo, hi]; for each i in window: resolve fileChunks[i].Location via byRange on hit, else retrieve (fast path via GetChunk + C record, or streaming fallback); assemble []ChunkResult in positional order; a window entry with no cached chunk after retrieval becomes a Missing result, never skipped (R702)
 - ChunkTextWithId(fpath, chunkID): resolve file; find positional entry in fileChunks by ChunkID match; check byRange for cached content; on miss, read C record, pre-fill Chunk (Range from fileChunks[i].Location, Attrs from C record), dispatch to GetChunk (fast path) or streaming (chunkUntil by range); return content
 - ChunkText(fpath, rangeLabel): resolve file; look up chunkID := rangeIds[rangeLabel]; delegate to ChunkTextWithId
 - ensureFile(fpath): lookup path → fileid via DB (N records), read F record, snapshot fileChunks, build rangeIds from fileChunks, resolve chunker. For Chunker backends, os.ReadFile into data; for FileChunker-only backends, data stays nil. Allocate empty chunks slice, empty byRange map, nil customData.

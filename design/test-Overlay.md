@@ -1,4 +1,5 @@
 # Test Design: Overlay
+**Requirements:** R701, R702
 **Source:** crc-Overlay.md
 
 ## Test: add and search tmp file
@@ -61,6 +62,16 @@
 **Expected:** Returns chunk content from overlay's stored bytes
 **Refs:** crc-Overlay.md, crc-DB.md, seq-tmp-search.md
 
+
+## Test: GetChunks with tmp path after a chunker rule change
+**Purpose:** tmp:// retrieval matches the re-chunked stored bytes by range, and reports an entry the new rules no longer produce as missing
+**Input:** AddTmpFile("tmp://s/doc", "line", "a\nDROP\nc\nd\ne\n"), re-register "line" with a chunker that skips the DROP line; GetChunks("tmp://s/doc", "3-3", 1, 1)
+**Expected:** three results — "2-2" Missing with empty content, "3-3" "c\n", "4-4" "d\n"
+**Refs:** crc-DB.md, seq-tmp-search.md, R701, R702
+**Code:** overlay_test.go
+**Fire alarm:** feed getChunksTmp's chunker a positional collector (index the yielded chunks by count, as before); red is "2-2" carrying "c\n"
+**Inject:** db.go:DB.getChunksTmp
+**Pulled:** 2026-10-24 — rang: "2-2" carried "c\n"
 ## Test: chunk dedup within overlay
 **Purpose:** Identical content in two tmp:// files shares a chunkid
 **Input:** AddTmpFile with same content under two different paths

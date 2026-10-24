@@ -212,6 +212,22 @@ func TestGetChunksTmpPath(t *testing.T) {
 	}
 }
 
+// Test: test-Overlay.md | R701, R702
+func TestGetChunksTmpMatchesByRangeAfterRuleChange(t *testing.T) {
+	db, _ := testDB(t)
+	if _, err := db.AddTmpFile("tmp://s/doc", "line", []byte("a\nDROP\nc\nd\ne\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddStrategyFunc("line", dropLineChunkFunc); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := db.GetChunks("tmp://s/doc", "3-3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStaleWindow(t, chunks)
+}
+
 func TestOverlayDestroyedOnClose(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "testdb")

@@ -92,13 +92,14 @@ type ScoredChunk struct {
 }
 
 // ChunkResult holds a single chunk with its content and position.
-// R201
+// R703
 type ChunkResult struct {
 	Path    string `json:"path"`
 	Range   string `json:"range"`
 	Content string `json:"content"`
 	Index   int    `json:"index"` // 0-based position in the file's chunk list
 	Attrs   []Pair `json:"attrs,omitempty"`
+	Missing bool   `json:"missing,omitempty"` // re-chunk produced no chunk with this Range; Content is empty
 }
 
 // SearchResults wraps search matches with index health status.
@@ -3742,7 +3743,7 @@ func (db *DB) ChunkContentLens(fileid uint64) ([]int, error) {
 
 // --- GetChunks ---
 
-// Seq: seq-chunks.md | Seq: seq-chunker-dispatch.md | R197, R198, R199, R200, R201, R202, R203, R529, R530
+// CRC: crc-DB.md | Seq: seq-chunks.md, seq-chunker-dispatch.md | R197, R198, R199, R200, R202, R203, R529, R530, R701, R703
 // GetChunks retrieves the target chunk (identified by range label) and
 // up to before/after positional neighbors. Returns chunks in positional order.
 // Fast path: if the resolved chunker implements RandomAccessChunker, extract
@@ -3802,21 +3803,8 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 	if err != nil {
 		return nil, err
 	}
-	var results []ChunkResult
-	idx := 0
-	yield := func(c Chunk) bool {
-		if idx >= lo && idx <= hi {
-			results = append(results, ChunkResult{
-				Path:    fpath,
-				Range:   string(c.Range),
-				Content: string(c.Content),
-				Index:   idx,
-				Attrs:   CopyPairs(attrsByID[frec.Chunks[idx].ChunkID]),
-			})
-		}
-		idx++
-		return idx <= hi // stop early once past window
-	}
+	// R701: match the re-chunked output to the window by range, not position.
+	m := newWindowMatcher(frec.Chunks, lo, hi)
 
 	// Prefer Chunker when available (text chunker) — avoids re-reading the
 	// file inside FileChunker delegation. Fall back to FileChunker for
@@ -3826,18 +3814,74 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 		if err != nil {
 			return nil, err
 		}
-		if err := ch.Chunks(fpath, data, yield); err != nil {
+		if err := ch.Chunks(fpath, data, m.yield); err != nil {
 			return nil, err
 		}
 	} else if fc, ok := resolved.(FileChunker); ok {
-		if _, err := fc.FileChunks(fpath, [32]byte{}, yield); err != nil {
+		if _, err := fc.FileChunks(fpath, [32]byte{}, m.yield); err != nil {
 			return nil, err
 		}
 	} else {
 		return nil, fmt.Errorf("chunker strategy %q implements neither Chunker nor FileChunker", frec.Strategy)
 	}
 
-	return results, nil
+	return m.results(fpath, attrsByID), nil
+}
+
+// windowMatcher pairs an F-record window [lo, hi] with re-chunked output by
+// range label. Matching by position would be correct only while the chunker
+// still produces what it produced at index time; after a rule change every
+// position past the first difference shifts, and a neighbor's content would be
+// returned under this chunk's range.
+// CRC: crc-DB.md | Seq: seq-chunks.md | R701, R702
+type windowMatcher struct {
+	window  []FileChunkEntry
+	lo      int
+	content map[string]*string // wanted range → content, nil until yielded
+	pending int
+}
+
+func newWindowMatcher(chunks []FileChunkEntry, lo, hi int) *windowMatcher {
+	m := &windowMatcher{window: chunks[lo : hi+1], lo: lo, content: make(map[string]*string, hi-lo+1)}
+	for _, fce := range m.window {
+		if _, dup := m.content[fce.Location]; !dup {
+			m.content[fce.Location] = nil
+			m.pending++
+		}
+	}
+	return m
+}
+
+// yield records a chunk whose Range is wanted; it stops the chunker once every
+// wanted range has been seen. R701
+func (m *windowMatcher) yield(c Chunk) bool {
+	if got, wanted := m.content[string(c.Range)]; wanted && got == nil {
+		s := string(c.Content)
+		m.content[string(c.Range)] = &s
+		m.pending--
+	}
+	return m.pending > 0
+}
+
+// results builds the window in F-record order. A range the chunker never
+// yielded is returned Missing rather than substituted or dropped. R702
+func (m *windowMatcher) results(fpath string, attrsByID map[uint64][]Pair) []ChunkResult {
+	results := make([]ChunkResult, len(m.window))
+	for i, fce := range m.window {
+		r := ChunkResult{
+			Path:  fpath,
+			Range: fce.Location,
+			Index: m.lo + i,
+			Attrs: CopyPairs(attrsByID[fce.ChunkID]),
+		}
+		if c := m.content[fce.Location]; c != nil {
+			r.Content = *c
+		} else {
+			r.Missing = true
+		}
+		results[i] = r
+	}
+	return results
 }
 
 // chunkAttrs reads the stored Attrs for chunks[lo..hi] in one View txn, keyed by
@@ -3947,24 +3991,12 @@ func (db *DB) getChunksTmp(fpath, targetRange string, before, after int) ([]Chun
 	// Content, but surfaces the overlay's stored (index-time) Attrs — never re-running
 	// the transform.
 	attrsByID := db.overlay.chunkAttrs(ofile.chunks, lo, hi)
-	var results []ChunkResult
-	idx := 0
-	yield := func(c Chunk) bool {
-		if idx >= lo && idx <= hi {
-			results = append(results, ChunkResult{
-				Path:    fpath,
-				Range:   string(c.Range),
-				Content: string(c.Content),
-				Index:   idx,
-				Attrs:   attrsByID[ofile.chunks[idx].ChunkID],
-			})
-		}
-		idx++
-		return idx <= hi
+	// R701, R702: match by range, as on the disk streaming path.
+	m := newWindowMatcher(ofile.chunks, lo, hi)
+	if err := chunker.Chunks(fpath, ofile.content, m.yield); err != nil {
+		return nil, err
 	}
-	chunker.Chunks(fpath, ofile.content, yield)
-
-	return results, nil
+	return m.results(fpath, attrsByID), nil
 }
 
 // --- ScoreFile ---

@@ -426,12 +426,16 @@
 - **R198:** Target chunk identified by exact string match of range label against the F record's chunk list (location field)
 - **R199:** Neighbor window: `max(0, targetIndex - before)` to `min(len-1, targetIndex + after)`, inclusive
 - **R200:** Chunk content recovered via `Chunker.ChunkText` or by re-running `Chunker.Chunks` for windowed retrieval (GetChunks)
-- **R201:** `ChunkResult` struct: `Path string, Range string, Content string, Index int` — index is 0-based position in the file's chunk list
+- **~~R201:~~** (Retired T63 — see R703) `ChunkResult` struct: `Path string, Range string, Content string, Index int` — index is 0-based position in the file's chunk list
 - **R202:** Returns chunks in positional order (ascending index)
 - **R203:** Error if file not in database, target range not found, file missing from disk, or chunking strategy not registered
 - **R204:** CLI `chunks` subcommand: `microfts chunks -db <path> [-before N] [-after N] <file> <range>` — JSONL output with `path`, `range`, `content`, `index` fields
 - **R205:** `-before` and `-after` default to 0 (target chunk only)
 - **R206:** (inferred) Expansion unit is chunks (strategy-agnostic), not lines or bytes — range labels are opaque
+- **R701:** Window entries come from the F record; each entry's content comes from the re-chunked chunk with the same range label, never from the re-chunked chunk at the same position — on the streaming path, the `tmp://` path, and `ChunkCache.GetChunks`
+- **R702:** A window entry the re-chunk does not produce is returned with `Missing` true, empty `Content`, `Range` and `Index` from the F record, and its stored `Attrs` — never replaced by another chunk's content, never omitted
+- **R703:** `ChunkResult` struct: `Path string, Range string, Content string, Index int, Attrs []Pair, Missing bool` (JSON `path`, `range`, `content`, `index`, `attrs` omitempty, `missing` omitempty) — index is 0-based position in the F record's chunk list
+- **R704:** CLI `chunks` JSONL output carries `missing: true` on a missing chunk
 
 ## Feature: Composable --contains and --regex
 **Source:** specs/search.md

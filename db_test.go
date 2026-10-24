@@ -3872,3 +3872,141 @@ func TestRefreshStaleWithChunkCallback(t *testing.T) {
 		t.Fatalf("expected 2 chunks from refreshed file, got %d", len(chunks))
 	}
 }
+
+// staleChunkFixture indexes "a, DROP, c, d, e" with the line chunker, then
+// re-registers "line" with a chunker that skips the DROP line — a rule change
+// after indexing. The F record still holds 1-1..5-5; the re-chunk yields
+// 1-1, 3-3, 4-4, 5-5.
+// Test: test-DB.md | R701, R702
+func staleChunkFixture(t *testing.T) (*DB, string) {
+	t.Helper()
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "stale.txt", "a\nDROP\nc\nd\ne\n")
+	if _, err := db.AddFile(f, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddStrategyFunc("line", dropLineChunkFunc); err != nil {
+		t.Fatal(err)
+	}
+	return db, f
+}
+
+// dropLineChunkFunc is LineChunkFunc minus any "DROP" line.
+func dropLineChunkFunc(path string, content []byte, yield func(Chunk) bool) error {
+	return LineChunkFunc(path, content, func(c Chunk) bool {
+		if string(c.Content) == "DROP\n" {
+			return true
+		}
+		return yield(c)
+	})
+}
+
+// checkStaleWindow asserts the "3-3" ±1 window over staleChunkFixture.
+func checkStaleWindow(t *testing.T, chunks []ChunkResult) {
+	t.Helper()
+	want := []ChunkResult{
+		{Range: "2-2", Index: 1, Missing: true},
+		{Range: "3-3", Index: 2, Content: "c\n"},
+		{Range: "4-4", Index: 3, Content: "d\n"},
+	}
+	if len(chunks) != len(want) {
+		t.Fatalf("expected %d chunks, got %d: %+v", len(want), len(chunks), chunks)
+	}
+	for i, w := range want {
+		c := chunks[i]
+		if c.Range != w.Range || c.Index != w.Index || c.Content != w.Content || c.Missing != w.Missing {
+			t.Errorf("chunk %d: got {Range:%q Index:%d Content:%q Missing:%v}, want {Range:%q Index:%d Content:%q Missing:%v}",
+				i, c.Range, c.Index, c.Content, c.Missing, w.Range, w.Index, w.Content, w.Missing)
+		}
+	}
+}
+
+// Test: test-DB.md | R701, R702, R703
+func TestGetChunksMatchesByRangeAfterRuleChange(t *testing.T) {
+	db, f := staleChunkFixture(t)
+
+	chunks, err := db.GetChunks(f, "4-4", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 || chunks[0].Content != "d\n" || chunks[0].Index != 3 || chunks[0].Missing {
+		t.Fatalf("4-4: expected content \"d\\n\" at index 3, got %+v", chunks)
+	}
+
+	chunks, err = db.GetChunks(f, "3-3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStaleWindow(t, chunks)
+}
+
+// Test: test-DB.md | R702
+func TestGetChunksMissingKeepsStoredAttrs(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "stale.txt", "a\nDROP\nc\nd\ne\n")
+	tagged := func(path string, content []byte, yield func(Chunk) bool) error {
+		return LineChunkFunc(path, content, func(c Chunk) bool {
+			c.Attrs = []Pair{{Key: []byte("text"), Value: bytes.TrimSpace(c.Content)}}
+			return yield(c)
+		})
+	}
+	if err := db.AddStrategyFunc("line", tagged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddFile(f, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddStrategyFunc("line", dropLineChunkFunc); err != nil {
+		t.Fatal(err)
+	}
+	for name, get := range map[string]func() ([]ChunkResult, error){
+		"DB":         func() ([]ChunkResult, error) { return db.GetChunks(f, "3-3", 1, 1) },
+		"ChunkCache": func() ([]ChunkResult, error) { return db.NewChunkCache().GetChunks(f, "3-3", 1, 1) },
+	} {
+		chunks, err := get()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(chunks) == 0 || !chunks[0].Missing {
+			t.Fatalf("%s: expected a missing first chunk, got %+v", name, chunks)
+		}
+		if a := chunks[0].Attrs; len(a) != 1 || string(a[0].Value) != "DROP" {
+			t.Errorf("%s: missing chunk should carry its stored attrs (text=DROP), got %+v", name, a)
+		}
+	}
+}
+
+// Test: test-DB.md | R701
+func TestGetChunksStopsOnceWindowFound(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "five.txt", "a\nb\nc\nd\ne\n")
+	if _, err := db.AddFile(f, "line"); err != nil {
+		t.Fatal(err)
+	}
+	yields := 0
+	counting := func(path string, content []byte, yield func(Chunk) bool) error {
+		return LineChunkFunc(path, content, func(c Chunk) bool {
+			yields++
+			return yield(c)
+		})
+	}
+	if err := db.AddStrategyFunc("line", counting); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetChunks(f, "2-2", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if yields != 2 {
+		t.Errorf("expected the chunker stopped after the window's last range (2 yields), got %d", yields)
+	}
+}
+
+// Test: test-DB.md | R702
+func TestChunkCacheGetChunksReportsMissing(t *testing.T) {
+	db, f := staleChunkFixture(t)
+	chunks, err := db.NewChunkCache().GetChunks(f, "3-3", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStaleWindow(t, chunks)
+}

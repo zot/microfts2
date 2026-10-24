@@ -1,5 +1,5 @@
 # Sequence: Chunker Dispatch
-**Requirements:** R502, R505, R513, R514, R515, R516, R529, R530, R542, R543, R544, R655, R656
+**Requirements:** R502, R505, R513-516, R529, R530, R542-544, R655, R656, R701, R702
 
 How DB and ChunkCache dispatch to the right chunking interface at each call site.
 
@@ -48,11 +48,15 @@ DB.GetChunks(fpath, targetRange, before, after)
   |     append to results
   |
   case FileChunker:                                               # streaming fallback, R530
-  |   fc.FileChunks(fpath, [32]byte{}, yield) → (_, err)
+  |   fc.FileChunks(fpath, [32]byte{}, m.yield) → (_, err)
   |
   case Chunker:                                                   # streaming fallback, R530
   |   os.ReadFile(fpath)
-  |   c.Chunks(fpath, data, yield) → err
+  |   c.Chunks(fpath, data, m.yield) → err
+  |
+  streaming: m = windowMatcher over frec.Chunks[lo..hi]           # match by range, R701
+  |   m.yield keeps chunks whose Range is wanted; false once all found
+  |   m.results → window in F-record order; unmatched → Missing     # R702
 ```
 
 ## Overlay (AddTmpFile, UpdateTmpFile, AppendTmpFile)
@@ -119,6 +123,7 @@ ChunkCache.GetChunks(fpath, targetRange, before, after)
     else: retrieve via fast path or streaming (same dispatch as ChunkTextWithId)
   |
   assemble []ChunkResult in positional order                      # R544
+  entry with no cached chunk → Missing result, never skipped      # R702
 ```
 
 ## Content and Attrs across index/retrieval (cross-cutting)
