@@ -10,7 +10,7 @@ All commands require `-db <path>`. Optional shared flag: `-db-name` (subdatabase
   Search for text. Builds index on demand if needed. Output: `filepath:range`
   With `-regex`, query is a Go regexp pattern; trigram query extracted from the regex AST.
   With `-score`, select scoring strategy (default: coverage).
-  With `-verify`, post-filter results: for each candidate chunk, re-chunk the file using the stored chunking strategy to recover the chunk content (same text the trigrams were built from), tokenize the query into terms, and verify that every term appears as a case-insensitive substring in the chunk content. Chunks that fail are discarded. This eliminates false positives where trigrams match independently but the actual words are absent.
+  With `-verify`, post-filter results: for each candidate chunk, re-chunk the file using the stored chunking strategy to recover the chunk content (same text the trigrams were built from), tokenize the query into terms, and verify that every term appears as a case-insensitive substring in the chunk content. Chunks that fail are discarded. This eliminates false positives where trigrams match independently but the actual words are absent. `-verify` checks an exact match, so combining it with `-loose` or `-fuzzy` is an error (see search.md, Verify).
   Query tokenization for verify: split on spaces, but quoted strings (double quotes) are treated as a single term with quotes stripped. E.g. `"hello world" foo` produces terms `hello world` and `foo`.
 - `microfts delete -db <path> <file>...`
   Remove files from the database.

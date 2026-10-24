@@ -1,5 +1,5 @@
 # CLI
-**Requirements:** R1, R34, R39, R41, R49, R50, R57-62, R70-74, R89, R100, R108, R126, R132, R133, R175, R192-195, R204, R205, R207-212, R219, R344, R426, R704
+**Requirements:** R1, R34, R39, R41, R49, R50, R57-62, R70-74, R89, R100, R108, R126, R132, R133, R175, R192-195, R204, R205, R207-212, R219, R426, R704, R711, R713
 
 Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB, formats output.
 
@@ -9,7 +9,7 @@ Thin wrapper over DB library API. Parses subcommands and flags, delegates to DB,
 ## Does
 - init: create database (--case-insensitive, --db-name)
 - add: add files with a chunking strategy (--strategy)
-- search: query and print `filepath:range` per result; --regex for regex pattern mode; --contains for explicit FTS query (composes with --regex: FTS narrows, regex post-filters); --score coverage|density; --verify for post-filter verification; --filter-regex (repeatable, AND post-filter); --except-regex (repeatable, subtract post-filter). Repeatable flags via stringSlice flag.Value type
+- search: query and print `filepath:range` per result; --regex for regex pattern mode; --contains for explicit FTS query (composes with --regex: FTS narrows, regex post-filters); --score coverage|density; --verify for post-filter verification (exact search only: searchFlagConflict rejects it with --loose or --fuzzy before any search runs, R711); --filter-regex (repeatable, AND post-filter); --except-regex (repeatable, subtract post-filter). Repeatable flags via stringSlice flag.Value type
 - delete: remove a file
 - reindex: reindex a file with a new strategy (--strategy)
 - strategy add/remove/list: manage chunking strategies

@@ -1,5 +1,5 @@
 # Sequence: SearchMulti
-**Requirements:** R283, R284, R285, R286, R287, R288, R289, R290
+**Requirements:** R283-290, R710
 
 ## SearchMulti(query, strategies, k, opts)
 
@@ -33,7 +33,7 @@ Caller               DB                      index
   |                   |  -- post-filters (per strategy) -- |
   |                   |                        |
   |                   |  for each strategy's results:      |
-  |                   |    apply verify if set             |
+  |                   |    apply verify if set, not loose (R710)
   |                   |    apply regex filters             |
   |                   |    apply proximity rerank          |
   |                   |    sort by score descending        |

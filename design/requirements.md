@@ -301,6 +301,8 @@
 - **R124:** `WithVerify()` search option: after trigram intersection, re-chunk the file using stored strategy to recover chunk content, verify each query term appears as a case-insensitive substring; discard chunks that fail
 - **R125:** Query tokenization for verify: split on spaces; double-quoted strings are a single term with quotes stripped (e.g. `"hello world" foo` → terms `hello world`, `foo`)
 - **R126:** CLI `-verify` flag on search command passes `WithVerify()` to the library
+- **R710:** `WithVerify` applies only to exact search: `Search` and `SearchMulti` ignore it when `WithLoose` is set, and `SearchFuzzy` ignores it always (R424) — verify requires every term literally, which overrules loose (any term) and fuzzy (resemblance) instead of confirming them
+- **R711:** CLI `search` rejects `-verify` combined with `-loose` or `-fuzzy`: an error naming both flags and a non-zero exit, before any search runs
 
 ## Feature: Chunk Struct and Generator Contract
 **Source:** specs/chunking.md
@@ -590,10 +592,12 @@
 - **R339:** Default fuzzy scoring: score = (terms matched) / (total query terms), range [0.0, 1.0]
 - **R340:** A term matches a chunk if its trigram set intersects the chunk's trigram counts (all trigram counts > 0)
 - **R341:** Results sorted by score descending; custom `ScoreFunc` via `WithScoring` overrides the default fuzzy scoring
-- **R342:** Composable with all existing search options: `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`
+- **~~R342:~~** (Retired T65 — see R712) Composable with all existing search options: `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`
 - **R343:** Works with `SearchMulti` — fuzzy candidate collection shared, per-strategy scoring independent
-- **R344:** CLI flag: `microfts search -db <path> -fuzzy <query>` — composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`
+- **~~R344:~~** (Retired T66 — see R713) CLI flag: `microfts search -db <path> -fuzzy <query>` — composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`
 - **R345:** (inferred) When `WithLoose` is combined with `WithScoring`, the custom ScoreFunc receives the full query trigram set (union of all terms); the default loose term-match scoring is bypassed
+- **R712:** `WithLoose` composes with `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`; `WithVerify` is ignored with it (R710)
+- **R713:** CLI `-loose` composes with `-filter-regex`, `-except-regex`, `-score`; with `-verify` it is an error (R711)
 
 ## Feature: Fileid Filtering
 **Source:** specs/overlay.md

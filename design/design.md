@@ -53,6 +53,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-DB.md → `db_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
+- [x] test-CLI.md → `cmd/microfts/main_test.go`
 - [x] test-ChunkAttrs.md → `chunk_attrs_test.go`
 
 ## Gaps
@@ -144,3 +145,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T62: R555 retired by R665 (2026-06-15 lmdb-to-bbolt: R555 LMDB API/contract -> R665 bbolt)
 - T63: R201 retired by R703 (2026-10-24 getchunks-range-match: ChunkResult gains Attrs (already present) and Missing)
 - T64: R347 retired by R705 (2026-10-24 fuzzy-only-after-cut: R347 stated chunk-level discard; code has always discarded per result)
+- T65: R342 retired by R712 (2026-10-24 verify-exact-only: WithVerify no longer composes with WithLoose)
+- T66: R344 retired by R713 (2026-10-24 verify-exact-only: named the loose flag by its pre-rename name -fuzzy, and -verify no longer composes)

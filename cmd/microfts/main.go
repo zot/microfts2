@@ -183,6 +183,20 @@ func cmdAdd() {
 	}
 }
 
+// searchFlagConflict refuses -verify with a search mode it would overrule:
+// verify demands every term literally, loose claims any term and fuzzy claims
+// resemblance. Refusing tells the user one flag cancels the other.
+// CRC: crc-CLI.md | R711, R713
+func searchFlagConflict(verify, loose, fuzzy bool) error {
+	switch {
+	case verify && loose:
+		return fmt.Errorf("-verify checks an exact match and cannot be combined with -loose")
+	case verify && fuzzy:
+		return fmt.Errorf("-verify checks an exact match and cannot be combined with -fuzzy")
+	}
+	return nil
+}
+
 // Seq: seq-search.md | R207, R208, R209, R210, R211, R212
 func cmdSearch() {
 	fs := flag.CommandLine
@@ -206,6 +220,10 @@ func cmdSearch() {
 	}
 	if *contains == "" && positional == "" {
 		fmt.Fprintln(os.Stderr, "search: query required (positional args or --contains)")
+		os.Exit(1)
+	}
+	if err := searchFlagConflict(*verify, *loose, *fuzzy); err != nil {
+		fmt.Fprintln(os.Stderr, "search:", err)
 		os.Exit(1)
 	}
 

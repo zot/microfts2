@@ -1,5 +1,5 @@
 # Sequence: Search
-**Requirements:** R31, R32, R33, R34, R35, R82, R84, R85, R87, R88, R89, R99, R103, R104, R105, R106, R107, R108, R124, R125, R126, R127, R132, R134, R135, R136, R137, R140, R141, R142, R143, R144, R178, R179, R180, R181, R182, R183, R184, R185, R186, R187, R188, R189, R190, R191, R196, R207, R208, R209, R210, R211, R212, R238, R239, R244, R255, R256, R257, R258, R259, R260, R674, R675
+**Requirements:** R31-35, R82, R84, R85, R87-89, R99, R103-108, R124-127, R132, R134-137, R140-144, R178-191, R196, R207-212, R238, R239, R244, R255-260, R674, R675, R710
 
 Participants: DB, Trigrams
 
@@ -54,7 +54,7 @@ DB                                        Trigrams
  |      score = scoreFunc(queryTrigrams,    |
  |        chunkCounts, tokenCount)          |
  |                                          |
- |  if WithVerify:                          |
+ |  if WithVerify and not WithLoose (R710): |
  |    for each result:                      |
  |      re-chunk file using stored strategy |
  |      find chunk by range match           |

@@ -1,6 +1,6 @@
 # Sequence: Loose Search
 
-**Requirements:** R336, R337, R338, R339, R340, R341, R342, R343, R345
+**Requirements:** R336-341, R343, R345, R710, R712
 
 Shows how Search with WithLoose() collects candidates via union instead of intersection.
 
@@ -34,7 +34,7 @@ Caller                              DB
   |                        for each term, check if all term trigrams have count > 0
   |                        score = matchingTerms / totalTerms
   |                                  |
-  |                    apply post-filters (verify, regex, proximity rerank)
+  |                    apply post-filters (regex, proximity rerank); verify skipped under loose (R710)
   |                    sort by score descending
   |                                  |
   |<-- SearchResults ----------------|

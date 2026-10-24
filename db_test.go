@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -4117,4 +4118,44 @@ func TestSearchFuzzyOnlyMinusExceptBeforeCut(t *testing.T) {
 	}
 	sr, err := db.SearchFuzzy("apple banana cherry", 50, WithOnly(only), WithExcept(out))
 	checkOnlyHit(t, sr, err, "in.txt")
+}
+
+// Test: test-DB.md | R124, R424, R710
+func TestWithVerifyExactSearchOnly(t *testing.T) {
+	db, dir := testDB(t)
+	f := writeTestFile(t, dir, "v.txt", "go to hell, yellow cat\nhello world\n")
+	if _, err := db.AddFile(f, "line"); err != nil {
+		t.Fatal(err)
+	}
+	ranges := func(sr *SearchResults, err error) []string {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r []string
+		for _, x := range sr.Results {
+			r = append(r, x.Range)
+		}
+		slices.Sort(r)
+		return r
+	}
+	if got := ranges(db.Search("hello", WithVerify())); !slices.Equal(got, []string{"2-2"}) {
+		t.Errorf("exact + verify: want [2-2] (line 1 is the trigram false positive), got %v", got)
+	}
+	if got := ranges(db.Search("hello cat", WithLoose(), WithVerify())); !slices.Equal(got, []string{"1-1", "2-2"}) {
+		t.Errorf("loose + verify: want both lines (verify ignored), got %v", got)
+	}
+	if got := ranges(db.SearchFuzzy("helo wrld", 10, WithVerify())); !slices.Contains(got, "2-2") {
+		t.Errorf("fuzzy + verify: want 2-2 among typo hits (verify ignored), got %v", got)
+	}
+	multi, err := db.SearchMulti("hello cat", map[string]ScoreFunc{"coverage": ScoreCoverage}, 10, WithLoose(), WithVerify())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multi) != 1 {
+		t.Fatalf("SearchMulti: want one strategy, got %d", len(multi))
+	}
+	if got := ranges(&SearchResults{Results: multi[0].Results}, nil); !slices.Equal(got, []string{"1-1", "2-2"}) {
+		t.Errorf("SearchMulti loose + verify: want both lines (verify ignored), got %v", got)
+	}
 }

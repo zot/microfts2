@@ -1,5 +1,5 @@
 # Test Design: DB
-**Requirements:** R701-703, R705-709
+**Requirements:** R701-703, R705-710
 **Source:** crc-DB.md
 
 ## Test: create and open
@@ -565,3 +565,13 @@
 **Fire alarm:** build onlyChunks from every WithOnly file, ignoring WithExcept; red is zero results (found by probing past the list: Phase 2 still filters, so nothing else objects)
 **Inject:** db.go:searchConfig.newFileRestriction
 **Pulled:** 2026-10-24 — rang: got []
+
+## Test: WithVerify is exact-search only
+**Purpose:** verify confirms an exact match and must not overrule loose (any term) or fuzzy (resemblance)
+**Input:** one file, line 1 "go to hell, yellow cat", line 2 "hello world"; Search("hello", WithVerify); Search("hello cat", WithLoose, WithVerify); SearchFuzzy("helo wrld", 10, WithVerify); SearchMulti("hello cat", coverage, 10, WithLoose, WithVerify)
+**Expected:** exact: line 2 only (line 1 is the trigram false positive verify removes); loose: both lines; fuzzy: line 2 found; SearchMulti loose: both lines
+**Refs:** crc-DB.md, seq-search.md, seq-search-multi.md, R124, R710, R424
+**Code:** db_test.go
+**Fire alarm:** drop the loose guard on verify in Search or in SearchMulti, or restore verify in SearchFuzzy; red is the loose case returning no lines, or fuzzy returning nothing
+**Inject:** db.go:DB.Search, db.go:DB.SearchFuzzy, db.go:DB.SearchMulti
+**Pulled:** 2026-10-24 — rang at all three sites (SearchMulti found by probing past the list: no test reached it)

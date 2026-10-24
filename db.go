@@ -2836,7 +2836,9 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		results = append(results, db.overlay.searchOverlay(termTrigrams, queryTrigrams, cfg.loose, cfg.scoreFunc, cfg)...)
 	}
 
-	if cfg.verify {
+	// R710, R712: verify checks an exact match — every term — so it would turn loose
+	// search's any-term OR back into AND.
+	if cfg.verify && !cfg.loose {
 		results = cfg.verifyResults(results, query)
 	}
 
@@ -2965,10 +2967,8 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 		return nil, err
 	}
 
-	// R423: post-filters
-	if cfg.verify {
-		results = cfg.verifyResults(results, query)
-	}
+	// R423: post-filters. R424, R710: WithVerify is ignored — it demands each
+	// term's literal spelling, which would discard every typo hit.
 	var ferr error
 	results, ferr = cfg.applyRegexPostFilters(results)
 	if ferr != nil {
@@ -3054,7 +3054,7 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 	// Apply post-filters per strategy
 	for i := range multiResults {
 		r := multiResults[i].Results
-		if cfg.verify {
+		if cfg.verify && !cfg.loose { // R710: exact search only
 			r = cfg.verifyResults(r, query)
 		}
 		var ferr error

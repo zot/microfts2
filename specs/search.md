@@ -223,6 +223,23 @@ ark search --regex '@to-project:.*\bark\b' --except-regex '@status:.*\bcompleted
 
 Ark translates its own `--regex`/`--except-regex` flags to `WithRegexFilter`/`WithExceptRegex` options on the microfts2 library call. Finds open requests filed against ark — positive match on the project tag, subtract anything marked done.
 
+# Verify
+
+A trigram index can say only that a chunk *might* contain the query: a chunk holding "go to hell, yellow cat" carries every trigram of `hello` (`hel` from *hell*, `ell` and `llo` from *yellow*) without containing the word. `WithVerify()` closes that gap. After candidates are collected it recovers each candidate chunk's text (re-chunking the file with its stored strategy, or from the chunk cache), splits the query into terms — on spaces, with a double-quoted string as one term, quotes stripped — and keeps the chunk only if **every term appears in the text as a case-insensitive substring**.
+
+That is a check of an exact match, and it means something only for exact search: `Search` and `SearchMulti` without `WithLoose`, where every term is required. The other modes claim something else, and verify would overrule the claim rather than confirm it:
+
+- `WithLoose` claims *any* term. Verify requires *all*, so it would turn OR back into AND — "hello cat" would drop a line holding only one of the two words.
+- `SearchFuzzy` claims *resemblance*. Verify requires the literal spelling, so it would discard every typo hit, the reason fuzzy search exists.
+
+So `WithVerify` is **exact-search only**: `Search` and `SearchMulti` ignore it when `WithLoose` is set, and `SearchFuzzy` ignores it always. A caller that wants a check fitted to loose or fuzzy search needs a different filter, designed for that mode.
+
+```go
+func WithVerify() SearchOption
+```
+
+The CLI's `-verify` follows the same rule but refuses rather than ignores: `-verify` with `-loose` or `-fuzzy` is an error, because a person at a prompt who asks for both should learn that one cancels the other instead of getting results from a search they did not ask for.
+
 # Loose Search
 
 OR-semantics search mode for exploratory queries. When the user isn't sure of exact phrasing, loose search returns chunks matching *any* query term, ranked by how many terms match.
@@ -246,7 +263,7 @@ This is the default loose scoring. Custom `ScoreFunc` can be used instead via `W
 func WithLoose() SearchOption
 ```
 
-Composable with all existing search options — `WithVerify`, `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`. Also works with `SearchMulti` (loose candidate collection, per-strategy scoring).
+Composable with `WithRegexFilter`, `WithExceptRegex`, `WithChunkFilter`, `WithTrigramFilter`, `WithProximityRerank`. `WithVerify` is ignored, since it requires every term (see Verify). Also works with `SearchMulti` (loose candidate collection, per-strategy scoring).
 
 ## CLI
 
@@ -254,7 +271,7 @@ Composable with all existing search options — `WithVerify`, `WithRegexFilter`,
 microfts search -db <path> -loose <query>
 ```
 
-The `-loose` flag enables OR semantics. Composable with `-verify`, `-filter-regex`, `-except-regex`, `-score`.
+The `-loose` flag enables OR semantics. Composable with `-filter-regex`, `-except-regex`, `-score`; combining it with `-verify` is an error (see Verify).
 
 ## Use case: search escalation
 
