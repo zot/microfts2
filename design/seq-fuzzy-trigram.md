@@ -1,9 +1,9 @@
 # Sequence: SearchFuzzy (Fuzzy Trigram Search)
-**Requirements:** R418, R419, R420, R421, R422, R425, R427
+**Requirements:** R418-422, R425, R427, R706-709
 
 Participants: DB, index, Overlay
 
-Fast typo-tolerant search. Scores from posting lists — no C record reads until path resolution of top-k.
+Fast typo-tolerant search. Scores from posting lists — no C record reads until path resolution of top-k, except to settle whether a chunk in an excepted file belongs to another file.
 
 ```
 Caller               DB                      index
@@ -24,25 +24,35 @@ Caller               DB                      index
   |                   |                        |
   |                   |  for each query trigram:           |
   |                   |    union overlay trigram map        |
-  |                   |    tally[chunkid]++                |
+  |                   |    tmpTally[chunkid]++             |
+  |                   |                        |
+  |                   |  -- file restriction (R706) --     |
+  |                   |                        |
+  |                   |  if WithOnly or WithExcept:        |
+  |                   |--read F records of restricted files->
+  |                   |  drop disk entries admitDisk rejects (R707)
+  |                   |    (C record read only for a chunk in an excepted file)
+  |                   |  drop overlay entries admitLocked rejects (R708)
   |                   |                        |
   |                   |  -- top-k selection (R421) --      |
   |                   |                        |
-  |                   |  select top-k by tally count       |
+  |                   |  select top-k by tally count, disk and overlay together
   |                   |                        |
   |                   |  -- phase 2: re-score (R420) --    |
   |                   |                        |
-  |                   |--read C records (k)--->|
+  |                   |--read C records (disk winners)--->|
   |                   |<--CRecord data---------|
   |                   |  re-score with ScoreCoverage       |
   |                   |  (actual trigram counts)            |
-  |                   |  re-sort by accurate score         |
   |                   |                        |
   |                   |  -- resolve winners --             |
   |                   |                        |
   |                   |--read F records------->|
   |                   |<--FRecord data---------|
   |                   |  map chunkid → (path, range)       |
+  |                   |                        |
+  |                   |  overlay winners: Overlay.resolve(ids, ScoreCoverage) (R709)
+  |                   |    in-memory record → score → tmp:// (path, range)
   |                   |                        |
   |                   |  -- post-filters (R423) --         |
   |                   |                        |

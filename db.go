@@ -2858,7 +2858,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	}, nil
 }
 
-// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R420, R421, R422, R423, R425, R427
+// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R420, R421, R422, R423, R425, R427, R706, R709
 // SearchFuzzy performs fast typo-tolerant search using two phases:
 // Phase 1: trigram OR-union tally from T record posting lists (select top-k)
 // Phase 2: C record re-score with ScoreCoverage for the top-k winners
@@ -2902,32 +2902,40 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 			}
 		}
 
-		// R425: overlay tally
-		if db.overlay != nil && !cfg.noTmp {
-			db.overlay.mu.RLock()
-			for _, tri := range queryTrigrams {
-				if set, ok := db.overlay.trigrams[tri]; ok {
-					for id := range set {
-						tally[id]++
-					}
-				}
-			}
-			db.overlay.mu.RUnlock()
-		}
-
-		if len(tally) == 0 {
-			return nil
-		}
-
-		// Select top-k by tally count (R421)
+		// R706: the file restriction applies before the top-k cut, so more than
+		// k better matches outside it cannot evict the matches inside it.
 		type tallyEntry struct {
 			chunkID uint64
 			count   int
+			tmp     bool
 		}
 		entries := make([]tallyEntry, 0, len(tally))
+		restrict := cfg.newFileRestriction(th)
 		for id, count := range tally {
-			entries = append(entries, tallyEntry{id, count})
+			if restrict.admitDisk(id) {
+				entries = append(entries, tallyEntry{id, count, false})
+			}
 		}
+
+		// R425, R708: overlay tally, admitted from in-memory fileids
+		if db.overlay != nil && !cfg.noTmp {
+			o := db.overlay
+			o.mu.RLock()
+			tmpTally := make(map[uint64]int)
+			for _, tri := range queryTrigrams {
+				for id := range o.trigrams[tri] {
+					tmpTally[id]++
+				}
+			}
+			for id, count := range tmpTally {
+				if o.admitLocked(id, &cfg) {
+					entries = append(entries, tallyEntry{id, count, true})
+				}
+			}
+			o.mu.RUnlock()
+		}
+
+		// Select top-k by tally count, disk and overlay together (R421)
 		slices.SortFunc(entries, func(a, b tallyEntry) int {
 			return cmp.Compare(b.count, a.count) // descending
 		})
@@ -2935,13 +2943,22 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 			entries = entries[:k]
 		}
 
-		// Phase 2: read C records for top-k, re-score with ScoreCoverage (R420)
+		// Phase 2: read C records for top-k, re-score with ScoreCoverage (R420);
+		// overlay winners resolve from their in-memory records (R709)
 		topIDs := make(map[uint64]bool, len(entries))
+		tmpIDs := make(map[uint64]bool)
 		for _, e := range entries {
-			topIDs[e.chunkID] = true
+			if e.tmp {
+				tmpIDs[e.chunkID] = true
+			} else {
+				topIDs[e.chunkID] = true
+			}
 		}
 		cands := cfg.collectCandidates(th, topIDs)
 		results = cfg.scoreAndResolve(th, cands, queryTrigrams, scoreCoverage)
+		if len(tmpIDs) > 0 {
+			results = append(results, db.overlay.resolve(tmpIDs, queryTrigrams, scoreCoverage, cfg)...)
+		}
 		return nil
 	})
 	if err != nil {
@@ -3166,6 +3183,93 @@ func (s *searchConfig) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool)
 	return candidates
 }
 
+// fileAdmitted reports whether results for fileid fid pass WithOnly and WithExcept.
+// CRC: crc-DB.md | R705, R706
+func (s *searchConfig) fileAdmitted(fid uint64) bool {
+	if s.onlyIDs != nil {
+		if _, ok := s.onlyIDs[fid]; !ok {
+			return false
+		}
+	}
+	_, excepted := s.exceptIDs[fid]
+	return !excepted
+}
+
+// fileRestriction is SearchFuzzy's Phase-1 view of WithOnly/WithExcept for disk
+// chunks: Phase 1 holds only chunkIDs, so it resolves the restricted files' F
+// records to chunk sets instead of reading every tallied chunk's C record.
+// A nil *fileRestriction admits everything.
+// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R707
+type fileRestriction struct {
+	cfg          *searchConfig
+	th           TxnHolder
+	onlyChunks   map[uint64]struct{} // chunks of files in only∖except; nil without WithOnly
+	exceptChunks map[uint64]struct{} // chunks of excepted files
+}
+
+func (s *searchConfig) newFileRestriction(th TxnHolder) *fileRestriction {
+	if s.onlyIDs == nil && s.exceptIDs == nil {
+		return nil
+	}
+	r := &fileRestriction{cfg: s, th: th}
+	if s.onlyIDs != nil {
+		r.onlyChunks = make(map[uint64]struct{})
+		for fid := range s.onlyIDs {
+			if s.fileAdmitted(fid) {
+				r.addChunks(r.onlyChunks, fid)
+			}
+		}
+		return r // membership in onlyChunks already settles the except side
+	}
+	r.exceptChunks = make(map[uint64]struct{})
+	for fid := range s.exceptIDs {
+		r.addChunks(r.exceptChunks, fid)
+	}
+	return r
+}
+
+// addChunks adds fileid fid's chunks to set; a fileid with no F record (a
+// tmp:// file, or one since removed) contributes none.
+func (r *fileRestriction) addChunks(set map[uint64]struct{}, fid uint64) {
+	frec, err := r.cfg.readFRecord(r.th, fid)
+	if err != nil {
+		return
+	}
+	for _, fce := range frec.Chunks {
+		set[fce.ChunkID] = struct{}{}
+	}
+}
+
+// admitDisk reports whether Phase 2 would return a result for disk chunk id:
+// whether at least one of its files passes the restriction. R707
+func (r *fileRestriction) admitDisk(id uint64) bool {
+	if r == nil {
+		return true
+	}
+	if r.onlyChunks != nil {
+		_, ok := r.onlyChunks[id]
+		return ok
+	}
+	if _, ok := r.exceptChunks[id]; !ok {
+		return true
+	}
+	// In an excepted file — admitted only if it also belongs to another file.
+	val := r.th.Bucket().Get(makeCKey(id))
+	if val == nil {
+		return false
+	}
+	crec, err := UnmarshalCValue(append([]byte(nil), val...))
+	if err != nil {
+		return false
+	}
+	for _, fc := range crec.FileIDs {
+		if r.cfg.fileAdmitted(fc.FileID) {
+			return true
+		}
+	}
+	return false
+}
+
 // scoreAndResolve scores pre-loaded candidates and resolves to SearchResults.
 func (s *searchConfig) scoreAndResolve(th TxnHolder, candidates []candidateChunk, active []uint32, scoreFunc ScoreFunc) []SearchResult {
 	var results []SearchResult
@@ -3184,15 +3288,8 @@ func (s *searchConfig) scoreAndResolve(th TxnHolder, candidates []candidateChunk
 
 		for _, fc := range cand.crec.FileIDs {
 			fid := fc.FileID
-			if s.onlyIDs != nil {
-				if _, ok := s.onlyIDs[fid]; !ok {
-					continue
-				}
-			}
-			if s.exceptIDs != nil {
-				if _, ok := s.exceptIDs[fid]; ok {
-					continue
-				}
+			if !s.fileAdmitted(fid) {
+				continue
 			}
 
 			frec, ok := frecCache[fid]

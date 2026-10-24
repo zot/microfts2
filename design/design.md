@@ -43,7 +43,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] seq-fuzzy-search.md → `db.go`
 - [x] seq-tmp-add.md → `overlay.go`, `db.go`
 - [x] seq-tmp-search.md → `overlay.go`, `db.go`
-- [x] seq-fuzzy-trigram.md → `db.go`, `cmd/microfts/main.go`
+- [x] seq-fuzzy-trigram.md → `db.go`, `overlay.go`, `cmd/microfts/main.go`
 - [x] seq-chunker-dispatch.md → `chunker.go`, `db.go`, `cache.go`
 - [x] seq-prepare-store.md → `db.go`
 
@@ -143,3 +143,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T61: R546 retired by R665 (2026-06-15 lmdb-to-bbolt: R546 LMDB API/contract -> R665 bbolt)
 - T62: R555 retired by R665 (2026-06-15 lmdb-to-bbolt: R555 LMDB API/contract -> R665 bbolt)
 - T63: R201 retired by R703 (2026-10-24 getchunks-range-match: ChunkResult gains Attrs (already present) and Missing)
+- T64: R347 retired by R705 (2026-10-24 fuzzy-only-after-cut: R347 stated chunk-level discard; code has always discarded per result)

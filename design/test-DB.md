@@ -1,5 +1,5 @@
 # Test Design: DB
-**Requirements:** R701-703
+**Requirements:** R701-703, R705-709
 **Source:** crc-DB.md
 
 ## Test: create and open
@@ -505,3 +505,63 @@
 **Fire alarm:** two injections, each turns a "4-4" assertion red. (a) revert SplitAppend to drop its opts — `db.splitAppend(path, lastLocator, content, strategy, nil, 0)` — so the split ignores WithBaseLine and ranges come back "1-1"/"2-2". (b) drop the `opts...` forwarding in PrepareAppend's `db.SplitAppend(path, lastLocator, content, strategy)` call — the stored F-record ranges regress to "1-1"/"2-2" while recordSig equivalence stays green
 **Inject:** db.go:SplitAppend, db.go:PrepareAppend
 **Pulled:** 2026-09-18 — rang: (a) SplitAppend opts dropped -> split ranges and stored ranges both 1-1/2-2 (three assertions red); (b) PrepareAppend opts... forwarding dropped -> stored ranges 1-1/2-2 red while the SplitAppend-direct assertions stayed green, confirming the forwarding seam is guarded independently
+
+## Test: fuzzy WithOnly applies before the top-k cut
+**Purpose:** a file-restricted fuzzy search finds the restricted file's match even when more than k better matches lie outside the restriction (ark fuzzy-only-after-cut)
+**Input:** one in-scope file "apple banana delta" and 60 out-of-scope files "apple banana cherry wNN"; SearchFuzzy("apple banana cherry", 50, WithOnly(in-scope fileid))
+**Expected:** exactly one result, the in-scope file (the post-cut restriction returned none)
+**Refs:** crc-DB.md, seq-fuzzy-trigram.md, R706, R707
+**Code:** db_test.go
+**Fire alarm:** skip Phase-1 admission for disk chunks (admit every tally entry), restoring the post-cut restriction; red is zero results
+**Inject:** db.go:DB.SearchFuzzy
+**Pulled:** 2026-10-24 — rang: got []
+
+## Test: fuzzy WithExcept applies before the top-k cut
+**Purpose:** excepting the files holding more than k better matches leaves the remaining match reachable
+**Input:** the same corpus; SearchFuzzy("apple banana cherry", 50, WithExcept(the 60 out-of-scope fileids))
+**Expected:** exactly one result, the in-scope file
+**Refs:** crc-DB.md, seq-fuzzy-trigram.md, R706, R707
+**Code:** db_test.go
+**Fire alarm:** same injection as the WithOnly test; red is zero results
+**Inject:** db.go:DB.SearchFuzzy
+**Pulled:** 2026-10-24 — rang: got []
+
+## Test: fuzzy WithExcept keeps a shared chunk's other file
+**Purpose:** a chunk listed in an excepted file is still admitted when it also belongs to a file outside the set, so the restriction before the cut agrees with Phase 2
+**Input:** files A and B with identical content "apple banana cherry" (one deduplicated chunk); SearchFuzzy("apple banana cherry", 10, WithExcept(A))
+**Expected:** one result, for B
+**Refs:** crc-DB.md, R705, R707
+**Code:** db_test.go
+**Fire alarm:** make admitDisk reject every chunk in an excepted file's chunk list without reading its C record; red is zero results
+**Inject:** db.go:fileRestriction.admitDisk
+**Pulled:** 2026-10-24 — rang: got []
+
+## Test: fuzzy returns tmp:// hits
+**Purpose:** an overlay chunk that wins a top-k place is scored and resolved to its tmp:// path instead of vanishing in Phase 2
+**Input:** a disk file "humble master of disk" and AddTmpFile("tmp://s/doc", "humble master of tmp"); SearchFuzzy("humble master", 10)
+**Expected:** results include tmp://s/doc 1-1 and the disk file
+**Refs:** crc-DB.md, crc-Overlay.md, seq-fuzzy-trigram.md, R709
+**Code:** db_test.go
+**Fire alarm:** drop the overlay winners in Phase 2 (resolve disk winners only), the behavior before this change; red is no tmp://s/doc result
+**Inject:** db.go:DB.SearchFuzzy
+**Pulled:** 2026-10-24 — rang: disk.txt only
+
+## Test: fuzzy WithOnly admits overlay chunks before the cut
+**Purpose:** overlay chunks pass the same Phase-1 restriction as disk chunks, from their in-memory fileids
+**Input:** one in-scope tmp doc "apple banana delta" and 60 out-of-scope tmp docs "apple banana cherry wNN"; SearchFuzzy("apple banana cherry", 50, WithOnly(in-scope tmp fileid))
+**Expected:** exactly one result, the in-scope tmp doc
+**Refs:** crc-Overlay.md, seq-fuzzy-trigram.md, R708
+**Code:** db_test.go
+**Fire alarm:** make overlay.admitLocked return true; red is zero results
+**Inject:** overlay.go:overlay.admitLocked
+**Pulled:** 2026-10-24 — rang: got []
+
+## Test: fuzzy WithOnly minus WithExcept before the cut
+**Purpose:** with both filters, Phase 1 admits only the chunks of files in only∖except — an excepted file named in WithOnly must not take a top-k place that Phase 2 would then empty
+**Input:** the 1 + 60 corpus; SearchFuzzy("apple banana cherry", 50, WithOnly(all 61 fileids), WithExcept(the 60 out-of-scope fileids))
+**Expected:** exactly one result, the in-scope file
+**Refs:** crc-DB.md, seq-fuzzy-trigram.md, R707
+**Code:** db_test.go
+**Fire alarm:** build onlyChunks from every WithOnly file, ignoring WithExcept; red is zero results (found by probing past the list: Phase 2 still filters, so nothing else objects)
+**Inject:** db.go:searchConfig.newFileRestriction
+**Pulled:** 2026-10-24 — rang: got []

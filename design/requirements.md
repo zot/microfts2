@@ -599,7 +599,8 @@
 **Source:** specs/overlay.md
 
 - **R346:** `WithOnly(ids map[uint64]struct{}) SearchOption` — keep candidate chunks only if at least one of their fileids is in the set
-- **R347:** `WithExcept(ids map[uint64]struct{}) SearchOption` — discard candidate chunks if any of their fileids is in the set
+- **~~R347:~~** (Retired T64 — see R705) `WithExcept(ids map[uint64]struct{}) SearchOption` — discard candidate chunks if any of their fileids is in the set
+- **R705:** `WithExcept(ids map[uint64]struct{}) SearchOption` — discard the results for fileids in the set; a chunk shared with a file outside the set still returns its result for that file
 - **R348:** Both apply during candidate evaluation (same phase as ChunkFilter)
 
 ## Feature: Temporary Documents (tmp:// Overlay)
@@ -710,6 +711,10 @@
 - **R425:** Overlay (tmp://) documents participate: overlay trigram maps OR-unioned into the tally alongside index T records
 - **R426:** CLI `-fuzzy` flag on search command calls `SearchFuzzy`. CLI `-loose` flag calls `Search` with `WithLoose()`. Default k = 20 for fuzzy
 - **R427:** (inferred) `collectTrigramUnion` reused from SearchMulti candidate expansion for T record OR-union
+- **R706:** Phase 1 drops every chunk the file restriction rejects before the top-k cut; a chunk is admitted when at least one of its fileids passes both `WithOnly` and `WithExcept` — exactly when Phase 2 returns a result for it
+- **R707:** Disk-chunk admission resolves `WithOnly` from the F records of the named files (the chunks of files in only∖except); a chunk listed in a `WithExcept` file's F record is admitted only if its C record shows a fileid outside the set
+- **R708:** Overlay-chunk admission reads the overlay chunk's in-memory fileids
+- **R709:** An overlay chunk that wins a top-k place is scored from its in-memory record with ScoreCoverage and resolved to its tmp:// results through the same resolve step `searchOverlay` uses; disk and overlay chunks compete for the same k places
 
 ## Feature: Record Counts
 **Source:** specs/api.md

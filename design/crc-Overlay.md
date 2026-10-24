@@ -1,5 +1,5 @@
 # Overlay
-**Requirements:** R349, R350, R351, R352, R353, R354, R355, R356, R357, R358, R359, R360, R361, R362, R363, R364, R365, R366, R369, R371, R372, R373, R428, R429, R430, R431, R432, R433, R434, R435, R436, R437, R438, R439, R440, R441, R442, R473, R474, R475, R476, R480, R481, R483, R485, R499, R501, R611, R612, R613, R614, R615, R616, R656, R657, R655
+**Requirements:** R349-366, R369, R371-373, R428-442, R473-476, R480, R481, R483, R485, R499, R501, R611-616, R655-657, R705, R708, R709
 
 In-memory overlay holding tmp:// documents alongside the index. Mirrors the index record structure (C, F, T, W, H equivalents) in Go maps. Fileids and chunkids count down from MaxUint64 to structurally avoid collision with index ids. Thread-safe: concurrent reads, serialized writes.
 
@@ -39,7 +39,9 @@ In-memory overlay holding tmp:// documents alongside the index. Mirrors the inde
 - dedupOrCreateChunk(cc, fileID): hash-dedup check over the chunk's Content (R656), so identical content dedups and differing content gives distinct chunkids (R657); on hit, increment refcount and return (existing, false); on miss, allocate chunkid, build overlayChunk, update trigram/token/hash maps, return (chunkID, true) (R616)
 - indexedChunkLocked(chunkID, cc): build IndexedChunk{Chunk, CRecord} for callback delivery — CRecord populated from the just-created overlayChunk, with no index txn context (Tx() and DB() return nil) (R613, R614)
 - removeFile(path): find by path (error if missing), for each chunkid: remove fileid from overlayChunk, if no fileids remain delete chunk and clean trigram/token/hash maps. Delete file records. Update counters
-- searchCandidates(queryTrigrams): RLock, intersect trigram maps to produce candidate chunkid set, return overlayChunks for candidates. Mirrors DB's T record intersection
+- searchOverlay(termTrigrams, active, loose, scoreFunc, cfg): RLock, intersect trigram maps (per term when loose) to produce the candidate chunkid set, then resolveLocked. Mirrors DB's T record intersection
+- resolveLocked(candidateIDs, active, scoreFunc, cfg): for each candidate chunk apply ChunkFilter, score, and emit one tmp:// result per fileid that passes cfg.fileAdmitted. Shared by searchOverlay and SearchFuzzy's overlay winners (resolve takes the RLock) (R709)
+- admitLocked(chunkID, cfg): Phase-1 fuzzy admission — true when any of the chunk's in-memory fileids passes cfg.fileAdmitted (R708)
 - lookupChunk(chunkid): RLock, return overlayChunk by id
 - lookupFile(fileid): RLock, return overlayFile by id
 - lookupFileByPath(path): RLock, return overlayFile by path

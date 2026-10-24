@@ -12,12 +12,29 @@ Two-phase search: cheap recall, then precise scoring on the winners.
 1. Extract trigrams from the query (same extraction as normal search)
 2. For each query trigram, read its T record posting list
 3. Count how many of the query's posting lists each chunkID appears in
-4. Select top-k by count
+4. Drop every chunk the file restriction (`WithOnly`, `WithExcept`) would
+   reject, then select top-k by count
 
 **Phase 2 — C record re-score (precise):**
-5. Read C records for the top-k candidates only
+5. Read C records for the top-k candidates only (for an overlay chunk, its
+   in-memory record)
 6. Re-score using ScoreCoverage (actual trigram counts, not binary)
 7. Re-sort by the accurate score
+
+The file restriction is applied before the cut, not after it. A restriction
+applied only to the top k empties the search whenever more than k better
+matches lie outside the restricted files — identical copies of the scoped
+files elsewhere, say — even though the restricted files hold matches. A chunk
+is admitted when at least one of its files passes the restriction, which is
+exactly when Phase 2 would return a result for it. Resolving the restriction
+reads the F record of each file `WithOnly` names; a chunk that appears in a
+`WithExcept` file costs a C record read, to learn whether it also belongs to a
+file that is not excepted.
+
+The other post-filters — `WithChunkFilter`, `WithRegexFilter`,
+`WithExceptRegex`, `WithProximityRerank` — need chunk content or the C record,
+so they still apply to the top k: for them, k is a candidate budget, and a
+filter that rejects most candidates can return fewer than k results.
 
 Phase 1 is ~10-15 T record reads plus counting. Phase 2 is k C record
 reads (default 20). Total cost is negligible compared to reading
@@ -47,7 +64,10 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 - Returns *SearchResults (same type as Search) for API compatibility
 
 Overlay (tmp://) documents participate: overlay trigram maps are
-OR-unioned into the tally alongside index T records.
+OR-unioned into the tally alongside index T records, an overlay chunk that
+wins a top-k place is scored from its in-memory record exactly as a disk chunk
+is from its C record, and its results carry its tmp:// path. Disk and overlay
+chunks compete for the same k places.
 
 ## CLI
 

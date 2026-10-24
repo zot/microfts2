@@ -146,7 +146,7 @@ func WithExcept(ids map[uint64]struct{}) SearchOption  // exclude these fileids
 ```
 
 - `WithOnly`: candidate chunks are kept only if at least one of their fileids is in the set
-- `WithExcept`: candidate chunks are discarded if any of their fileids is in the set
+- `WithExcept`: results for the fileids in the set are discarded; a chunk shared with a file outside the set still returns its result for that file
 - Both apply during candidate evaluation (same phase as ChunkFilter)
 - These exist today in the codebase; this spec anchors them
 

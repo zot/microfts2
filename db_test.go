@@ -4010,3 +4010,111 @@ func TestChunkCacheGetChunksReportsMissing(t *testing.T) {
 	}
 	checkStaleWindow(t, chunks)
 }
+
+// fuzzyScopeCorpus indexes ark's fuzzy-only-after-cut fixture: one in-scope
+// file "apple banana delta" and n out-of-scope files "apple banana cherry wNN",
+// each of which outscores the in-scope file for "apple banana cherry".
+// add indexes one document and returns its fileid.
+// Test: test-DB.md | R706
+func fuzzyScopeCorpus(t *testing.T, n int, add func(name, content string) uint64) (in uint64, out map[uint64]struct{}) {
+	t.Helper()
+	in = add("in.txt", "apple banana delta\n")
+	out = make(map[uint64]struct{}, n)
+	for i := range n {
+		out[add(fmt.Sprintf("w%02d.txt", i), fmt.Sprintf("apple banana cherry w%02d\n", i))] = struct{}{}
+	}
+	return in, out
+}
+
+func diskAdder(t *testing.T, db *DB, dir string) func(name, content string) uint64 {
+	return func(name, content string) uint64 {
+		id, err := db.AddFile(writeTestFile(t, dir, name, content), "line")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+}
+
+func checkOnlyHit(t *testing.T, sr *SearchResults, err error, wantSuffix string) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sr.Results) != 1 || !strings.HasSuffix(sr.Results[0].Path, wantSuffix) {
+		t.Fatalf("expected exactly the %s match, got %+v", wantSuffix, sr.Results)
+	}
+}
+
+// Test: test-DB.md | R706, R707
+func TestSearchFuzzyOnlyBeforeCut(t *testing.T) {
+	db, dir := testDB(t)
+	in, _ := fuzzyScopeCorpus(t, 60, diskAdder(t, db, dir))
+	sr, err := db.SearchFuzzy("apple banana cherry", 50, WithOnly(map[uint64]struct{}{in: {}}))
+	checkOnlyHit(t, sr, err, "in.txt")
+}
+
+// Test: test-DB.md | R706, R707
+func TestSearchFuzzyExceptBeforeCut(t *testing.T) {
+	db, dir := testDB(t)
+	_, out := fuzzyScopeCorpus(t, 60, diskAdder(t, db, dir))
+	sr, err := db.SearchFuzzy("apple banana cherry", 50, WithExcept(out))
+	checkOnlyHit(t, sr, err, "in.txt")
+}
+
+// Test: test-DB.md | R705, R707
+func TestSearchFuzzyExceptKeepsSharedChunk(t *testing.T) {
+	db, dir := testDB(t)
+	add := diskAdder(t, db, dir)
+	a := add("a.txt", "apple banana cherry\n")
+	add("b.txt", "apple banana cherry\n")
+	sr, err := db.SearchFuzzy("apple banana cherry", 10, WithExcept(map[uint64]struct{}{a: {}}))
+	checkOnlyHit(t, sr, err, "b.txt")
+}
+
+// Test: test-DB.md | R709
+func TestSearchFuzzyReturnsTmpHits(t *testing.T) {
+	db, dir := testDB(t)
+	diskAdder(t, db, dir)("disk.txt", "humble master of disk\n")
+	if _, err := db.AddTmpFile("tmp://s/doc", "line", []byte("humble master of tmp\n")); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := db.SearchFuzzy("humble master", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tmp, disk bool
+	for _, r := range sr.Results {
+		tmp = tmp || (r.Path == "tmp://s/doc" && r.Range == "1-1")
+		disk = disk || strings.HasSuffix(r.Path, "disk.txt")
+	}
+	if !tmp || !disk {
+		t.Fatalf("expected both tmp://s/doc 1-1 and disk.txt, got %+v", sr.Results)
+	}
+}
+
+// Test: test-DB.md | R708
+func TestSearchFuzzyOnlyAdmitsTmpBeforeCut(t *testing.T) {
+	db, _ := testDB(t)
+	in, _ := fuzzyScopeCorpus(t, 60, func(name, content string) uint64 {
+		id, err := db.AddTmpFile("tmp://s/"+name, "line", []byte(content))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	})
+	sr, err := db.SearchFuzzy("apple banana cherry", 50, WithOnly(map[uint64]struct{}{in: {}}))
+	checkOnlyHit(t, sr, err, "tmp://s/in.txt")
+}
+
+// Test: test-DB.md | R707
+func TestSearchFuzzyOnlyMinusExceptBeforeCut(t *testing.T) {
+	db, dir := testDB(t)
+	in, out := fuzzyScopeCorpus(t, 60, diskAdder(t, db, dir))
+	only := map[uint64]struct{}{in: {}}
+	for id := range out {
+		only[id] = struct{}{}
+	}
+	sr, err := db.SearchFuzzy("apple banana cherry", 50, WithOnly(only), WithExcept(out))
+	checkOnlyHit(t, sr, err, "in.txt")
+}

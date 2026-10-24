@@ -453,8 +453,37 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 	if len(candidateIDs) == 0 {
 		return nil
 	}
+	return o.resolveLocked(candidateIDs, active, scoreFunc, cfg)
+}
 
-	// Collect, filter, score, and resolve — all under one lock.
+// resolve scores and resolves overlay chunks that won SearchFuzzy's top-k. R709
+func (o *overlay) resolve(candidateIDs map[uint64]bool, active []uint32, scoreFunc ScoreFunc, cfg searchConfig) []SearchResult {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.resolveLocked(candidateIDs, active, scoreFunc, cfg)
+}
+
+// admitLocked reports whether any of overlay chunk id's fileids passes the file
+// restriction — SearchFuzzy's Phase-1 admission. Caller holds o.mu.
+// CRC: crc-Overlay.md | Seq: seq-fuzzy-trigram.md | R708
+func (o *overlay) admitLocked(id uint64, cfg *searchConfig) bool {
+	oc, ok := o.chunks[id]
+	if !ok {
+		return false
+	}
+	for _, fc := range oc.fileIDs {
+		if cfg.fileAdmitted(fc.FileID) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveLocked filters, scores, and resolves overlay candidates to tmp://
+// results, one per admitted fileid. Shared by searchOverlay and SearchFuzzy.
+// Caller holds o.mu.
+// CRC: crc-Overlay.md | R705, R709
+func (o *overlay) resolveLocked(candidateIDs map[uint64]bool, active []uint32, scoreFunc ScoreFunc, cfg searchConfig) []SearchResult {
 	var results []SearchResult
 	for cid := range candidateIDs {
 		oc, ok := o.chunks[cid]
@@ -491,15 +520,8 @@ func (o *overlay) searchOverlay(termTrigrams [][]uint32, active []uint32, loose 
 
 		for _, fc := range oc.fileIDs {
 			fid := fc.FileID
-			if cfg.onlyIDs != nil {
-				if _, ok := cfg.onlyIDs[fid]; !ok {
-					continue
-				}
-			}
-			if cfg.exceptIDs != nil {
-				if _, ok := cfg.exceptIDs[fid]; ok {
-					continue
-				}
+			if !cfg.fileAdmitted(fid) {
+				continue
 			}
 			ofile, ok := o.filesByID[fid]
 			if !ok {
@@ -547,15 +569,8 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 		score := 1.0 // regex search scores all candidates equally
 		for _, fc := range oc.fileIDs {
 			fid := fc.FileID
-			if cfg.onlyIDs != nil {
-				if _, ok := cfg.onlyIDs[fid]; !ok {
-					continue
-				}
-			}
-			if cfg.exceptIDs != nil {
-				if _, ok := cfg.exceptIDs[fid]; ok {
-					continue
-				}
+			if !cfg.fileAdmitted(fid) {
+				continue
 			}
 			ofile, ok := o.filesByID[fid]
 			if !ok {
