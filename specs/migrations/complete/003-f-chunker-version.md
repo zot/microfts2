@@ -48,8 +48,9 @@ microfts2-migrate-v3 -db PATH [-bucket NAME]
 Version 0 everywhere means every chunker that declares nothing still matches,
 so the migration re-chunks nothing.
 
-The program depends on the old layout only in the byte splice it performs, and
-is expected to be deleted once ark's databases are migrated.
+The program depended on the old layout only in the byte splice it performed.
+It was deleted on 2026-10-25, after ark migrated its only database; it remains
+in microfts2 history at commit `9151394`.
 
 ## Ark
 

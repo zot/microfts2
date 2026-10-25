@@ -3718,8 +3718,8 @@ func TestAppendChunksReturnsErrAppendBoundaryOnSilentNoOp(t *testing.T) {
 	}
 }
 
-// AppendChunks with empty content stays a successful no-op even when the
-// chunker would have produced zero chunks. R625
+// AppendChunks with empty content returns no error even when the
+// chunker would have produced zero chunks. R726
 func TestAppendChunksEmptyContentIsNoOp(t *testing.T) {
 	db, dir := testDB(t)
 	if err := db.AddStrategyFunc("zero", func(_ string, _ []byte, _ func(Chunk) bool) error {
@@ -4291,7 +4291,7 @@ func TestChunkerVersionStale(t *testing.T) {
 	}
 }
 
-// CRC: crc-DB.md | Test: test-DB.md | R720
+// CRC: crc-DB.md | Test: test-DB.md | R727
 func TestChunkerVersionAppendRefused(t *testing.T) {
 	db, path, fid, v := versionTestDB(t)
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
@@ -4313,12 +4313,69 @@ func TestChunkerVersionAppendRefused(t *testing.T) {
 	if len(after.Chunks) != len(before.Chunks) {
 		t.Fatalf("refused append changed the chunk list: %d -> %d", len(before.Chunks), len(after.Chunks))
 	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R727
+func TestChunkerVersionEmptyAppendRefused(t *testing.T) {
+	db, path, fid, v := versionTestDB(t)
+	before, _ := db.FileInfoByID(fid)
+	*v = 2
 	empty, err := db.AssembleAppend(path, "vline", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AppendPrepared(fid, empty); err != nil {
-		t.Fatalf("empty append: %v", err)
+	if err := db.AppendPrepared(fid, empty, WithFileLength(before.FileLength+100)); !errors.Is(err, ErrChunkerVersionStale) {
+		t.Fatalf("AppendPrepared with no chunks: err = %v, want ErrChunkerVersionStale", err)
+	}
+	if err := db.AppendChunks(fid, nil, "vline"); !errors.Is(err, ErrChunkerVersionStale) {
+		t.Fatalf("AppendChunks with empty content: err = %v, want ErrChunkerVersionStale", err)
+	}
+	if after, _ := db.FileInfoByID(fid); after.FileLength != before.FileLength {
+		t.Fatalf("refused append moved FileLength: %d -> %d", before.FileLength, after.FileLength)
+	}
+}
+
+// silentAppendChunker is a LineChunker whose appends index nothing, like ark's
+// chat chunker on a tail of tool calls.
+type silentAppendChunker struct{ LineChunker }
+
+func (silentAppendChunker) AppendChunks(string, []byte, []byte, func(Chunk) bool) (bool, error) {
+	return false, nil
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R726, R728
+func TestAppendNoChunksRecordsFileState(t *testing.T) {
+	db, dir := testDB(t)
+	if err := db.AddChunker("silent", silentAppendChunker{}); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestFile(t, dir, "chat.txt", "alpha line\n")
+	fid, err := db.AddFile(path, "silent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := db.FileInfoByID(fid)
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	f.WriteString("tool call\n")
+	f.Close()
+	data, _ := os.ReadFile(path)
+	st, _ := os.Stat(path)
+	hash := sha256.Sum256(data)
+	err = db.AppendChunks(fid, []byte("tool call\n"), "silent",
+		WithModTime(st.ModTime().UnixNano()), WithContentHash(hex.EncodeToString(hash[:])), WithFileLength(int64(len(data))))
+	if err != nil {
+		t.Fatalf("append with no chunks: %v", err)
+	}
+	after, _ := db.FileInfoByID(fid)
+	if len(after.Chunks) != len(before.Chunks) {
+		t.Fatalf("chunk list changed: %d -> %d", len(before.Chunks), len(after.Chunks))
+	}
+	if after.FileLength != int64(len(data)) || after.ContentHash != hash || after.ModTime != st.ModTime().UnixNano() {
+		t.Fatalf("F record not moved forward: length %d (want %d), hash match %v, modtime match %v",
+			after.FileLength, len(data), after.ContentHash == hash, after.ModTime == st.ModTime().UnixNano())
+	}
+	if s, err := db.CheckFile(path); err != nil || s.Status != "fresh" {
+		t.Fatalf("CheckFile = %+v, %v; want fresh", s, err)
 	}
 }
 

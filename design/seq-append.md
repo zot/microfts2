@@ -1,5 +1,5 @@
 # Sequence: Append Chunks
-**Requirements:** R146, R147, R150, R151, R152, R153, R156, R157, R158, R159, R160, R161, R162, R163, R164, R165, R166, R167, R168, R223, R224, R225, R226, R236, R237, R253, R261, R262, R471, R482, R601, R602, R603, R604, R605, R606, R607, R608, R609, R623, R624, R625
+**Requirements:** R146, R147, R150-153, R156-168, R223-226, R236, R237, R253, R261, R262, R471, R482, R601-609, R623-625, R726-728
 
 Entry flow: `AppendChunks` now runs as `PrepareAppend` (compute, no txn — the caller
 supplies the last locator) then `AppendPrepared` (this store, one Update txn) — see
@@ -33,7 +33,8 @@ DB                                          Trigrams       Chunker
  |    replacedLast = false                     |              |
  |    if zero chunks and len(content) > 0:     |              |
  |      return ErrAppendBoundary  [R623,R624]  |              |
- |    if len(content) == 0: return nil [R625]  |              |
+ |    len(content) == 0: no chunks, no error   |              |
+ |      [R726]; the store step still runs      |              |
  |                                             |              |
  |  for each yielded Chunk:                    |              |
  |    copy Range, Locator (as bytes)            |              |
@@ -53,6 +54,10 @@ DB                                          Trigrams       Chunker
  |      re-format as "start-end"               |              |
  |                                             |              |
  |  Update txn (single, atomic):               |              |
+ |    if F.chunkerVersion != current:          |              |
+ |      return ErrChunkerVersionStale [R727]   |              |
+ |    (no chunks and no replace: the F         |              |
+ |     metadata below is still set [R728])     |              |
  |    if replacedLast:                         |              |
  |      droppedChunkID = F.lastEntry.chunkid   |              |
  |      drop F's last entry                    |              |

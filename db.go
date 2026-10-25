@@ -1044,7 +1044,7 @@ func Open(path string, opts Options) (*DB, error) {
 			return err
 		}
 		if v != formatVersion {
-			return fmt.Errorf("open db %q: format version %q, want %q (migrate with microfts2-migrate-v3)", dbName, v, formatVersion)
+			return fmt.Errorf("open db %q: format version %q, want %q", dbName, v, formatVersion)
 		}
 		s, err := loadSettings(bucketWrap{b})
 		if err != nil {
@@ -1178,8 +1178,8 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 }
 
 // formatVersion is the DB format this code reads and writes. Format "3" added
-// the F record's chunkerVersion; an older database is brought forward by
-// cmd/microfts2-migrate-v3, never by Open. R718, R721
+// the F record's chunkerVersion; Open never migrates an older database (see
+// specs/migrations/complete/003-f-chunker-version.md). R718, R721
 const formatVersion = "3"
 
 // DB returns the underlying bbolt database. R661
@@ -2425,7 +2425,7 @@ var ErrAppendTailMoved = errors.New("microfts2: append tail moved since prepare"
 
 // ErrChunkerVersionStale is returned by AppendPrepared and AppendChunks when the
 // file was chunked under a different version of its strategy's chunker: its
-// existing chunks follow other rules, so the caller must Reindex. R720
+// existing chunks follow other rules, so the caller must Reindex. R727
 var ErrChunkerVersionStale = errors.New("microfts2: file was chunked under a different chunker version — reindex")
 
 // PreparedAppend is an opaque, single-use handle for a computed append, produced
@@ -2447,7 +2447,7 @@ type PreparedAppend struct {
 // dispatch AppendAwareChunker (or plain Chunker), collect the new chunks with
 // content hashes, apply the ErrAppendBoundary guard, and adjust line ranges by
 // baseLine. It reads no committed state — the tail is the caller's lastLocator.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R605, R606, R623, R624, R625, R692, R693
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#7 | R605, R606, R623, R624, R692, R693, R726
 func (db *DB) splitAppend(path string, lastLocator, content []byte, strategy string, cb ChunkCallback, baseLine int) ([]SplitChunk, bool, error) {
 	resolved := db.resolveChunker(strategy)
 	if resolved == nil {
@@ -2478,10 +2478,11 @@ func (db *DB) splitAppend(path string, lastLocator, content []byte, strategy str
 		return nil, false, utf8Err
 	}
 	if len(newChunks) == 0 && !replacedLast {
-		// Empty input is a legitimate no-op. Non-empty input with a non-AppendAware
-		// chunker that produced nothing means the appended bytes straddle a chunk
-		// boundary the chunker can't recognise in isolation — surface it instead
-		// of silently dropping data and leaving the F record stale. R623, R624, R625
+		// Empty input yields no chunks and no error. Non-empty input with a
+		// non-AppendAware chunker that produced nothing means the appended bytes
+		// straddle a chunk boundary the chunker can't recognise in isolation —
+		// surface it instead of silently dropping data and leaving the F record
+		// stale. R623, R624, R726
 		if appendAware == nil && len(content) > 0 {
 			return nil, false, fmt.Errorf("AppendChunks: chunker %q produced zero chunks from %d-byte content: %w", strategy, len(content), ErrAppendBoundary)
 		}
@@ -2553,11 +2554,6 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 	if p.consumed {
 		return errPreparedConsumed
 	}
-	// Empty, non-replacing append is a legitimate no-op (R625).
-	if len(p.chunks) == 0 && !p.replacedLast {
-		p.consumed = true
-		return nil
-	}
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
 		if b == nil {
@@ -2568,7 +2564,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		if err != nil {
 			return err
 		}
-		// Seq: seq-prepare-store.md#5.2.1 | R720
+		// Seq: seq-prepare-store.md#5.2.1 | R727 — every append, even one with no chunks
 		if db.chunkerStale(frec) {
 			return fmt.Errorf("fileid %d: %w", fileid, ErrChunkerVersionStale)
 		}
@@ -2641,7 +2637,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 			}
 		}
 
-		// Update F record metadata
+		// Update F record metadata — also for an append with no chunks (Seq: seq-prepare-store.md#5.4.1 | R728)
 		if cfg.contentHash != "" {
 			hb, _ := hex.DecodeString(cfg.contentHash)
 			copy(frec.ContentHash[:], hb)
@@ -4317,7 +4313,7 @@ func (db *DB) chunkerVersion(strategy string) uint32 {
 // chunkerStale reports whether a file was chunked under a different version of
 // its strategy's chunker than the current one — the single chunker-version
 // judgment, shared by staleness and the append guard.
-// CRC: crc-DB.md | R719, R720
+// CRC: crc-DB.md | R719, R727
 func (db *DB) chunkerStale(frec FRecord) bool {
 	return frec.ChunkerVersion != db.chunkerVersion(frec.Strategy)
 }

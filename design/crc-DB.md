@@ -1,5 +1,5 @@
 # DB
-**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721
+**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721, R726-728
 
 Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records (I, H, C, F, N, T, W) are prefix-distinguished within that one bucket. Chunks are deduplicated by content hash. Provides the public library API.
 
@@ -30,7 +30,7 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - ReindexCallback: exported type `func(tx *bbolt.Tx, orphanedChunkIDs, newChunkIDs []uint64) error` — transactional cleanup callback for reindex (R665)
 - PreparedFile: opaque exported type — a computed file's chunks plus its mod time, content hash, and byte length; produced by PrepareFile/PrepareContent, consumed once by StorePrepared/ReindexPrepared (R676, R679)
 - PreparedAppend: opaque exported type — a computed append's new chunks plus replacedLast and the assumed last locator; produced by PrepareAppend, consumed once by AppendPrepared (R685, R686)
-- ErrChunkerVersionStale: sentinel error — the append store refuses to extend a file whose recorded chunker version differs from its strategy's current one; the caller reindexes (R720)
+- ErrChunkerVersionStale: sentinel error — the append store refuses to extend a file whose recorded chunker version differs from its strategy's current one; the caller reindexes (R727)
 - ErrAppendTailMoved: sentinel error — AppendPrepared refuses a prepared append whose assumed tail no longer matches the committed F record (R688)
 - SplitChunk: exported struct {Chunk Chunk, Hash [32]byte} — one split chunk plus its content hash (Hash = SHA-256 over Chunk.Content); produced by SplitFile/SplitContent/SplitAppend (R690, R693)
 - FileMeta: exported struct {ModTime int64, ContentHash [32]byte, FileLength int64} — file-level metadata computed by a split, consumed by AssembleFile (R690)
@@ -110,10 +110,10 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - RecordCounts(): open read-only txn, iterate all keys in subdatabase, accumulate count/key bytes/value bytes per prefix. Return map[byte]RecordStats
 - FileIDPaths(): return cached fileid→path map. Lazy load on first call (F record scan with UnmarshalFHeader). AddFile/RemoveFile/Reindex update cache incrementally
 - chunkerVersion(strategy): the current version of the strategy's resolved chunker — VersionedChunker.ChunkerVersion() when implemented, else 0 (R715)
-- chunkerStale(frec): frec.ChunkerVersion != chunkerVersion(frec.Strategy) — the one chunker-version predicate, used by classifyFile and the append store (R719, R720)
+- chunkerStale(frec): frec.ChunkerVersion != chunkerVersion(frec.Strategy) — the one chunker-version predicate, used by classifyFile and the append store (R719, R727)
 - classifyFile(frec): DB method. missing if the file is gone; stale if chunkerStale; fresh on matching mod time; else hash the content — fresh on match, stale otherwise (R64, R719)
 - addFileInTxn stamps FRecord.ChunkerVersion = chunkerVersion(strategy), so add, reindex and both prepared stores record it; appendPrepared and SetFileLength rewrite the F record and carry it unchanged (R716, R717)
-- appendPrepared: after re-reading the F record, refuse with ErrChunkerVersionStale when chunkerStale (R720)
+- appendPrepared: every append opens the txn — after re-reading the F record, refuse with ErrChunkerVersionStale when chunkerStale (R727); an append with no chunks and no replace stores no chunks but still records modTime/contentHash/fileLength (R728)
 - StaleFiles: uses UnmarshalFHeader (not UnmarshalFValue) — skips Chunks and Tokens
 - NewSearchCache(): set frecordCache, return cleanup func that nils it. readFRecord checks cache before the index
 - Copy(): return shallow copy sharing bolt, dbName, settings, trigrams, overlay, chunkers. Caches (pathCache, pathToID, frecordCache) set to nil. overlayOnce not copied — overlay pointer shared directly

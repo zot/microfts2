@@ -27,7 +27,6 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] crc-BracketChunker.md → `bracket_chunker.go`
 - [x] crc-IndentChunker.md → `indent_chunker.go`
 - [x] crc-Overlay.md → `overlay.go`
-- [x] crc-MigrateV3.md → `cmd/microfts2-migrate-v3/main.go`
 
 ### Sequences
 - [x] seq-init.md → `db.go`
@@ -56,7 +55,6 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-Overlay.md → `overlay_test.go`
 - [x] test-CLI.md → `cmd/microfts/main_test.go`
 - [x] test-ChunkAttrs.md → `chunk_attrs_test.go`
-- [x] test-MigrateV3.md → `cmd/microfts2-migrate-v3/main_test.go`
 
 ## Gaps
 
@@ -151,4 +149,10 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T66: R344 retired by R713 (2026-10-24 verify-exact-only: named the loose flag by its pre-rename name -fuzzy, and -verify no longer composes)
 - T67: R234 retired by R717 (2026-10-25 f-chunker-version: F header gained chunkerVersion)
 - T68: R451 retired by R717 (2026-10-25 f-chunker-version: header decode gained ChunkerVersion)
-- [ ] O20: Delete cmd/microfts2-migrate-v3 (and crc-MigrateV3.md, test-MigrateV3.md) once ark's databases are at format 3; retire R722-R725 then
+- [x] O20: Delete cmd/microfts2-migrate-v3 (and crc-MigrateV3.md, test-MigrateV3.md) once ark's databases are at format 3; retire R722-R725 then — done 2026-10-25: ark migrated its only database (request microfts2-chunker-stamp-migrated)
+- T69: R625 retired by R726 (an append with no chunks now updates the F record (R728))
+- T70: R720 retired by R727 (the version check now covers appends with no chunks)
+- T71: R722 retired (migration program deleted after ark migrated (O20))
+- T72: R723 retired (migration program deleted after ark migrated (O20))
+- T73: R724 retired (migration program deleted after ark migrated (O20))
+- T74: R725 retired (migration program deleted after ark migrated (O20))

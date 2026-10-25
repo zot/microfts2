@@ -1,5 +1,5 @@
 # Test Design: DB
-**Requirements:** R701-703, R705-710
+**Requirements:** R701-703, R705-710, R726-728
 **Source:** crc-DB.md
 
 ## Test: create and open
@@ -424,7 +424,7 @@
 **Code:** db_test.go
 **Fire alarm:** defeat the last-locator comparison in appendPrepared (guard it with `if false`, build-safe) — the stale append is applied against the moved tail; the errors.Is(ErrAppendTailMoved) assertion goes red (nil error)
 **Inject:** db.go:appendPrepared
-**Pulled:** 2026-09-17 — rang (expected ErrAppendTailMoved, got <nil>)
+**Pulled:** 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
 
 ## Test: PrepareAppend opens no write transaction
 **Purpose:** append compute is transaction-free (R685)
@@ -599,12 +599,32 @@
 ## Test: append refused onto old-rule chunks
 **Purpose:** an append onto a file chunked under another version refuses and writes nothing
 **Input:** versioned chunker at version 1; AddFile; bump to 2; AppendChunks with non-empty content; also AppendPrepared with a PreparedAppend
-**Expected:** errors.Is(err, ErrChunkerVersionStale) for both; F record unchanged (same chunks); an empty append still succeeds
-**Refs:** crc-DB.md, seq-prepare-store.md, R720
+**Expected:** errors.Is(err, ErrChunkerVersionStale) for both; F record unchanged (same chunks)
+**Refs:** crc-DB.md, seq-prepare-store.md, R727
 **Code:** db_test.go
 **Fire alarm:** remove the chunkerStale check from appendPrepared; red is a nil error and an extra chunk
 **Inject:** db.go:DB.appendPrepared
-**Pulled:** 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale
+**Pulled:** 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
+
+## Test: an append with no chunks is refused onto old-rule chunks
+**Purpose:** the version check is not skipped when the append yields no chunks — ark's chat chunker indexes nothing from a tool-call-only tail, and that append must still refuse on a version-stale file
+**Input:** versioned chunker at version 1; AddFile; bump to 2; AppendPrepared with an empty PreparedAppend (AssembleAppend with no entries, no replace); AppendChunks with empty content
+**Expected:** errors.Is(err, ErrChunkerVersionStale) for both; the F record's FileLength is unchanged
+**Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R727
+**Code:** db_test.go
+**Fire alarm:** restore the early return in appendPrepared for an append with no chunks and no replace; red is a nil error
+**Inject:** db.go:DB.appendPrepared
+**Pulled:** 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
+
+## Test: an append with no chunks records the file's new state
+**Purpose:** an append-aware chunker that indexes nothing from the new bytes still moves the F record's length, hash and modtime forward, so the file does not read stale by content and the next scan does not repeat the append from the old length
+**Input:** an append-aware chunker whose AppendChunks yields nothing; AddFile; append bytes to the file on disk; AppendChunks with those bytes and WithModTime, WithContentHash, WithFileLength set to the file's new state; CheckFile
+**Expected:** nil error; chunk list unchanged; FileLength, ContentHash and ModTime equal the new values; CheckFile reports fresh
+**Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R726, R728
+**Code:** db_test.go
+**Fire alarm:** skip the F record metadata update when the append has no chunks; red is the old FileLength and CheckFile stale
+**Inject:** db.go:DB.appendPrepared
+**Pulled:** 2026-10-25 — rang: F record not moved forward, length 11 want 21
 
 ## Test: Open refuses another format version
 **Purpose:** a database in an older layout is refused rather than mis-read

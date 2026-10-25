@@ -931,7 +931,8 @@
 
 - **R623:** `DB.AppendChunks` returns `ErrAppendBoundary` when the registered chunker is not an `AppendAwareChunker` and produces zero chunks from non-empty `content`
 - **R624:** `ErrAppendBoundary` is an exported sentinel error so callers can detect this case via `errors.Is(err, ErrAppendBoundary)` and fall through to `Reindex` (or equivalent full refresh) instead of silently losing the appended bytes
-- **R625:** Empty `content` remains a successful no-op (`AppendChunks` returns `nil` without touching the F record) — the guard only fires when the chunker had bytes to chunk and produced nothing
+- **~~R625:~~** (Retired T69 — see R726) Empty `content` remains a successful no-op (`AppendChunks` returns `nil` without touching the F record) — the guard only fires when the chunker had bytes to chunk and produced nothing
+- **R726:** Empty `content` never returns `ErrAppendBoundary` — the guard only fires when a non-append-aware chunker had bytes to chunk and produced nothing
 
 ## Feature: BracketChunker AppendAwareChunker
 **Source:** specs/chunk-bracket.md
@@ -1070,7 +1071,9 @@
 ## Feature: Append Chunker-Version Guard
 **Source:** specs/append.md
 
-- **R720:** The append store step (`AppendPrepared`, and `AppendChunks` through it) refuses with `ErrChunkerVersionStale`, writing nothing, when the file's recorded chunker version differs from its strategy's current one — the same predicate staleness uses; an empty non-replacing append remains an unchecked no-op.
+- **~~R720:~~** (Retired T70 — see R727) The append store step (`AppendPrepared`, and `AppendChunks` through it) refuses with `ErrChunkerVersionStale`, writing nothing, when the file's recorded chunker version differs from its strategy's current one — the same predicate staleness uses; an empty non-replacing append remains an unchecked no-op.
+- **R727:** The append store step (`AppendPrepared`, and `AppendChunks` through it) refuses with `ErrChunkerVersionStale`, writing nothing, when the file's recorded chunker version differs from its strategy's current one — the same predicate staleness uses — for every append, including one that yields no chunks and replaces none.
+- **R728:** An append that yields no chunks and replaces none still runs the store step: it adds no chunks and records the `WithModTime`, `WithContentHash` and `WithFileLength` values in the F record.
 
 ## Feature: Format Version Check
 **Source:** specs/api.md
@@ -1080,7 +1083,7 @@
 ## Feature: F Record Chunker-Version Migration
 **Source:** specs/migrations/complete/003-f-chunker-version.md
 
-- **R722:** `cmd/microfts2-migrate-v3` takes `-db PATH` (required) and `-bucket NAME` (default `"fts"`), and never runs from the library.
-- **R723:** In one write transaction the program refuses unless the bucket's `version` is `"2"`, rewrites every F record by inserting a zero `chunkerVersion` varint directly after the strategy string, and sets `version` to `"3"`; any failure leaves the database untouched.
-- **R724:** A bucket already at version `"3"` is reported and left unchanged, with a successful exit.
-- **R725:** The program reports the number of F records it rewrote.
+- **~~R722:~~** (Retired T71 — no replacement) `cmd/microfts2-migrate-v3` takes `-db PATH` (required) and `-bucket NAME` (default `"fts"`), and never runs from the library.
+- **~~R723:~~** (Retired T72 — no replacement) In one write transaction the program refuses unless the bucket's `version` is `"2"`, rewrites every F record by inserting a zero `chunkerVersion` varint directly after the strategy string, and sets `version` to `"3"`; any failure leaves the database untouched.
+- **~~R724:~~** (Retired T73 — no replacement) A bucket already at version `"3"` is reported and left unchanged, with a successful exit.
+- **~~R725:~~** (Retired T74 — no replacement) The program reports the number of F records it rewrote.

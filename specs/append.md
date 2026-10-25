@@ -74,7 +74,7 @@ The default path is only safe when the chunker's chunk boundaries don't depend o
 
 `AppendChunks` therefore returns `ErrAppendBoundary` when the chunker is not an `AppendAwareChunker` and produces zero chunks from non-empty `content`. The error wraps the chunker strategy name and the byte count of the dropped append so the caller can fall through to `Reindex` (or an equivalent full-refresh) instead of silently losing data.
 
-Callers detect this with `errors.Is(err, ErrAppendBoundary)`. Empty `content` is still a successful no-op — the error only fires when there were bytes to chunk and the chunker had nothing to say about them.
+Callers detect this with `errors.Is(err, ErrAppendBoundary)`. Empty `content` never raises it — the error only fires when there were bytes to chunk and the chunker had nothing to say about them.
 
 ### Chunker-version guard
 
@@ -84,7 +84,13 @@ Appending extends a file's existing chunks, so it is only sound when those chunk
 var ErrChunkerVersionStale = errors.New("microfts2: file was chunked under a different chunker version — reindex")
 ```
 
-An empty append is still a successful no-op and is not checked.
+The check applies to every append, including one that yields no chunks and replaces none. An append-aware chunker may legitimately index nothing from its new bytes (ark's chat chunker skips tool-call-only tails), and such an append onto version-stale chunks must still refuse, or the file stays stale under the new rules while every append reports success.
+
+### An append with no chunks still records the file's new state
+
+An append that yields no chunks and replaces none still runs the store step: it checks the chunker version as above, adds nothing to the chunk list, and records the `WithModTime`, `WithContentHash` and `WithFileLength` values in the F record. Leaving them behind would make the file read stale by content until some later append yielded a chunk, and every scan would repeat the same empty append from the old length.
+
+Advancing the recorded length loses no bytes. Non-empty bytes reach the store with no chunks only through an `AppendAwareChunker` (otherwise `ErrAppendBoundary` fires first), and an append-aware chunker resumes from the last chunk's locator, not from the recorded length, so the next append re-reads anything the chunker set aside.
 
 ### Drop-and-replace cleanup
 
