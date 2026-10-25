@@ -60,11 +60,13 @@ This is a guard, not a policy decision — the caller decides what to do when th
 
 # Staleness Detection
 
-Each file's F record stores the file's modification time (Unix nanoseconds) and a content hash (SHA-256) at the time it was indexed.
+Each file's F record stores the file's modification time (Unix nanoseconds), a content hash (SHA-256), and the version of its strategy's chunker (see the VersionedChunker section of `chunking.md`) at the time it was indexed.
 
 A file is **stale** when it exists on disk and either:
-- its modification time differs from the stored value, AND
-- its content hash differs from the stored value
+- its recorded chunker version differs from the current version of its strategy's registered chunker, OR
+- its modification time differs from the stored value AND its content hash differs from the stored value
+
+The chunker-version check comes first and needs neither a stat of the content nor a hash, so a rule change makes every file chunked under the old rules stale even when the file itself is untouched. Any difference counts, not only a recorded version that is behind: a file chunked under any other rules holds chunks the current rules may not produce. Staleness is decided in this one place; the append guard (see `append.md`) asks the same question rather than a second one.
 
 A file is **missing** when it no longer exists on disk.
 

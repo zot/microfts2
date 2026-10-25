@@ -149,6 +149,23 @@ microfts2 checks which interfaces a registered chunker implements and dispatches
 
 `AddChunker(name, c)` accepts any value. At registration time, microfts2 checks which interfaces the value satisfies (`Chunker`, `FileChunker`, `RandomAccessChunker`) and stores the appropriate capabilities. A chunker must implement at least one of `Chunker` or `FileChunker`.
 
+## VersionedChunker interface
+
+A chunker's rules can change — a new boundary rule, a different split. Chunks indexed under the old rules are then chunks the current rules no longer produce, but nothing about the files has changed, so mtime and content hash alone cannot notice. A chunker declares its rule version through an optional interface:
+
+```go
+type VersionedChunker interface {
+    ChunkerVersion() uint32
+}
+```
+
+- A chunker that does not implement it has version 0. Strategies registered by command (`AddStrategy`) are version 0.
+- The version moves only when the chunker's rules change, so that its files become stale and are re-chunked; it is the chunker author's declaration, not something microfts2 computes.
+- Each file's F record records the version of its strategy's chunker at the time the file was chunked (index, reindex, or store of a prepared file). An append does not change it.
+- A file whose recorded version differs from its strategy's current version is stale (see Staleness Detection in `indexing.md`). A file indexed before the field existed reads as version 0, so introducing the field re-chunks nothing.
+
+Like `ChunkerMetadata`, it is separate from `Chunker` so existing implementations remain valid unchanged.
+
 ## UTF-8 validation
 
 The UTF-8 validation in `collectChunks` (checking each yielded chunk's Content) applies regardless of which interface produced the chunks. Binary-format chunkers are responsible for extracting text — microfts2 verifies the result is valid UTF-8.

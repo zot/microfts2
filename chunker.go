@@ -131,6 +131,15 @@ type ChunkerMetadata interface {
 	CommentSyntax() string // line-comment delimiter, "" when n/a
 }
 
+// VersionedChunker is the optional interface a chunker implements to declare
+// the version of its chunking rules. A chunker without it is version 0. Bump
+// the version when the rules change: every file chunked under another version
+// becomes stale and is re-chunked on refresh.
+// CRC: crc-Chunker.md | R714, R715
+type VersionedChunker interface {
+	ChunkerVersion() uint32
+}
+
 // sliceByLineRange is the shared fast-path helper for chunkers whose range
 // label is "startLine-endLine". Uses a lazy line-offset table in customData.
 // CRC: crc-Chunker.md | R531, R532

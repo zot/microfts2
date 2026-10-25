@@ -1003,7 +1003,7 @@ func Create(path string, opts Options) (*DB, error) {
 		if err := iSetCounter(th, "totalChunks", 0); err != nil {
 			return err
 		}
-		return iPut(th, "version", "2")
+		return iPut(th, "version", formatVersion) // R718
 	})
 	if err != nil {
 		boltDB.Close()
@@ -1037,6 +1037,14 @@ func Open(path string, opts Options) (*DB, error) {
 		b := tx.Bucket([]byte(dbName))
 		if b == nil {
 			return fmt.Errorf("open db %q: bucket not found", dbName)
+		}
+		// R721: the layouts are not self-describing; refuse to mis-read another format
+		v, err := iGet(bucketWrap{b}, "version")
+		if err != nil {
+			return err
+		}
+		if v != formatVersion {
+			return fmt.Errorf("open db %q: format version %q, want %q (migrate with microfts2-migrate-v3)", dbName, v, formatVersion)
 		}
 		s, err := loadSettings(bucketWrap{b})
 		if err != nil {
@@ -1168,6 +1176,11 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 	}
 	return bytes.NewReader(f.content), nil
 }
+
+// formatVersion is the DB format this code reads and writes. Format "3" added
+// the F record's chunkerVersion; an older database is brought forward by
+// cmd/microfts2-migrate-v3, never by Open. R718, R721
+const formatVersion = "3"
 
 // DB returns the underlying bbolt database. R661
 func (db *DB) DB() *bbolt.DB {
@@ -1880,14 +1893,15 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 
 	// Write F record
 	frec := FRecord{
-		FileID:      fileid,
-		ModTime:     modTime,
-		ContentHash: hash,
-		FileLength:  fileLength,
-		Strategy:    strategy,
-		Names:       []string{fpath},
-		Chunks:      fileChunks,
-		Tokens:      tokenBagToEntries(fileBag),
+		FileID:         fileid,
+		ModTime:        modTime,
+		ContentHash:    hash,
+		FileLength:     fileLength,
+		Strategy:       strategy,
+		ChunkerVersion: db.chunkerVersion(strategy), // R716
+		Names:          []string{fpath},
+		Chunks:         fileChunks,
+		Tokens:         tokenBagToEntries(fileBag),
 	}
 	return fileid, chunkIDs, b.Put(makeFKey(fileid), frec.MarshalValue())
 }
@@ -2409,6 +2423,11 @@ func WithRemovedChunkCallback(fn RemovedChunkCallback) interface {
 // against. R688
 var ErrAppendTailMoved = errors.New("microfts2: append tail moved since prepare")
 
+// ErrChunkerVersionStale is returned by AppendPrepared and AppendChunks when the
+// file was chunked under a different version of its strategy's chunker: its
+// existing chunks follow other rules, so the caller must Reindex. R720
+var ErrChunkerVersionStale = errors.New("microfts2: file was chunked under a different chunker version — reindex")
+
 // PreparedAppend is an opaque, single-use handle for a computed append, produced
 // by PrepareAppend and consumed once by AppendPrepared. It carries the new
 // chunks, whether the append replaces the file's last chunk, and the last
@@ -2548,6 +2567,10 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		frec, err := db.readFRecord(th, fileid)
 		if err != nil {
 			return err
+		}
+		// Seq: seq-prepare-store.md#5.2.1 | R720
+		if db.chunkerStale(frec) {
+			return fmt.Errorf("fileid %d: %w", fileid, ErrChunkerVersionStale)
 		}
 
 		// R688: reject a prepared append whose assumed tail no longer matches the
@@ -4281,6 +4304,24 @@ func (db *DB) RemoveStrategy(name string) error {
 
 // --- Staleness ---
 
+// chunkerVersion is the current version of a strategy's chunker: its
+// VersionedChunker declaration, else 0 (command strategies included).
+// CRC: crc-DB.md | R715
+func (db *DB) chunkerVersion(strategy string) uint32 {
+	if vc, ok := db.resolveChunker(strategy).(VersionedChunker); ok {
+		return vc.ChunkerVersion()
+	}
+	return 0
+}
+
+// chunkerStale reports whether a file was chunked under a different version of
+// its strategy's chunker than the current one — the single chunker-version
+// judgment, shared by staleness and the append guard.
+// CRC: crc-DB.md | R719, R720
+func (db *DB) chunkerStale(frec FRecord) bool {
+	return frec.ChunkerVersion != db.chunkerVersion(frec.Strategy)
+}
+
 // Seq: seq-stale.md
 
 // CheckFile checks whether an indexed file is fresh, stale, or missing on disk.
@@ -4299,7 +4340,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 		}
 		status.FileID = fileid
 		status.Strategy = frec.Strategy
-		status.Status = classifyFile(frec)
+		status.Status = db.classifyFile(frec)
 		return nil
 	})
 	return status, err
@@ -4342,7 +4383,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 			Path:     path,
 			FileID:   frec.FileID,
 			Strategy: frec.Strategy,
-			Status:   classifyFile(frec),
+			Status:   db.classifyFile(frec),
 		})
 	}
 	return statuses, nil
@@ -4380,17 +4421,18 @@ func (db *DB) RefreshStale(strategy string, opts ...IndexOption) ([]FileStatus, 
 // classifyFile determines whether a file is fresh, stale, or missing by
 // comparing disk state to stored metadata. File I/O happens here, outside
 // any LMDB transaction.
-func classifyFile(frec FRecord) string {
+// CRC: crc-DB.md | Seq: seq-stale.md | R64, R719
+func (db *DB) classifyFile(frec FRecord) string {
 	filename := ""
 	if len(frec.Names) > 0 {
 		filename = frec.Names[0]
 	}
 	fi, err := os.Stat(filename)
-	if os.IsNotExist(err) {
-		return "missing"
-	}
 	if err != nil {
 		return "missing"
+	}
+	if db.chunkerStale(frec) {
+		return "stale"
 	}
 	if fi.ModTime().UnixNano() == frec.ModTime {
 		return "fresh"

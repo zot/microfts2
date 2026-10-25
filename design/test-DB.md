@@ -575,3 +575,53 @@
 **Fire alarm:** drop the loose guard on verify in Search or in SearchMulti, or restore verify in SearchFuzzy; red is the loose case returning no lines, or fuzzy returning nothing
 **Inject:** db.go:DB.Search, db.go:DB.SearchFuzzy, db.go:DB.SearchMulti
 **Pulled:** 2026-10-24 — rang at all three sites (SearchMulti found by probing past the list: no test reached it)
+
+## Test: chunker version stamped on index, kept on append
+**Purpose:** the F record records the strategy's chunker version when a file is chunked, and an append leaves it alone
+**Input:** register a VersionedChunker at version 3 and a plain chunker; AddFile one file with each; AppendChunks to the versioned file; StorePrepared a third file
+**Expected:** FileInfoByID ChunkerVersion is 3, 0, 3 (after append), 3 (prepared store)
+**Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R717
+**Code:** db_test.go
+**Fire alarm:** stop stamping in addFileInTxn; red is version 0 where 3 was expected
+**Inject:** db.go:DB.addFileInTxn
+**Pulled:** 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
+
+## Test: chunker rule change makes files stale
+**Purpose:** a version bump makes untouched files stale, and a refresh re-chunks and clears it
+**Input:** a versioned chunker at version 1; AddFile; bump the chunker's version to 2 (re-register); CheckFile, StaleFiles, RefreshStale, CheckFile
+**Expected:** fresh before the bump; stale after it from CheckFile and StaleFiles though the file is untouched; RefreshStale refreshes it; then fresh with ChunkerVersion 2. A lowered version (2 → 1) is stale too
+**Refs:** crc-DB.md, seq-stale.md, R719
+**Code:** db_test.go
+**Fire alarm:** move the chunker-version check after the mod-time shortcut in classifyFile; red is "fresh" after the bump
+**Inject:** db.go:DB.classifyFile
+**Pulled:** 2026-10-25 — rang: after bump CheckFile fresh, want stale
+
+## Test: append refused onto old-rule chunks
+**Purpose:** an append onto a file chunked under another version refuses and writes nothing
+**Input:** versioned chunker at version 1; AddFile; bump to 2; AppendChunks with non-empty content; also AppendPrepared with a PreparedAppend
+**Expected:** errors.Is(err, ErrChunkerVersionStale) for both; F record unchanged (same chunks); an empty append still succeeds
+**Refs:** crc-DB.md, seq-prepare-store.md, R720
+**Code:** db_test.go
+**Fire alarm:** remove the chunkerStale check from appendPrepared; red is a nil error and an extra chunk
+**Inject:** db.go:DB.appendPrepared
+**Pulled:** 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale
+
+## Test: Open refuses another format version
+**Purpose:** a database in an older layout is refused rather than mis-read
+**Input:** Create a DB, overwrite its version I record with "2", close, Open
+**Expected:** Open errors and the error names "2"; a fresh Create reports Version() "3"
+**Refs:** crc-DB.md, R718, R721
+**Code:** db_test.go
+**Fire alarm:** delete the version check in Open; red is Open succeeding
+**Inject:** db.go:Open
+**Pulled:** 2026-10-25 — rang: Open accepted format version 2
+
+## Test: missing outranks chunker-version stale
+**Purpose:** a deleted file reports missing even when its chunker version is behind, so RefreshStale skips it instead of reindexing a file that is gone
+**Input:** versioned chunker at version 1; AddFile; bump to 2; delete the file; CheckFile; RefreshStale
+**Expected:** status missing; RefreshStale returns no error
+**Refs:** crc-DB.md, seq-stale.md, R719
+**Code:** db_test.go
+**Fire alarm:** move the chunkerStale check above the os.Stat in classifyFile; red is "stale" (found by probing past the list after simplification: the suite stayed green)
+**Inject:** db.go:DB.classifyFile
+**Pulled:** 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing

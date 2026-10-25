@@ -1,5 +1,5 @@
 # Sequence: Staleness Check and Refresh
-**Requirements:** R63, R64, R65, R66, R67, R68, R69, R234
+**Requirements:** R63-69, R717, R719
 
 Participants: DB
 
@@ -9,10 +9,12 @@ DB
  |  === CheckFile(fpath) ===
  |
  |  look up fileid from N records
- |  read F record -> FRecord (has ModTime, ContentHash)
- |  classifyFile(info):
+ |  read F record -> FRecord (has ModTime, ContentHash, Strategy, ChunkerVersion)
+ |  db.classifyFile(info):
  |    stat file on disk
  |      if file missing: return "missing"
+ |    if info.ChunkerVersion != chunkerVersion(info.Strategy):
+ |      return "stale"   (chunker rules changed; content may be untouched — R719)
  |    if disk mod time == stored mod time:
  |      return "fresh"
  |    compute SHA-256 of file contents
@@ -25,7 +27,7 @@ DB
  |
  |  scan all F records (prefix 'F')
  |  for each FRecord:
- |    classifyFile(info)
+ |    db.classifyFile(info)
  |    collect FileStatus
  |  return []FileStatus
  |

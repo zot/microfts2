@@ -83,7 +83,7 @@
 **Source:** specs/storage.md
 
 - **R233:** `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
-- **R234:** F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
+- **~~R234:~~** (Retired T67 — see R717) F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
 - **R235:** F record names: `[filecount:varint] [name:str]...` — multiple names for duplicate/copied files sharing a fileid
 - **R236:** F record chunks: `[chunkcount:varint] [[chunkid:varint] [location:str]]...` — ordered chunk list with opaque range labels from chunker
 - **R237:** F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
@@ -752,7 +752,7 @@
 ## Feature: Partial F Record Unmarshal
 **Source:** specs/api.md
 
-- **R451:** `UnmarshalFHeader(data)` decodes ModTime, ContentHash, FileLength, Strategy, and Names from F record value
+- **~~R451:~~** (Retired T68 — see R717) `UnmarshalFHeader(data)` decodes ModTime, ContentHash, FileLength, Strategy, and Names from F record value
 - **R452:** Stops before Chunks and Tokens — does not allocate or decode those arrays
 - **R453:** `StaleFiles` uses `UnmarshalFHeader` instead of `UnmarshalFValue`
 
@@ -1048,3 +1048,39 @@
 - **R698:** Assembly takes each chunk's `Range`, `Locator`, and `Attrs` from its `PreparedEntry.Chunk` (the current split's positions), never from the grams token — so one `*PreparedChunk` reused across scans, or across files with identical content, assembles into a correctly-positioned handle.
 - **R699:** `PrepareFile`/`PrepareContent` are compositions of `SplitFile`/`SplitContent` → `PrepareChunk` per chunk → `AssembleFile`, and `PrepareAppend` is `SplitAppend` → `PrepareChunk` per chunk → `AssembleAppend`; their public signatures and the store side (`StorePrepared`/`ReindexPrepared`/`AppendPrepared` and the opaque handles) are unchanged.
 - **R700:** `SplitAppend` accepts `opts ...AppendOption` and honors `WithBaseLine(n)` — offsetting each line-based chunk's `Range` by `n` via `adjustRange`, on the default (non-`AppendAwareChunker`) path only, exactly as `PrepareAppend` does — and fires `WithAppendChunkCallback` during the split. The variadic is source-compatible, so existing zero-option callers are unchanged. This lets the per-chunk append path (`SplitAppend` → `PrepareChunk` → `AssembleAppend`) carry the base-line offset that whole-append `PrepareAppend` already applied; without it a split appended tail ranges every chunk from line 1 rather than the file's existing line count.
+
+## Feature: Chunker Version Stamp
+**Source:** specs/chunking.md
+
+- **R714:** `VersionedChunker` is an optional interface, `ChunkerVersion() uint32`, separate from `Chunker` so existing chunkers remain valid unchanged; `AddChunker` accepts a chunker with or without it.
+- **R715:** A chunker that does not implement `VersionedChunker`, and any strategy registered by command (`AddStrategy`), has chunker version 0.
+- **R716:** When a file is chunked — `AddFile`, `Reindex`, `StorePrepared`, `ReindexPrepared` and their variants — its F record records the current chunker version of its strategy; an append (`AppendChunks`, `AppendPrepared`) and `SetFileLength` leave the recorded version unchanged.
+
+## Feature: F Record Chunker Version
+**Source:** specs/storage.md
+
+- **R717:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [filecount:varint] [name:str]... [chunks] [tokens]`; `FRecord.ChunkerVersion uint32` holds it, and `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names.
+- **R718:** `Create` writes DB format version `"3"` to the `version` I record.
+
+## Feature: Chunker-Version Staleness
+**Source:** specs/indexing.md
+
+- **R719:** A file that exists on disk is stale when its recorded chunker version differs from the current chunker version of its strategy (any difference, not only behind); this check precedes the mod-time shortcut, so `CheckFile`, `StaleFiles` and `RefreshStale` report and refresh such files even when their content is unchanged.
+
+## Feature: Append Chunker-Version Guard
+**Source:** specs/append.md
+
+- **R720:** The append store step (`AppendPrepared`, and `AppendChunks` through it) refuses with `ErrChunkerVersionStale`, writing nothing, when the file's recorded chunker version differs from its strategy's current one — the same predicate staleness uses; an empty non-replacing append remains an unchecked no-op.
+
+## Feature: Format Version Check
+**Source:** specs/api.md
+
+- **R721:** `Open` refuses a database whose `version` I record is not `"3"`, closing the bbolt handle and returning an error that names the stored version.
+
+## Feature: F Record Chunker-Version Migration
+**Source:** specs/migrations/complete/003-f-chunker-version.md
+
+- **R722:** `cmd/microfts2-migrate-v3` takes `-db PATH` (required) and `-bucket NAME` (default `"fts"`), and never runs from the library.
+- **R723:** In one write transaction the program refuses unless the bucket's `version` is `"2"`, rewrites every F record by inserting a zero `chunkerVersion` varint directly after the strategy string, and sets `version` to `"3"`; any failure leaves the database untouched.
+- **R724:** A bucket already at version `"3"` is reported and left unchanged, with a successful exit.
+- **R725:** The program reports the number of F records it rewrote.

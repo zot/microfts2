@@ -1246,8 +1246,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "2" {
-		t.Fatalf("Version() = %q, want %q", v, "2")
+	if v != "3" { // R718
+		t.Fatalf("Version() = %q, want %q", v, "3")
 	}
 }
 
@@ -4157,5 +4157,209 @@ func TestWithVerifyExactSearchOnly(t *testing.T) {
 	}
 	if got := ranges(&SearchResults{Results: multi[0].Results}, nil); !slices.Equal(got, []string{"1-1", "2-2"}) {
 		t.Errorf("SearchMulti loose + verify: want both lines (verify ignored), got %v", got)
+	}
+}
+
+// versionedLineChunker is a LineChunker whose rule version the test can move.
+type versionedLineChunker struct {
+	LineChunker
+	v *uint32
+}
+
+func (c versionedLineChunker) ChunkerVersion() uint32 { return *c.v }
+
+// versionTestDB registers a versioned line chunker at version 1 and indexes one file with it.
+func versionTestDB(t *testing.T) (*DB, string, uint64, *uint32) {
+	t.Helper()
+	db, dir := testDB(t)
+	v := uint32(1)
+	if err := db.AddChunker("vline", versionedLineChunker{v: &v}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "a.txt")
+	os.WriteFile(path, []byte("alpha line\nbeta line\n"), 0644)
+	fid, err := db.AddFile(path, "vline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db, path, fid, &v
+}
+
+func fileVersion(t *testing.T, db *DB, fid uint64) uint32 {
+	t.Helper()
+	frec, err := db.FileInfoByID(fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frec.ChunkerVersion
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R714, R715, R716, R717
+func TestChunkerVersionStamped(t *testing.T) {
+	db, dir := testDB(t)
+	v := uint32(3)
+	if err := db.AddChunker("vline", versionedLineChunker{v: &v}); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	c := filepath.Join(dir, "c.txt")
+	for _, p := range []string{a, b, c} {
+		os.WriteFile(p, []byte("one\ntwo\n"), 0644)
+	}
+	fa, err := db.AddFile(a, "vline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb, err := db.AddFile(b, "line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileVersion(t, db, fa); got != 3 {
+		t.Errorf("versioned AddFile: ChunkerVersion = %d, want 3", got)
+	}
+	if got := fileVersion(t, db, fb); got != 0 {
+		t.Errorf("unversioned AddFile: ChunkerVersion = %d, want 0", got)
+	}
+	f, _ := os.OpenFile(a, os.O_APPEND|os.O_WRONLY, 0644)
+	f.WriteString("three\n")
+	f.Close()
+	if err := db.AppendChunks(fa, []byte("three\n"), "vline"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileVersion(t, db, fa); got != 3 {
+		t.Errorf("after append: ChunkerVersion = %d, want 3", got)
+	}
+	p, err := db.PrepareFile(c, "vline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc, err := db.StorePrepared(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileVersion(t, db, fc); got != 3 {
+		t.Errorf("StorePrepared: ChunkerVersion = %d, want 3", got)
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R719
+func TestChunkerVersionStale(t *testing.T) {
+	db, path, _, v := versionTestDB(t)
+	status := func() string {
+		t.Helper()
+		st, err := db.CheckFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Status
+	}
+	if s := status(); s != "fresh" {
+		t.Fatalf("before bump: %s, want fresh", s)
+	}
+	*v = 2
+	if s := status(); s != "stale" {
+		t.Fatalf("after bump: CheckFile %s, want stale", s)
+	}
+	all, err := db.StaleFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Status != "stale" {
+		t.Fatalf("after bump: StaleFiles = %+v, want one stale", all)
+	}
+	refreshed, err := db.RefreshStale("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refreshed) != 1 {
+		t.Fatalf("RefreshStale refreshed %d files, want 1", len(refreshed))
+	}
+	if s := status(); s != "fresh" {
+		t.Fatalf("after refresh: %s, want fresh", s)
+	}
+	st, err := db.CheckFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileVersion(t, db, st.FileID); got != 2 {
+		t.Fatalf("after refresh: ChunkerVersion = %d, want 2", got)
+	}
+	*v = 1
+	if s := status(); s != "stale" {
+		t.Fatalf("after lowering: %s, want stale", s)
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R720
+func TestChunkerVersionAppendRefused(t *testing.T) {
+	db, path, fid, v := versionTestDB(t)
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	f.WriteString("gamma line\n")
+	f.Close()
+	before, _ := db.FileInfoByID(fid)
+	p, err := db.PrepareAppend(path, before.Chunks[len(before.Chunks)-1].Locator, []byte("gamma line\n"), "vline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	*v = 2
+	if err := db.AppendChunks(fid, []byte("gamma line\n"), "vline"); !errors.Is(err, ErrChunkerVersionStale) {
+		t.Fatalf("AppendChunks: err = %v, want ErrChunkerVersionStale", err)
+	}
+	if err := db.AppendPrepared(fid, p); !errors.Is(err, ErrChunkerVersionStale) {
+		t.Fatalf("AppendPrepared: err = %v, want ErrChunkerVersionStale", err)
+	}
+	after, _ := db.FileInfoByID(fid)
+	if len(after.Chunks) != len(before.Chunks) {
+		t.Fatalf("refused append changed the chunk list: %d -> %d", len(before.Chunks), len(after.Chunks))
+	}
+	empty, err := db.AssembleAppend(path, "vline", nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AppendPrepared(fid, empty); err != nil {
+		t.Fatalf("empty append: %v", err)
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R718, R721
+func TestOpenRefusesOtherFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "db")
+	db, err := Create(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.DB().Update(func(tx *bbolt.Tx) error {
+		return iPut(bucketWrap{tx.Bucket([]byte("fts"))}, "version", "2")
+	})
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path, Options{})
+	if err == nil {
+		db.Close()
+		t.Fatal("Open accepted format version 2")
+	}
+	if !strings.Contains(err.Error(), `"2"`) {
+		t.Fatalf("Open error does not name the stored version: %v", err)
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R719
+func TestChunkerVersionMissingWins(t *testing.T) {
+	db, path, _, v := versionTestDB(t)
+	*v = 2
+	os.Remove(path)
+	st, err := db.CheckFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != "missing" {
+		t.Fatalf("deleted file under a bumped chunker: %s, want missing", st.Status)
+	}
+	if _, err := db.RefreshStale(""); err != nil {
+		t.Fatalf("RefreshStale with a missing version-stale file: %v", err)
 	}
 }

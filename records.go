@@ -162,9 +162,11 @@ type FRecord struct {
 	ContentHash [32]byte
 	FileLength  int64
 	Strategy    string
-	Names       []string
-	Chunks      []FileChunkEntry
-	Tokens      []TokenEntry
+	// ChunkerVersion is the strategy's chunker version when the file was chunked. R717
+	ChunkerVersion uint32
+	Names          []string
+	Chunks         []FileChunkEntry
+	Tokens         []TokenEntry
 }
 
 // TRecord is the trigram inverted index entry.
@@ -404,6 +406,7 @@ func (f *FRecord) MarshalValue() []byte {
 	size := 8 + 32                                  // modTime + contentHash
 	size += binary.MaxVarintLen64                   // fileLength
 	size += binary.MaxVarintLen64 + len(f.Strategy) // strategy
+	size += binary.MaxVarintLen64                   // chunkerVersion
 	size += binary.MaxVarintLen64                   // filecount
 	for _, name := range f.Names {
 		size += binary.MaxVarintLen64 + len(name)
@@ -431,6 +434,8 @@ func (f *FRecord) MarshalValue() []byte {
 	off += putUvarint(buf[off:], uint64(f.FileLength))
 
 	off += putString(buf[off:], f.Strategy)
+
+	off += putUvarint(buf[off:], uint64(f.ChunkerVersion)) // R717
 
 	off += putUvarint(buf[off:], uint64(len(f.Names)))
 	for _, name := range f.Names {
@@ -482,6 +487,13 @@ func unmarshalFHeader(data []byte) (FRecord, int, error) {
 		return f, 0, fmt.Errorf("FRecord: bad strategy")
 	}
 	f.Strategy = s
+	off += n
+
+	cv, n := readUvarint(data[off:]) // R717
+	if n <= 0 {
+		return f, 0, fmt.Errorf("FRecord: bad chunkerVersion")
+	}
+	f.ChunkerVersion = uint32(cv)
 	off += n
 
 	nNames, n := readUvarint(data[off:])

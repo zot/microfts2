@@ -76,6 +76,16 @@ The default path is only safe when the chunker's chunk boundaries don't depend o
 
 Callers detect this with `errors.Is(err, ErrAppendBoundary)`. Empty `content` is still a successful no-op — the error only fires when there were bytes to chunk and the chunker had nothing to say about them.
 
+### Chunker-version guard
+
+Appending extends a file's existing chunks, so it is only sound when those chunks were produced by the chunker's current rules. If the file's recorded chunker version differs from its strategy's current one — the same judgment that makes the file stale (see Staleness Detection in `indexing.md`) — the store step (`AppendPrepared`, and `AppendChunks` through it) refuses with `ErrChunkerVersionStale`, writing nothing. The caller falls through to `Reindex`, which re-chunks the whole file under the current rules and records the current version.
+
+```go
+var ErrChunkerVersionStale = errors.New("microfts2: file was chunked under a different chunker version — reindex")
+```
+
+An empty append is still a successful no-op and is not checked.
+
 ### Drop-and-replace cleanup
 
 When `replacedLast` is true, `AppendChunks`:

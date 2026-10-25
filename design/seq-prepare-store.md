@@ -1,5 +1,5 @@
 # Sequence: Prepare / Store (Two-Phase Compute-Store Split)
-**Requirements:** R676, R677, R678, R679, R680, R681, R682, R683, R684, R685, R686, R687, R688, R689, R690, R691, R692, R693, R694, R695, R696, R697, R698, R699, R700
+**Requirements:** R676-700, R720
 
 Participants: DB, Chunker, Trigrams
 
@@ -64,6 +64,7 @@ Diagram 5 — Store an append, one write txn (`AppendPrepared`):
 5. AppendPrepared(fileid, p, opts)
   5.1. reject if p is already consumed
   5.2. open bbolt Update txn; re-read the F record for fileid
+    5.2.1. if the F record's chunker version differs from chunkerVersion(F.Strategy), return ErrChunkerVersionStale, writing nothing (R720)
   5.3. if p.replacedLast: verify the committed last entry's locator equals p.assumedLastLocator, else return ErrAppendTailMoved (R688)
   5.4. drop-and-replace the last chunk when p.replacedLast; store p's chunks — H dedup/insert, coalesced T/W, corpus counters, F update (R687)
   5.5. mark p consumed; return nil (R687)

@@ -1,5 +1,5 @@
 # Chunker
-**Requirements:** R10, R11, R12, R13, R116, R128, R129, R130, R131, R169, R170, R171, R172, R173, R174, R177, R291, R292, R293, R294, R295, R296, R465, R466, R467, R468, R502, R505, R506, R507, R508, R509, R510, R511, R512, R518, R519, R520, R524, R525, R526, R527, R528, R529, R530, R531, R532, R533, R534, R563, R564, R565, R566, R567, R568, R569, R570, R587, R588, R589, R590, R591, R593, R601, R602, R603, R607, R610, R631, R632, R633, R634, R635, R636, R637, R638, R639, R640
+**Requirements:** R10-13, R116, R128-131, R169-174, R177, R291-296, R465-468, R502, R505-512, R518-520, R524-534, R563-570, R587-591, R593, R601-603, R607, R610, R631-640, R714, R715
 
 Provides the chunking interfaces (Chunker, FileChunker, RandomAccessChunker), the FuncChunker adapter, the Pair type, and built-in chunker implementations. A chunking strategy is a name mapped to a chunker (any combination of interfaces) or a shell command.
 
@@ -9,6 +9,7 @@ Provides the chunking interfaces (Chunker, FileChunker, RandomAccessChunker), th
 - RandomAccessChunker interface: GetChunk(path string, data []byte, customData *any, chunk *Chunk) error — optional fast-path retrieval for a single chunk by pre-filled range
 - AppendAwareChunker interface: AppendChunks(path string, lastLocator []byte, newBytes []byte, yield func(Chunk) bool) (replacedLast bool, err error) — optional boundary-aware append for chunkers whose tail-chunk shape depends on prior content
 - ChunkerMetadata interface: IsWritable() bool, CommentSyntax() string — optional metadata exposed to callers (e.g. ark's curation workshop) for editability and per-language comment-delimiter introspection. Callers type-assert; absence of the interface means the defaults `writable=true, comment=""` apply. R639
+- VersionedChunker interface: ChunkerVersion() uint32 — optional declaration of the chunker's rule version; absence means version 0, as do command strategies. The version moves only when the rules change, which makes every file chunked under other rules stale. R714, R715
 - Chunk struct: Range []byte, Locator []byte, Content []byte, Attrs []Pair — Locator is per-occurrence (stored on F record, not C record), opaque chunker-defined bytes used for fast retrieval and append-merge resume; nil when not needed
 - Pair struct: Key []byte, Value []byte — opaque key-value pair
 - ChunkFunc type: convenience function type for simple chunkers
