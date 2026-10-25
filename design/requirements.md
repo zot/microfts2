@@ -709,7 +709,7 @@
 - **~~R414:~~** (Retired T52 — no replacement) OR-union candidate chunkIDs merged into trigram-intersection candidate set before `collectCandidates` — all strategies see the merged set
 - **~~R415:~~** (Retired T53 — no replacement) `collectTrigramUnion` helper: reads T records for query trigrams, returns union of posting lists (OR semantics). Called from `SearchMulti` only
 - **~~R416:~~** (Retired T54 — no replacement) Overlay candidate expansion: when `expandCandidates` is true, overlay `searchOverlay` unions its trigram index entries for all active trigrams into the candidate set
-- ~~**R417:** (inferred) Bigram OR-union may produce a larger candidate set than trigram intersection — no cap initially, measure and add filtering if needed~~
+- **~~R417:~~** (Retired T75 — no replacement) (inferred) Bigram OR-union may produce a larger candidate set than trigram intersection — no cap initially, measure and add filtering if needed
 
 ## Feature: Fuzzy Trigram Search
 **Source:** specs/fuzzy-trigram.md
@@ -811,8 +811,8 @@
 **Source:** specs/chunking.md
 
 - **R502:** `Chunker` interface has only `Chunks(path string, content []byte, yield func(Chunk) bool) error` — `ChunkText` is removed from this interface
-- ~~**R503:** `ChunkTexter` interface~~ — removed; superseded by `RandomAccessChunker` (R524)
-- ~~**R504:** Default ChunkText behavior~~ — removed with `ChunkTexter`
+- **~~R503:~~** (Retired T76 — see R524) `ChunkTexter` interface
+- **~~R504:~~** (Retired T77 — no replacement) Default ChunkText behavior
 - **R505:** `FileChunker` interface: `FileChunks(path string, old [32]byte, yield func(Chunk) bool) ([32]byte, error)` — file-based chunking for binary formats. Method named `FileChunks` (not `Chunks`) so a single type can also implement `Chunker`
 - **R506:** `FileChunker.FileChunks` reads from `path` using format-specific libraries — microfts2 does not call `os.ReadFile`
 - **R507:** `FileChunker.FileChunks` computes and returns the SHA-256 hash of the file content
@@ -825,13 +825,13 @@
 - **R514:** Retrieval-time dispatch (`getChunks`, `ChunkCache`): if `FileChunker`, call `FileChunker.FileChunks(path, [32]byte{}, yield)`, skip `os.ReadFile`; if `Chunker`, existing path
 - **R515:** Overlay dispatch (`AddTmpFile`, `UpdateTmpFile`, `AppendTmpFile`): always call `Chunker.Chunks(path, content, yield)` — content is provided, not on disk
 - **R516:** Overlay error: if a chunker implements only `FileChunker` (not `Chunker`), using it with the tmp:// overlay is an error
-- ~~**R517:** ChunkText dispatch~~ — removed with `ChunkTexter`; see R529 for `RandomAccessChunker` dispatch
+- **~~R517:~~** (Retired T78 — see R529) ChunkText dispatch
 - **R518:** `AddChunker(name, c)` accepts any value implementing at least one of `Chunker` or `FileChunker`
 - **R519:** (inferred) `AddChunker` validates that the value implements at least one chunking interface — error if neither
 - **R520:** Chunk content from `FileChunker` must be valid UTF-8 — same validation as `Chunker` path
-- ~~**R521:** `FuncChunker` implements `ChunkTexter`~~ — removed with `ChunkTexter`
-- ~~**R522:** `BracketChunker` and `IndentChunker` implement `ChunkTexter`~~ — removed with `ChunkTexter`
-- ~~**R523:** Breaking change: callers type-asserting to `Chunker` for `ChunkText`~~ — removed with `ChunkTexter`
+- **~~R521:~~** (Retired T79 — no replacement) `FuncChunker` implements `ChunkTexter`
+- **~~R522:~~** (Retired T80 — no replacement) `BracketChunker` and `IndentChunker` implement `ChunkTexter`
+- **~~R523:~~** (Retired T81 — no replacement) Breaking change: callers type-asserting to `Chunker` for `ChunkText`
 
 ## Feature: Random-Access Chunk Retrieval
 **Source:** specs/chunking.md

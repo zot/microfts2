@@ -11,7 +11,6 @@ Chunker for indentation-scoped languages. Reuses BracketLang for comment/string 
 - IndentChunker(lang, tabWidth) Chunker: factory returning a Chunker (also implements FileChunker, RandomAccessChunker, and AppendAwareChunker) for indentation-scoped languages
 - Chunks(path, content, yield): scan lines, track indentation levels, identify groups (indent increase) and paragraphs, yield chunks with startline-endline ranges
 - FileChunks(path, old, yield): read file, hash, skip-if-match-old, otherwise delegate to Chunks — delegates to shared `fileChunksByRead` helper (R633, R636)
-- ChunkText(path, content, rangeLabel): scan to target range and return its content
 - AppendChunks(path, lastLocator, newBytes, yield): delegates to shared `appendByRechunkResume(path, lastLocator, newBytes, ic.Chunks, yield)` helper (R633, R637, R638) — indent-scope boundaries are recognised across the append by re-chunking from the previous last chunk's start through EOF; the first emitted chunk's byte range determines whether the previous tail was clean (drop, replacedLast=false) or extended (replace, replacedLast=true)
 - measureIndent(line, tabWidth): count leading whitespace columns
 - IsWritable(): returns true — indent-chunker languages are editable text (R641)

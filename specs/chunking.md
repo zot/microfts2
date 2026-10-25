@@ -5,9 +5,8 @@
 - add/remove chunking strategies dynamically (external commands or Go functions)
   - external: `AddStrategy(name, cmd)` — command is persisted in I record
   - function: `AddChunker(name, c)` — in-memory only, must re-register on Open
-  - `Chunker` interface with two methods:
+  - `Chunker` interface with one method:
     - `Chunks(path string, content []byte, yield func(Chunk) bool) error` — producer: yields chunks for indexing
-    - `ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)` — retriever: extracts a single chunk's content by its range label
   - `Chunk` struct: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }`
     - Range, Locator, and Content are reusable buffers — the caller must copy before the next yield
     - Range has string semantics: opaque to microfts2, meaningful to the chunker and the user. Used for CLI/human display.
@@ -16,16 +15,14 @@
     - Attrs is optional per-chunk metadata (e.g. timestamp, role). Opaque to microfts2 — stored in C records and exposed to ChunkFilters. Per-content (lives on the C record). nil means no attrs.
   - `Pair` type: `{ Key []byte, Value []byte }` — opaque key-value pair. Allows duplicate keys. Mirrors the DB wire format.
   - `ChunkFunc` type preserved for convenience: `func(path string, content []byte, yield func(Chunk) bool) error`
-  - `FuncChunker` adapter wraps a bare `ChunkFunc` into a `Chunker`:
-    - `Chunks` delegates to the wrapped function
-    - `ChunkText` re-runs the wrapped function and returns the first chunk whose Range matches the label
+  - `FuncChunker` adapter wraps a bare `ChunkFunc` into a `Chunker`; `Chunks` delegates to the wrapped function
   - `AddStrategyFunc(name, fn)` convenience: wraps fn in FuncChunker, calls AddChunker
   - when AddFile/Reindex uses a func strategy, calls the Chunker directly (no exec)
   - I record stores name with empty cmd for func strategies (marks as registered)
   - built-in chunkers (chunk-lines, chunk-lines-overlap, chunk-words-overlap) register as func strategies
-- chunkers serve two purposes via the Chunker interface:
+- chunkers serve two purposes:
   - indexing (Chunks method): produce chunks with content to trigram-index, a range label, and optional attrs
-  - extraction (ChunkText method): given the same file, retrieve a specific chunk's content by its range label — may be optimized (e.g. a markdown chunker can jump to the right heading without full scan)
+  - retrieval: given the same file, recover a specific chunk by re-running the chunker and matching its range — or directly, without a full scan, when the chunker implements `RandomAccessChunker` (see "Random-Access Chunk Retrieval" below)
   - the range is an opaque string label: for text chunkers it's "startline-endline", for other formats it's whatever the chunker needs (e.g. "sheet1:A1-B20", "slides/3:para/7")
   - chunkers must be deterministic: same file produces same chunks with same ranges
 - files track their indexed chunking strategy

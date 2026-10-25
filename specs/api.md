@@ -42,14 +42,13 @@ Chunker interface:
 ```go
 type Chunker interface {
     Chunks(path string, content []byte, yield func(Chunk) bool) error
-    ChunkText(path string, content []byte, rangeLabel string) ([]byte, bool)
 }
 ```
 
 Chunk: `{ Range []byte, Locator []byte, Content []byte, Attrs []Pair }` — Range, Locator, and Content are reusable buffers, caller must copy before next yield. Range is the human-readable label (CLI display). Locator is opaque chunker-defined bytes used for fast random-access retrieval and append-merge resume; nil if not needed. Attrs is optional per-chunk metadata, nil by default.
 Pair: `{ Key []byte, Value []byte }` — opaque key-value pair, allows duplicate keys
 ChunkFunc: `func(path string, content []byte, yield func(Chunk) bool) error` — generator pattern, convenience type
-FuncChunker: adapter that wraps a ChunkFunc into a Chunker (ChunkText re-runs and matches by range label)
+FuncChunker: adapter that wraps a ChunkFunc into a Chunker
 
 Options:
 - CaseInsensitive, Aliases — creation-time only

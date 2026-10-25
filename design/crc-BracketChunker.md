@@ -14,7 +14,6 @@ Configurable chunker that groups program text into chunks based on bracket struc
 - BracketChunker(lang) Chunker: factory returning a Chunker (also implements FileChunker, RandomAccessChunker, and AppendAwareChunker) for the given language config
 - Chunks(path, content, yield): tokenize content with mode-aware scanning, identify groups and paragraphs, yield chunks
 - FileChunks(path, old, yield): read file, hash, skip-if-match-old, otherwise delegate to Chunks — delegates to shared `fileChunksByRead` helper (R633, R636)
-- ChunkText(path, content, rangeLabel): scan to target range and return its content
 - AppendChunks(path, lastLocator, newBytes, yield): delegates to shared `appendByRechunkResume(path, lastLocator, newBytes, bc.Chunks, yield)` helper (R633) — when lastLocator is empty, chunks newBytes alone with replacedLast=false (R629); otherwise decodes the previous last chunk's byte range, reads the file, re-chunks from the previous start through EOF (R627), and adjusts each yielded chunk's Range and Locator to be absolute to the full file (R630). The first emitted chunk decides replacedLast: same byte range as the previous → drop and continue (replacedLast=false); different range → emit as replacement (replacedLast=true) (R628)
 - tokenize(content, lang): scan content into a token stream using a mode stack:
   - **code mode** (current group's AllowedInner is nil): comments, all eligible bracket openers, whitespace, text — full scanning
