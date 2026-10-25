@@ -1,5 +1,5 @@
 # Sequence: Prepare / Store (Two-Phase Compute-Store Split)
-**Requirements:** R676-700, R720, R727, R728
+**Requirements:** R676-700, R720, R727-733
 
 Participants: DB, Chunker, Trigrams
 
@@ -44,7 +44,9 @@ Diagram 3 — Store a content-diff reindex, one write txn (`ReindexPrepared`):
   3.3. deleteFileMeta(oldFileID, path) — old F + N only, freeing the path (R681)
   3.4. addFileInTxn stores p's chunks under a fresh fileid — unchanged content dedup-hits its surviving H record and keeps its chunkid (R681)
   3.5. dropFileChunkOccurrences(oldFrec, oldFileID) — the removal set is derived here, in-txn, from the committed F record, never supplied by the caller (R682)
-  3.6. fire ReindexCallback(tx, orphaned, new) (R683); mark p consumed; return fileid (R679)
+    3.5.1. orphan cascade queues each orphan's T/W removals into the same postingEdits that 3.4's new chunks were added to; nothing is rewritten yet (R729, R730)
+    3.5.2. apply the postingEdits — one rewrite per affected T/W record: removed chunkids filtered out of the stored bytes, new chunkids appended after the survivors (R731, R732)
+  3.6. fire ReindexCallback(tx, orphaned, new) — after 3.5.2, so the callback sees final T/W state (R683, R733); mark p consumed; return fileid (R679)
 ```
 
 Diagram 4 — Compute an append, transaction-free (`PrepareAppend`):
@@ -68,6 +70,7 @@ Diagram 5 — Store an append, one write txn (`AppendPrepared`):
   5.3. if p.replacedLast: verify the committed last entry's locator equals p.assumedLastLocator, else return ErrAppendTailMoved (R688)
   5.4. drop-and-replace the last chunk when p.replacedLast; store p's chunks — H dedup/insert, coalesced T/W, corpus counters, F update (R687)
     5.4.1. a p with no chunks and no replacedLast stores nothing but still sets the F record's modTime, contentHash and fileLength from the options (R728)
+    5.4.2. the dropped chunk's T/W removals and the new chunks' additions share one postingEdits, applied once — one rewrite per affected record (R729, R731)
   5.5. mark p consumed; return nil (R687)
 ```
 

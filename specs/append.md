@@ -97,7 +97,7 @@ Advancing the recorded length loses no bytes. Non-empty bytes reach the store wi
 When `replacedLast` is true, `AppendChunks`:
 1. Drops the last entry from the F record's chunk list.
 2. Reads the dropped chunk's C record, decrements this fileid's count (or removes the fileid entry if count reaches 0).
-3. If the C record's fileids list is now empty, deletes the C record, removes the chunkid from each T record (by trigram) and W record (by token), and deletes the H record. Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper.
+3. If the C record's fileids list is now empty, deletes the C record and the H record, and queues the chunkid's removal from each T record (by trigram) and W record (by token). Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper. The queued removals are applied together with the new chunks' T/W additions, one rewrite per affected record (see "Posting updates are coalesced per write" in indexing.md).
 
 A chunker may, in principle, replace more than just the last chunk. The current spec scope is single-last-chunk replacement; a future extension could allow replacing the last K chunks if a use case appears.
 

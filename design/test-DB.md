@@ -407,7 +407,7 @@
 **Code:** db_test.go
 **Fire alarm:** reverse the R673 order in reindexPrepared — drop the old fileid's occurrences before storing the new chunks — so an unchanged line's chunk loses its last reference and orphans before the re-add, forcing a fresh chunkid; the chunkid-stability assertion goes red
 **Inject:** db.go:reindexPrepared
-**Pulled:** 2026-09-17 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6)
+**Pulled:** 2026-10-25 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6); first pulled 2026-09-17
 
 ## Test: PrepareAppend plus AppendPrepared equals AppendChunks
 **Purpose:** the two-phase append produces the same index as the fused AppendChunks (R685, R687, R689)
@@ -444,7 +444,7 @@
 **Code:** db_test.go
 **Fire alarm:** remove the consumed check in storePrepared — without it the second store hits ErrAlreadyIndexed (masking the guard), so the test asserts errors.Is(err, errPreparedConsumed) specifically and goes red on ErrAlreadyIndexed
 **Inject:** db.go:storePrepared
-**Pulled:** 2026-09-17 — rang (got "file already indexed", want errPreparedConsumed; test strengthened to the specific sentinel during this pull)
+**Pulled:** 2026-10-25 — rang (got "file already indexed", want errPreparedConsumed); first pulled 2026-09-17, when the test was strengthened to the specific sentinel
 
 ## Test: SplitFile hash equals sha256 of chunk content
 **Purpose:** the split owns the authoritative content hash — SplitChunk.Hash is SHA-256 over Chunk.Content, the same value the store dedups by (R690, R693)
@@ -645,3 +645,63 @@
 **Fire alarm:** move the chunkerStale check above the os.Stat in classifyFile; red is "stale" (found by probing past the list after simplification: the suite stayed green)
 **Inject:** db.go:DB.classifyFile
 **Pulled:** 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
+
+## Test: posting rewrite filters bytes and keeps order
+**Purpose:** removal filters the stored varint bytes without disturbing the survivors' order, additions land after the survivors, and a record left empty reads as deleted
+**Input:** stored postings 5, 300, 7, 70000 (one-, two- and three-byte varints); remove {300}, add [9]; separately remove every posting with nothing added
+**Expected:** 5, 7, 70000, 9; the all-removed case yields an empty value
+**Refs:** crc-DB.md, seq-prepare-store.md, R731, R732
+**Code:** db_test.go
+**Fire alarm:** append the additions before copying the survivors; red is 9 listed first
+**Inject:** db.go:rewritePostings
+**Pulled:** 2026-10-25 — rang: rewritePostings = [9 5 7 70000], want [5 7 70000 9]
+
+## Test: reindex rewrites each posting record once
+**Purpose:** a reindex that replaces every chunk rewrites each affected T/W record once, though many orphans and many new chunks share its grams — the removals are coalesced and fused with the additions
+**Input:** a file of twelve lines, each containing "common" with distinct text after it; AddFile; rewrite every line on disk, still containing "common"; Reindex while the posting-write hook counts writes per key
+**Expected:** no key written more than once; a search for an old line's text finds nothing, a new line's text finds its chunk, "common" finds all twelve new chunks
+**Refs:** crc-DB.md, seq-prepare-store.md, R729, R730, R731
+**Code:** db_test.go
+**Fire alarm:** apply the posting edits from inside cascadeOrphan, once per orphan (the per-chunk rewrite ark profiled); red is a key written more than once
+**Inject:** db.go:DB.cascadeOrphan
+**Pulled:** 2026-10-25 — rang: T records written 2 times, want once
+
+## Test: remove rewrites each posting record once
+**Purpose:** removing a file whose chunks share grams rewrites each T/W record once, and a record still holding another file's chunk keeps it
+**Input:** two files, one of twelve "common" lines and one with a single "common" line; RemoveFile the first while the hook counts writes per key
+**Expected:** no key written more than once; "common" still finds the second file's chunk
+**Refs:** crc-DB.md, R729, R730
+**Code:** db_test.go
+**Fire alarm:** apply the posting edits inside dropFileChunkOccurrences' loop, after each chunk; red is a key written more than once
+**Inject:** db.go:DB.dropFileChunkOccurrences
+**Pulled:** 2026-10-25 — rang: T records written 10 and 12 times, want once
+
+## Test: append drop-and-replace rewrites each posting record once
+**Purpose:** an append that replaces the last chunk applies the dropped chunk's removals and the new chunk's additions in one rewrite per record
+**Input:** tailReplaceChunker; AddFile with "shared alpha"; AppendChunks with "shared beta" while the hook counts writes per key
+**Expected:** no key written more than once; "alpha" finds nothing, "beta" finds the new chunk
+**Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R729, R731
+**Code:** db_test.go
+**Fire alarm:** apply the posting edits after the drop and again after the new chunks; red is the "sha"/"har" keys written twice
+**Inject:** db.go:DB.appendPrepared
+**Pulled:** 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
+
+## Test: reindex callback sees final postings
+**Purpose:** the coalesced edits are applied before ReindexCallback fires, so a callback reading T records inside the txn sees orphans gone and new chunks present
+**Input:** AddFile "alpha\n"; rewrite to "omega\n"; ReindexWithCallback whose callback reads the T record for "alp" and "ome" from tx
+**Expected:** the orphan is absent from "alp" (record deleted); the new chunkid is present in "ome"
+**Refs:** crc-DB.md, seq-prepare-store.md, R733
+**Code:** db_test.go
+**Fire alarm:** fire rcb before applying the posting edits in reindexPrepared; red is the orphan still listed under "alp"
+**Inject:** db.go:DB.reindexPrepared
+**Pulled:** 2026-10-25 — rang: callback saw orphan 1 still listed, new chunk 2 not listed
+
+## Test: remove with out-of-order chunkids clears every posting
+**Purpose:** a removal set queued in descending chunkid order (a file whose chunks dedup-hit an earlier file's in reverse) still filters every orphan out of every T/W record — the set is sorted before the binary search
+**Input:** first.txt of six "common" lines; target.txt with the same lines reversed; RemoveFile first.txt; RemoveFileWithCallback target.txt
+**Expected:** six orphans, not ascending; no T/W record lists any of them
+**Refs:** crc-DB.md, R732
+**Code:** db_test.go
+**Fire alarm:** drop slices.Sort(e.del) in applyPostings; red is orphans still listed (found by probing past the list after simplification: the suite stayed green)
+**Inject:** db.go:DB.applyPostings
+**Pulled:** 2026-10-25 — rang: orphans 6, 5, 4 still listed in a T/W record

@@ -4420,3 +4420,214 @@ func TestChunkerVersionMissingWins(t *testing.T) {
 		t.Fatalf("RefreshStale with a missing version-stale file: %v", err)
 	}
 }
+
+// countPostingWrites installs the posting-write hook and returns the per-key
+// write counts it fills.
+func countPostingWrites(db *DB) map[string]int {
+	writes := map[string]int{}
+	db.onPostingWrite = func(key []byte) { writes[string(key)]++ }
+	return writes
+}
+
+// assertEachPostingWrittenOnce fails for any T/W record rewritten more than once.
+func assertEachPostingWrittenOnce(t *testing.T, writes map[string]int) {
+	t.Helper()
+	if len(writes) == 0 {
+		t.Fatal("no posting writes observed")
+	}
+	for key, n := range writes {
+		if n > 1 {
+			t.Errorf("posting record %q written %d times, want once", key, n)
+		}
+	}
+}
+
+// postingsList reports whether any T or W record lists chunkid.
+func postingsList(b *bbolt.Bucket, chunkid uint64) bool {
+	found := false
+	b.ForEach(func(k, v []byte) error {
+		if len(k) == 0 || (k[0] != prefixT && k[0] != prefixW) {
+			return nil
+		}
+		ids, _ := UnmarshalTValue(v)
+		if slices.Contains(ids, chunkid) {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
+func commonLines(prefix string, n int) string {
+	var sb strings.Builder
+	for i := range n {
+		fmt.Fprintf(&sb, "common %s%02d\n", prefix, i)
+	}
+	return sb.String()
+}
+
+// TestRewritePostingsFiltersAndAppends: survivors keep their order, additions
+// follow them, an all-removed record is empty. R731, R732
+func TestRewritePostingsFiltersAndAppends(t *testing.T) {
+	stored := marshalChunkIDs([]uint64{5, 300, 7, 70000})
+	got, err := UnmarshalTValue(rewritePostings(stored, []uint64{300}, []uint64{9}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []uint64{5, 7, 70000, 9}; !slices.Equal(got, want) {
+		t.Errorf("rewritePostings = %v, want %v", got, want)
+	}
+	if v := rewritePostings(stored, []uint64{5, 7, 300, 70000}, nil); len(v) != 0 {
+		t.Errorf("all removed: got %d bytes, want empty", len(v))
+	}
+}
+
+// TestReindexRewritesEachPostingOnce: replacing every chunk rewrites each
+// affected T/W record once — removals coalesced and fused with additions.
+// R729, R730, R731
+func TestReindexRewritesEachPostingOnce(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", commonLines("old", 12))
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "doc.txt", commonLines("new", 12))
+	writes := countPostingWrites(db)
+	var orphans []uint64
+	if _, err := db.ReindexWithCallback(fp, "line", func(tx *bbolt.Tx, o, _ []uint64) error {
+		orphans = o
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertEachPostingWrittenOnce(t, writes)
+	if len(orphans) != 12 {
+		t.Fatalf("orphans = %d, want 12", len(orphans))
+	}
+	db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		for _, id := range orphans {
+			if postingsList(b, id) {
+				t.Errorf("orphan %d still listed in a T/W record", id)
+			}
+		}
+		return nil
+	})
+	if sr, _ := db.Search("old05"); len(sr.Results) != 0 {
+		t.Errorf("old text still found: %v", sr.Results)
+	}
+	if sr, _ := db.Search("new05"); len(sr.Results) != 1 {
+		t.Errorf("new text: got %d results, want 1", len(sr.Results))
+	}
+}
+
+// TestRemoveRewritesEachPostingOnce: removing a file whose chunks share grams
+// rewrites each record once and keeps another file's posting. R729, R730
+func TestRemoveRewritesEachPostingOnce(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", commonLines("old", 12))
+	other := writeTestFile(t, dir, "other.txt", "common keeper\n")
+	for _, p := range []string{fp, other} {
+		if _, err := db.AddFile(p, "line"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := countPostingWrites(db)
+	if err := db.RemoveFile(fp); err != nil {
+		t.Fatal(err)
+	}
+	assertEachPostingWrittenOnce(t, writes)
+	sr, _ := db.Search("common")
+	if len(sr.Results) != 1 || sr.Results[0].Path != other {
+		t.Errorf("common: got %v, want only %s", sr.Results, other)
+	}
+}
+
+// TestAppendReplaceRewritesEachPostingOnce: the dropped chunk's removals and
+// the new chunk's additions share one rewrite per record. R729, R731
+func TestAppendReplaceRewritesEachPostingOnce(t *testing.T) {
+	db, dir := testDB(t)
+	db.AddChunker("tail", tailReplaceChunker{})
+	fp := writeTestFile(t, dir, "doc.txt", "shared alpha")
+	fileid, err := db.AddFile(fp, "tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := countPostingWrites(db)
+	if err := db.AppendChunks(fileid, []byte("shared beta"), "tail"); err != nil {
+		t.Fatal(err)
+	}
+	assertEachPostingWrittenOnce(t, writes)
+	if sr, _ := db.Search("alpha"); len(sr.Results) != 0 {
+		t.Errorf("alpha still found: %v", sr.Results)
+	}
+	if sr, _ := db.Search("beta"); len(sr.Results) != 1 {
+		t.Errorf("beta: got %d results, want 1", len(sr.Results))
+	}
+}
+
+// TestReindexCallbackSeesFinalPostings: posting edits land before
+// ReindexCallback fires. R733
+func TestReindexCallbackSeesFinalPostings(t *testing.T) {
+	db, dir := testDB(t)
+	fp := writeTestFile(t, dir, "doc.txt", "alpha\n")
+	if _, err := db.AddFile(fp, "line"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "doc.txt", "omega\n")
+	if _, err := db.ReindexWithCallback(fp, "line", func(tx *bbolt.Tx, orphans, newIDs []uint64) error {
+		b := tx.Bucket([]byte(db.dbName))
+		for _, id := range orphans {
+			if postingsList(b, id) {
+				t.Errorf("callback: orphan %d still listed", id)
+			}
+		}
+		for _, id := range newIDs {
+			if !postingsList(b, id) {
+				t.Errorf("callback: new chunk %d not listed", id)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRemoveOutOfOrderChunkIDsClearsPostings: a file whose chunks dedup-hit
+// earlier chunkids in reverse order queues its removals descending; every
+// orphan still leaves every T/W record. R732
+func TestRemoveOutOfOrderChunkIDsClearsPostings(t *testing.T) {
+	db, dir := testDB(t)
+	first := writeTestFile(t, dir, "first.txt", commonLines("x", 6))
+	if _, err := db.AddFile(first, "line"); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(commonLines("x", 6), "\n")
+	slices.Reverse(lines)
+	target := writeTestFile(t, dir, "target.txt", strings.Join(lines, ""))
+	if _, err := db.AddFile(target, "line"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RemoveFile(first); err != nil {
+		t.Fatal(err)
+	}
+	var orphans []uint64
+	if err := db.RemoveFileWithCallback(target, func(_ *bbolt.Tx, o []uint64) error {
+		orphans = o
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(orphans) != 6 || slices.IsSorted(orphans) {
+		t.Fatalf("orphans = %v, want six in descending order", orphans)
+	}
+	db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		for _, id := range orphans {
+			if postingsList(b, id) {
+				t.Errorf("orphan %d still listed in a T/W record", id)
+			}
+		}
+		return nil
+	})
+}

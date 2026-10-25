@@ -165,6 +165,15 @@
 
 - **R254:** Removing a file: read F record to get chunk list, for each chunkid remove fileid from C record, if C has no remaining fileids delete C/H records and remove chunkid from T/W records, delete F and N records
 
+## Feature: Coalesced Posting Updates
+**Source:** specs/indexing.md
+
+- **R729:** Every T/W record change made by one write operation (AddFile, RemoveFile, Reindex, AppendChunks, and the prepared forms StorePrepared, ReindexPrepared, AppendPrepared) is gathered across the whole operation and applied once per affected record at the end of it, inside the same transaction
+- **R730:** Removals are coalesced like additions: orphan cascade queues the chunkid's removal from each of its T and W records instead of rewriting them, so a record listing N orphaned chunks is rewritten once, not N times
+- **R731:** A record touched by both additions and removals in one operation (reindex; append drop-and-replace) is rewritten in one pass: the removed chunkids are dropped from the stored postings, then the new chunkids are appended after the survivors, whose stored order is unchanged
+- **R732:** Removal filters the stored varint bytes directly, copying surviving postings across without decoding the list into chunkids; a record left with no postings is deleted
+- **R733:** The coalesced changes are applied before RemoveCallback or ReindexCallback fires, so the callback sees final T/W state; RemovedChunkCallback still fires as each chunk is orphaned, before its C record is deleted
+
 ## Feature: Searching
 **Source:** specs/search.md
 

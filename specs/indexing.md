@@ -11,17 +11,20 @@ We add a file to the database with a chosen chunking strategy:
   - look up H record by hash — if chunkid exists, increment this fileid's count in the existing C record's fileids list (insert with count=1 if absent)
   - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + [fileid, count=1]), append chunkid to T records for each trigram, append chunkid to W records for each token
 - update F record: append (chunkid, location, locator) entry, merge tokens into file-level token bag
-- batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record
+- batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record (see "Posting updates are coalesced per write" below)
 
 When removing a file:
 - read F record to get the file's chunk list
 - for each (chunkid, location, locator) entry: read C record, decrement this fileid's count in the fileids list (or remove the fileid entry entirely, since removing a whole file drops all its occurrences at once)
-  - if C record has no remaining fileids: delete C record, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token hash), delete H record
+  - if C record has no remaining fileids: delete C record, delete H record, and queue the chunkid's removal from each T record (by trigram) and each W record (by token hash)
+- apply the queued T/W removals: one read-modify-write per affected T/W record, however many orphaned chunks it lists
 - delete F record, delete N records (key chain)
 
 The same orphan-cascade logic is used by append-merge's drop-and-replace path (see `AppendAwareChunker` below): a chunk dropped from a single file decrements that fileid's count, with the same C/T/W/H cleanup if it was the last reference.
 
 When reindexing a file (re-chunking it after an edit), preserve the chunkids of unchanged content. Re-chunk the new content, then delete only the old file's F and N records — the path metadata, not its chunks. Add the new chunks next: the old chunks' H records still exist, so a chunk whose content (hash) is unchanged is a dedup hit that keeps its chunkid, while genuinely new content allocates a fresh chunkid. Finally drop the old fileid's occurrences from the old chunk list. Chunks whose content survived were just re-added under the new fileid, so they live on; chunks whose content is gone lose their last reference and orphan-cascade as when removing a file. The net effect is a content diff, so chunkid-keyed external state (an embedding keyed by chunkid, say) survives an edit that leaves a chunk untouched.
+
+Posting updates are coalesced per write. Every change one write operation makes to the T and W records — adding a file, removing one, reindexing one, appending to one, and the prepared forms of each — is gathered across the whole operation and applied once per affected record at the end of it, inside the same transaction. That covers removals as well as additions: a reindex that replaces fifty chunks sharing a common trigram rewrites that trigram's record once, not fifty times. Where one operation both adds and removes chunks — a reindex, or an append that drops and replaces its last chunk — a record touched by both is rewritten in one pass: the removed chunkids are dropped from what is stored, then the new chunkids are appended after the survivors, so the stored order of the postings that remain is unchanged. Removal works on the stored bytes directly, copying the surviving postings across rather than decoding the whole list into chunkids and re-encoding it, and a record left with no postings is deleted. The coalesced changes are applied before the remove or reindex callback fires, so the callback sees the T and W records in their final state. (The removed-chunk callback still fires as each chunk is orphaned, before its C record is deleted.)
 
 When searching for a literal string:
 - trim leading and trailing whitespace from the query before trigram extraction

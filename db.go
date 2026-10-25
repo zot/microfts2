@@ -65,6 +65,8 @@ type DB struct {
 	pathCache    map[uint64]string  // R454: cached fileid→path, lazily loaded
 	pathToID     map[string]uint64  // R455: cached path→fileid, built with pathCache
 	frecordCache map[uint64]FRecord // R456: opt-in FRecord cache, nil when inactive
+
+	onPostingWrite func(key []byte) // test hook: sees each T/W record rewrite; nil in production
 }
 
 // Settings holds the in-memory representation of I records.
@@ -705,87 +707,120 @@ func tokenBagToEntries(bag map[string]int) []TokenEntry {
 
 // --- T/W record helpers ---
 
-// appendToInvertedRecord adds a chunkid to an inverted index record (read-modify-write).
-// Works for both T and W records since they share the same varint-packed format.
-func appendToInvertedRecord(th TxnHolder, key []byte, chunkid uint64) error {
-	b := th.Bucket()
-	var existing []byte
-	val := b.Get(key)
-	if val != nil {
-		existing = make([]byte, len(val))
-		copy(existing, val)
-	}
-	var buf [binary.MaxVarintLen64]byte
-	n := binary.PutUvarint(buf[:], chunkid)
-	newVal := append(existing, buf[:n]...)
-	return b.Put(key, newVal)
+// postingKey names one T record (by trigram) or W record (by token hash).
+type postingKey struct {
+	word bool
+	gram uint32
 }
 
-// appendChunkIDsToInvertedRecord appends multiple chunkids to an inverted index record.
-func appendChunkIDsToInvertedRecord(th TxnHolder, key []byte, chunkids []uint64) error {
-	b := th.Bucket()
-	var existing []byte
-	val := b.Get(key)
-	if val != nil {
-		existing = make([]byte, len(val))
-		copy(existing, val)
+func (k postingKey) bytes() []byte {
+	if k.word {
+		return makeWKey(k.gram)
 	}
-	extra := make([]byte, len(chunkids)*binary.MaxVarintLen64)
-	off := 0
-	for _, cid := range chunkids {
-		off += binary.PutUvarint(extra[off:], cid)
-	}
-	newVal := append(existing, extra[:off]...)
-	return b.Put(key, newVal)
+	return makeTKey(k.gram)
 }
 
-// removeFromInvertedRecord removes a chunkid from an inverted index record value.
-func removeFromInvertedRecord(th TxnHolder, key []byte, chunkid uint64) {
-	b := th.Bucket()
-	val := b.Get(key)
-	if val == nil {
+// postingEdit is one record's pending change: chunkids to append, and chunkids
+// to remove from what is stored.
+type postingEdit struct {
+	add []uint64
+	del []uint64
+}
+
+// postingEdits gathers one write operation's T/W record changes, so
+// applyPostings rewrites each affected record once however many chunks touch it.
+// CRC: crc-DB.md | R729, R730
+type postingEdits map[postingKey]*postingEdit
+
+func (pe postingEdits) edit(k postingKey) *postingEdit {
+	e := pe[k]
+	if e == nil {
+		e = &postingEdit{}
+		pe[k] = e
+	}
+	return e
+}
+
+// addChunk queues a new chunk's chunkid onto each of its T and W records.
+func (pe postingEdits) addChunk(nc newChunkTW) {
+	for _, tri := range nc.trigrams {
+		pe.edit(postingKey{gram: tri}).queueAdd(nc.chunkid)
+	}
+	for _, te := range nc.tokens {
+		pe.edit(postingKey{word: true, gram: tokenHash(te.Token)}).queueAdd(nc.chunkid)
+	}
+}
+
+// dropChunk queues an orphaned chunk's removal from each of its T and W records.
+// CRC: crc-DB.md | R730
+func (pe postingEdits) dropChunk(chunkid uint64, crec CRecord) {
+	for _, te := range crec.Trigrams {
+		e := pe.edit(postingKey{gram: te.Trigram})
+		e.del = append(e.del, chunkid)
+	}
+	for _, te := range crec.Tokens {
+		e := pe.edit(postingKey{word: true, gram: tokenHash(te.Token)})
+		e.del = append(e.del, chunkid)
+	}
+}
+
+// queueAdd skips a repeat of the chunkid just queued: two of one chunk's tokens
+// can share a W-record hash, and a chunk's postings are queued consecutively.
+func (e *postingEdit) queueAdd(chunkid uint64) {
+	if n := len(e.add); n > 0 && e.add[n-1] == chunkid {
 		return
 	}
-	data := make([]byte, len(val))
-	copy(data, val)
-	ids, _ := UnmarshalTValue(data)
-	var newIDs []uint64
-	for _, id := range ids {
-		if id != chunkid {
-			newIDs = append(newIDs, id)
+	e.add = append(e.add, chunkid)
+}
+
+// applyPostings rewrites each record in pe once and deletes any it empties.
+// CRC: crc-DB.md | R729, R731, R732
+func (db *DB) applyPostings(th TxnHolder, pe postingEdits) error {
+	b := th.Bucket()
+	for k, e := range pe {
+		key := k.bytes()
+		slices.Sort(e.del)
+		val := rewritePostings(b.Get(key), e.del, e.add)
+		if db.onPostingWrite != nil {
+			db.onPostingWrite(key)
+		}
+		var err error
+		if len(val) == 0 {
+			err = b.Delete(key)
+		} else {
+			err = b.Put(key, val)
+		}
+		if err != nil {
+			return err
 		}
 	}
-	if len(newIDs) == 0 {
-		b.Delete(key)
+	return nil
+}
+
+// rewritePostings copies the stored varint postings not in del (sorted) into a
+// fresh value, then appends add after the survivors. The stored list is never
+// decoded into chunkids; a malformed tail is dropped.
+// CRC: crc-DB.md | R731, R732
+func rewritePostings(stored []byte, del, add []uint64) []byte {
+	out := make([]byte, 0, len(stored)+len(add)*binary.MaxVarintLen64)
+	if len(del) == 0 {
+		out = append(out, stored...)
 	} else {
-		b.Put(key, marshalChunkIDs(newIDs))
-	}
-}
-
-// batchAppendT appends a chunkid to multiple T records.
-func batchAppendT(th TxnHolder, trigrams []uint32, chunkid uint64) error {
-	for _, tri := range trigrams {
-		if err := appendToInvertedRecord(th, makeTKey(tri), chunkid); err != nil {
-			return err
+		for off := 0; off < len(stored); {
+			id, n := readUvarint(stored[off:])
+			if n <= 0 {
+				break
+			}
+			if _, found := slices.BinarySearch(del, id); !found {
+				out = append(out, stored[off:off+n]...)
+			}
+			off += n
 		}
 	}
-	return nil
-}
-
-// batchAppendW appends a chunkid to multiple W records.
-func batchAppendW(th TxnHolder, tokens []TokenEntry, chunkid uint64) error {
-	seen := make(map[uint32]bool)
-	for _, te := range tokens {
-		h := tokenHash(te.Token)
-		if seen[h] {
-			continue // same hash already appended in this batch
-		}
-		seen[h] = true
-		if err := appendToInvertedRecord(th, makeWKey(h), chunkid); err != nil {
-			return err
-		}
+	for _, id := range add {
+		out = binary.AppendUvarint(out, id)
 	}
-	return nil
+	return out
 }
 
 // readFRecord reads an F record by fileid. TxnHolder-compatible.
@@ -1653,9 +1688,14 @@ func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, 
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
+		th := bucketWrap{b}
+		pe := postingEdits{}
 		var txnErr error
-		fileid, _, txnErr = db.addFileInTxn(bucketWrap{b}, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
-		return txnErr
+		fileid, _, txnErr = db.addFileInTxn(th, pe, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
+		if txnErr != nil {
+			return txnErr
+		}
+		return db.applyPostings(th, pe) // R729
 	})
 	if err != nil {
 		return 0, err
@@ -1775,56 +1815,8 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, crec, nil
 }
 
-// coalescedAppendT coalesces trigram→chunkids across all new chunks and does
-// one read-modify-write per unique trigram.
-func coalescedAppendT(th TxnHolder, newChunks []newChunkTW) error {
-	triMap := make(map[uint32][]uint64)
-	for _, nc := range newChunks {
-		for _, tri := range nc.trigrams {
-			triMap[tri] = append(triMap[tri], nc.chunkid)
-		}
-	}
-	for tri, cids := range triMap {
-		if err := appendChunkIDsToInvertedRecord(th, makeTKey(tri), cids); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// coalescedAppendW coalesces token hash→chunkids across all new chunks and does
-// one read-modify-write per unique token hash.
-func coalescedAppendW(th TxnHolder, newChunks []newChunkTW) error {
-	wMap := make(map[uint32][]uint64)
-	for _, nc := range newChunks {
-		seen := make(map[uint32]bool)
-		for _, te := range nc.tokens {
-			h := tokenHash(te.Token)
-			if seen[h] {
-				continue
-			}
-			seen[h] = true
-			wMap[h] = append(wMap[h], nc.chunkid)
-		}
-	}
-	for h, cids := range wMap {
-		if err := appendChunkIDsToInvertedRecord(th, makeWKey(h), cids); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// coalescedAppendAll writes coalesced T and W records.
-func (db *DB) coalescedAppendAll(th TxnHolder, newChunks []newChunkTW) error {
-	if err := coalescedAppendT(th, newChunks); err != nil {
-		return err
-	}
-	return coalescedAppendW(th, newChunks)
-}
-
 // Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
-func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64, ich IndexedChunkCallback) (uint64, []uint64, error) {
+func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64, ich IndexedChunkCallback) (uint64, []uint64, error) {
 	b := th.Bucket()
 	// Dedup guard: check for existing N records before allocating a fileid
 	finalKey := FinalKey(fpath)
@@ -1870,6 +1862,7 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 		}
 		if nc != nil {
 			newChunks = append(newChunks, *nc)
+			pe.addChunk(*nc)
 			if ich != nil {
 				crec.attach(db, th.Bucket())
 				ich(IndexedChunk{Chunk: ch.Chunk, CRecord: crec})
@@ -1879,11 +1872,6 @@ func (db *DB) addFileInTxn(th TxnHolder, fpath, strategy string, chunks []collec
 		chunks[i].Content = nil // release content after C record write (and after callback fire)
 		chunkIDs[i] = chunkid
 		mergeTokenBag(fileBag, ch.tokens)
-	}
-
-	// Coalesced T/W record updates — one read-modify-write per unique trigram/token hash
-	if err := db.coalescedAppendAll(th, newChunks); err != nil {
-		return 0, nil, err
 	}
 
 	// R275, R276: update corpus counters for new chunks
@@ -1945,11 +1933,12 @@ func (db *DB) removeFileWithCallbackImpl(fpath string, fn RemoveCallback, rcb Re
 	return err
 }
 
-// cascadeOrphan deletes the C/H records and prunes T/W postings for an orphaned chunk.
+// cascadeOrphan deletes the C/H records for an orphaned chunk and queues its
+// T/W posting removals into pe.
 // Increments the removed counters. Caller has already ensured FileIDs is empty.
 // rcb (if non-nil) fires before deletion with the orphaned C record (bkt-attached).
-// CRC: crc-DB.md | R598, R609
-func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64, rcb RemovedChunkCallback) error {
+// CRC: crc-DB.md | R598, R609, R730
+func (db *DB) cascadeOrphan(th TxnHolder, pe postingEdits, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64, rcb RemovedChunkCallback) error {
 	b := th.Bucket()
 	if rcb != nil {
 		crec.attach(db, b)
@@ -1962,18 +1951,7 @@ func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedC
 	}
 	b.Delete(makeCKey(chunkid))
 	b.Delete(makeHKey(crec.Hash))
-	for _, te := range crec.Trigrams {
-		removeFromInvertedRecord(th, makeTKey(te.Trigram), chunkid)
-	}
-	seen := make(map[uint32]bool)
-	for _, te := range crec.Tokens {
-		h := tokenHash(te.Token)
-		if seen[h] {
-			continue
-		}
-		seen[h] = true
-		removeFromInvertedRecord(th, makeWKey(h), chunkid)
-	}
+	pe.dropChunk(chunkid, crec) // R730
 	return nil
 }
 
@@ -1983,7 +1961,7 @@ func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedC
 // the decrement share one C-record read. rcb (if non-nil) fires before
 // orphan deletion. // CRC: crc-DB.md | R608
 func (db *DB) dropOccurrenceInline(
-	th TxnHolder, chunkid, fileid uint64,
+	th TxnHolder, pe postingEdits, chunkid, fileid uint64,
 	fileBag map[string]int,
 	removedChunks, removedTokens *int64,
 	rcb RemovedChunkCallback,
@@ -2005,7 +1983,7 @@ func (db *DB) dropOccurrenceInline(
 	if len(crec.FileIDs) > 0 {
 		return b.Put(cKey, crec.MarshalValue())
 	}
-	return db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
+	return db.cascadeOrphan(th, pe, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // dropFromChunkRef applies mutate to the chunkid's C-record FileIDs slice and
@@ -2015,7 +1993,7 @@ func (db *DB) dropOccurrenceInline(
 // non-nil) fires before orphan deletion.
 // Returns true when the chunk was orphaned. // CRC: crc-DB.md | R608, R609
 func (db *DB) dropFromChunkRef(
-	th TxnHolder, chunkid, fileid uint64,
+	th TxnHolder, pe postingEdits, chunkid, fileid uint64,
 	mutate func([]FileIDCount, uint64) ([]FileIDCount, bool),
 	removedChunks, removedTokens *int64,
 	rcb RemovedChunkCallback,
@@ -2036,7 +2014,7 @@ func (db *DB) dropFromChunkRef(
 	if len(crec.FileIDs) > 0 {
 		return false, b.Put(cKey, crec.MarshalValue())
 	}
-	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
+	return true, db.cascadeOrphan(th, pe, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // deleteFileMeta deletes a file's F record and N key chain only, leaving its
@@ -2058,7 +2036,7 @@ func (db *DB) deleteFileMeta(th TxnHolder, fileid uint64, fpath string) {
 // Shared by removeFileInTxn (whole-file removal) and reindexCore (dropping the
 // old fileid's occurrences after the new chunks were re-added).
 // CRC: crc-DB.md | R254, R673
-func (db *DB) dropFileChunkOccurrences(th TxnHolder, frec FRecord, fileid uint64, rcb RemovedChunkCallback) ([]uint64, error) {
+func (db *DB) dropFileChunkOccurrences(th TxnHolder, pe postingEdits, frec FRecord, fileid uint64, rcb RemovedChunkCallback) ([]uint64, error) {
 	var orphanedChunkIDs []uint64
 	var removedChunks int64
 	var removedTokens int64
@@ -2068,7 +2046,7 @@ func (db *DB) dropFileChunkOccurrences(th TxnHolder, frec FRecord, fileid uint64
 			continue
 		}
 		seen[fce.ChunkID] = true
-		orphaned, err := db.dropFromChunkRef(th, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens, rcb)
+		orphaned, err := db.dropFromChunkRef(th, pe, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens, rcb)
 		if err != nil {
 			return nil, err
 		}
@@ -2095,8 +2073,12 @@ func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallba
 	if err != nil {
 		return nil, err
 	}
-	orphanedChunkIDs, err := db.dropFileChunkOccurrences(th, frec, fileid, rcb)
+	pe := postingEdits{}
+	orphanedChunkIDs, err := db.dropFileChunkOccurrences(th, pe, frec, fileid, rcb)
 	if err != nil {
+		return nil, err
+	}
+	if err := db.applyPostings(th, pe); err != nil { // R729, R733: before RemoveCallback
 		return nil, err
 	}
 	db.deleteFileMeta(th, fileid, fpath)
@@ -2161,14 +2143,20 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 			return err
 		}
 		db.deleteFileMeta(th, oldFileID, p.fpath)
+		pe := postingEdits{} // the new chunks' additions and the orphans' removals, fused (R731)
 		var newChunkIDs []uint64
 		var txnErr error
-		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
+		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, pe, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
 		if txnErr != nil {
 			return txnErr
 		}
-		orphans, err := db.dropFileChunkOccurrences(th, oldFrec, oldFileID, rmcb)
+		// Seq: seq-prepare-store.md#3.5.1 | R730
+		orphans, err := db.dropFileChunkOccurrences(th, pe, oldFrec, oldFileID, rmcb)
 		if err != nil {
+			return err
+		}
+		// Seq: seq-prepare-store.md#3.5.2 | R729, R733 — before ReindexCallback
+		if err := db.applyPostings(th, pe); err != nil {
 			return err
 		}
 		if rcb != nil {
@@ -2589,9 +2577,10 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		// tokens from this file's bag; then either rewrite C with one fewer
 		// occurrence or cascade orphan cleanup. // R604, R608
 		var droppedRemoved, droppedTokens int64
+		pe := postingEdits{} // the dropped chunk's removals and the new chunks' additions, fused (R731)
 		if p.replacedLast && len(frec.Chunks) > 0 {
 			last := frec.Chunks[len(frec.Chunks)-1]
-			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
+			if err := db.dropOccurrenceInline(th, pe, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
 				return err
 			}
 			frec.Chunks = frec.Chunks[:len(frec.Chunks)-1]
@@ -2607,6 +2596,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 			}
 			if nc != nil {
 				newChunksTW = append(newChunksTW, *nc)
+				pe.addChunk(*nc)
 				if cfg.indexedChunkCallback != nil {
 					crec.attach(db, th.Bucket())
 					cfg.indexedChunkCallback(IndexedChunk{Chunk: ch.Chunk, CRecord: crec})
@@ -2617,8 +2607,8 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 			p.chunks[i].Content = nil // release content after C record write (and after callback fire)
 		}
 
-		// Coalesced T/W/B record updates
-		if err := db.coalescedAppendAll(th, newChunksTW); err != nil {
+		// Seq: seq-prepare-store.md#5.4.2 | R729, R731
+		if err := db.applyPostings(th, pe); err != nil {
 			return err
 		}
 
