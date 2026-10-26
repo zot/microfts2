@@ -1,5 +1,7 @@
 package microfts2
 
+// CRC: crc-KeyChain.md | Test: test-KeyChain.md
+
 import (
 	"strings"
 	"testing"

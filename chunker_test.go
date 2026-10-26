@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// CRC: crc-Chunker.md | test-Chunker.md
+// CRC: crc-Chunker.md | Test: test-Chunker.md
 
 type chunkResult struct {
 	Range   string

@@ -1,5 +1,7 @@
 package microfts2
 
+// CRC: crc-BracketChunker.md | Test: test-BracketChunker.md
+
 import (
 	"os"
 	"path/filepath"
@@ -152,7 +154,7 @@ func greet() {
 }
 
 func TestBracketChunkerWordBrackets(t *testing.T) {
-	// R313, R314: word brackets like begin/end
+	// R313: word brackets like begin/end
 	src := `program main;
 begin
   writeln('hello');
@@ -174,7 +176,7 @@ end.
 }
 
 func TestBracketChunkerShellIfThenFi(t *testing.T) {
-	// Shell word brackets: if/then/else/fi
+	// R313, R314: one group with several word tokens — if opens, else separates, fi closes
 	src := `#!/bin/bash
 
 if [ -f file ]; then
@@ -196,8 +198,17 @@ echo "done"
 	})
 
 	// Expect: shebang paragraph, if/fi group, echo paragraph
-	if len(chunks) < 2 {
-		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	want := []string{"1-1", "3-7", "9-9"}
+	if len(chunks) != len(want) {
+		for i, c := range chunks {
+			t.Logf("  chunk %d: range=%s content=%q", i, c.Range, c.Content)
+		}
+		t.Fatalf("expected %d chunks, got %d", len(want), len(chunks))
+	}
+	for i, w := range want {
+		if string(chunks[i].Range) != w {
+			t.Errorf("chunk %d range = %s, want %s", i, chunks[i].Range, w)
+		}
 	}
 }
 
@@ -258,7 +269,7 @@ func TestLangByName(t *testing.T) {
 	}
 }
 
-// R617, R618, R621: a Go raw-backtick string with embedded braces does not
+// R618, R621: a Go raw-backtick string with embedded braces does not
 // open a chunk group — the contents are scan-suppressed.
 func TestBracketChunkerGoRawStringWithBraces(t *testing.T) {
 	src := "x := `hello { world }`\ny := 1\n"
@@ -279,7 +290,7 @@ func TestBracketChunkerGoRawStringWithBraces(t *testing.T) {
 	}
 }
 
-// R617, R621: a plain "..."  string with embedded braces does not open a chunk
+// R621: a plain "..."  string with embedded braces does not open a chunk
 // group — the contents are scan-suppressed.
 func TestBracketChunkerGoStringWithBrace(t *testing.T) {
 	src := `x := "}"
@@ -376,6 +387,36 @@ func TestBracketChunkerJSDollarBraceTopLevel(t *testing.T) {
 		t.Errorf("expected 1 chunk (single paragraph at top level), got %d", len(chunks))
 		for i, c := range chunks {
 			t.Logf("  chunk %d: range=%s content=%q", i, c.Range, c.Content)
+		}
+	}
+}
+
+// R617: an escaped quote does not close the string — the brace after it is
+// still string text and opens no chunk group.
+func TestBracketChunkerEscapedQuoteKeepsStringOpen(t *testing.T) {
+	src := `s := "\"{"
+
+u := 2
+`
+	bc := BracketChunker(LangGo)
+	var chunks []Chunk
+	bc.Chunks("test.go", []byte(src), func(c Chunk) bool {
+		chunks = append(chunks, Chunk{
+			Range:   append([]byte(nil), c.Range...),
+			Content: append([]byte(nil), c.Content...),
+		})
+		return true
+	})
+	want := []string{"1-1", "3-3"}
+	if len(chunks) != len(want) {
+		for i, c := range chunks {
+			t.Logf("  chunk %d: range=%s content=%q", i, c.Range, c.Content)
+		}
+		t.Fatalf("expected %d chunks (escaped quote keeps string open), got %d", len(want), len(chunks))
+	}
+	for i, w := range want {
+		if string(chunks[i].Range) != w {
+			t.Errorf("chunk %d range = %s, want %s", i, chunks[i].Range, w)
 		}
 	}
 }

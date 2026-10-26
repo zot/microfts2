@@ -1,6 +1,6 @@
 package microfts2
 
-// CRC: crc-DB.md, crc-ChunkCache.md, crc-Overlay.md | test-ChunkAttrs.md | R655, R656, R657
+// CRC: crc-DB.md, crc-ChunkCache.md, crc-Overlay.md | Test: test-ChunkAttrs.md
 // The ContentTransform hook was rolled back (retire-content-transform). These
 // tests cover the steady state it left behind: the trigram index is full-text
 // (content indexed verbatim, tags and all), dedup is by content hash, and native

@@ -1,5 +1,7 @@
 package microfts2
 
+// CRC: crc-DB.md | Test: test-DB.md
+
 import (
 	"bytes"
 	"testing"

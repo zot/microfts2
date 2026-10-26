@@ -50,11 +50,15 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
 - [x] test-Bitset.md → `bitset_test.go`
-- [x] test-DB.md → `db_test.go`
+- [x] test-DB.md → `db_test.go`, `records_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
 - [x] test-CLI.md → `cmd/microfts/main_test.go`
 - [x] test-ChunkAttrs.md → `chunk_attrs_test.go`
+- [x] test-BracketChunker.md → `bracket_chunker_test.go`
+- [x] test-IndentChunker.md → `indent_chunker_test.go`
+- [x] test-ChunkCache.md → `cache_test.go`
+- [x] test-KeyChain.md → `keychain_test.go`
 
 ## Gaps
 
@@ -168,3 +172,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T84: R663 retired by R734 (2026-10-26 TxnHolder accessor is Bucket(), not Tx(); bucketWrap, not txnWrap)
 - T85: R252 retired by R735 (2026-10-26 encode/decode is MarshalValue + UnmarshalXValue on C/F/T/W; migration 001's planned R252->R668 pairing was never applied and was wrong)
 - T86: R248 retired (2026-10-26 HRecord deleted: dead exported type, never marshalled)
+- [ ] C1: LangByName (bracket_chunker.go) is exported and backs the CLI's -lang flag, but no spec, requirement or CRC card describes it — R321 names only the package-level Lang* variables

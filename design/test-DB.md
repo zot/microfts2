@@ -215,18 +215,63 @@
 **Input:** create a CRecord with known trigrams, tokens, attrs, fileids, marshal, unmarshal
 **Expected:** all fields match after roundtrip
 **Refs:** crc-DB.md, R244, R735
+**Code:** records_test.go
 
 ## Test: FRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode
 **Input:** create an FRecord with known metadata, names, chunks, token bag, marshal, unmarshal
 **Expected:** all fields match after roundtrip
 **Refs:** crc-DB.md, R245, R735
+**Code:** records_test.go
 
 ## Test: TRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode with varint chunkids
 **Input:** create a TRecord with known chunkids, marshal, unmarshal
 **Expected:** all chunkids match after roundtrip
 **Refs:** crc-DB.md, R246, R735
+**Code:** records_test.go
+
+## Test: empty CRecord roundtrip
+**Purpose:** a CRecord with no trigrams, tokens, attrs or fileids survives encode/decode
+**Input:** marshal and unmarshal a CRecord with empty slices
+**Expected:** all four slices empty after roundtrip
+**Refs:** crc-DB.md, R244, R735
+**Code:** records_test.go
+
+## Test: CRecord fileid inc/dec
+**Purpose:** fileid occurrence counts are refcounted
+**Input:** IncFileID 7 three times and 42 once; DecFileID 7 down to zero
+**Expected:** counts 3 and 1; Dec at 3 keeps the entry; Dec at 1 removes it, leaving one entry
+**Refs:** crc-DB.md, R596, R597
+**Code:** records_test.go
+
+## Test: CRecord refcount roundtrip
+**Purpose:** `[fileid, count]` pairs survive encode/decode
+**Input:** a CRecord with two fileids at different counts
+**Expected:** both pairs match after roundtrip
+**Refs:** crc-DB.md, R595
+**Code:** records_test.go
+
+## Test: FRecord locator roundtrip
+**Purpose:** chunk entries keep ChunkID, Location and Locator, empty locators included
+**Input:** an FRecord with three chunk entries, one with a nil locator
+**Expected:** all three entries match after roundtrip
+**Refs:** crc-DB.md, R251, R592
+**Code:** records_test.go
+
+## Test: byte-range locator
+**Purpose:** a line-oriented chunker's byte-range locator encodes and decodes
+**Input:** encode 100–250; decode it; decode a nil locator
+**Expected:** 100–250 back; nil decodes with ok=false
+**Refs:** crc-DB.md, R594
+**Code:** records_test.go
+
+## Test: key construction
+**Purpose:** each record key has its prefix byte and expected length
+**Input:** build C, F, H, I, T and W keys
+**Expected:** correct prefix on each; H key 33 bytes, T key 4, W key 5; I key carries the name
+**Refs:** crc-DB.md, R224, R227
+**Code:** records_test.go
 
 ## Test: I record data-in-key pattern
 **Purpose:** settings stored as individual records

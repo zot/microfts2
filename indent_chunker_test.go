@@ -1,5 +1,7 @@
 package microfts2
 
+// CRC: crc-IndentChunker.md | Test: test-IndentChunker.md
+
 import (
 	"testing"
 )
@@ -127,7 +129,7 @@ def greet():
 	}
 }
 
-func TestIndentChunkerChunkText(t *testing.T) {
+func TestIndentChunkerSeparateGroups(t *testing.T) {
 	src := `def a():
     pass
 

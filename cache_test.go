@@ -1,6 +1,6 @@
 package microfts2
 
-// CRC: crc-ChunkCache.md
+// CRC: crc-ChunkCache.md | Test: test-ChunkCache.md
 
 import (
 	"testing"
