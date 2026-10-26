@@ -78,7 +78,7 @@ CRecord implements `TxnHolder` via its `Bucket()` accessor (and offers a `Tx() *
 
 ## Record structs
 
-Go structs for each index record type. Encoding/decoding lives in methods on the structs. The rest of the code works with typed data, not raw bytes.
+Go structs for each index record type. Each struct encodes its value with a `MarshalValue()` method and decodes with a package function (`UnmarshalCValue`, `UnmarshalFValue`, `UnmarshalTValue`, `UnmarshalWValue`). The H record (content hash → chunkid) is a single varint and has no struct. The rest of the code works with typed data, not raw bytes.
 
 ```go
 // CRecord is the per-chunk record. Self-describing: everything needed
@@ -88,10 +88,11 @@ Go structs for each index record type. Encoding/decoding lives in methods on the
 type CRecord struct {
     ChunkID  uint64
     Hash     [32]byte
+    ContentLen int                   // byte length of the chunk's content
     Trigrams []TrigramEntry          // {Trigram uint32, Count int}
     Tokens   []TokenEntry            // {Token string, Count int}
     Attrs    []Pair                  // opaque per-chunk metadata from chunker (timestamp, role, etc.)
-    FileIDs  []uint64
+    FileIDs  []FileIDCount           // {FileID, Count uint64}: per-file occurrence refcount
     db       *DB                     // unexported: transaction context
     bkt      *bbolt.Bucket           // unexported: transaction context
 }
@@ -119,7 +120,7 @@ type FRecord struct {
     Strategy    string
     ChunkerVersion uint32            // version of the strategy's chunker when the file was chunked
     Names       []string             // multiple names for dup/copied files
-    Chunks      []FileChunkEntry     // {ChunkID uint64, Location string}
+    Chunks      []FileChunkEntry     // {ChunkID uint64, Location string, Locator []byte}
     Tokens      []TokenEntry         // aggregated bag across all chunks
 }
 
@@ -135,17 +136,12 @@ type WRecord struct {
     ChunkIDs  []uint64
 }
 
-// HRecord maps content hash to chunkid.
-type HRecord struct {
-    Hash    [32]byte
-    ChunkID uint64
-}
-
 // Supporting types
 type Pair          struct { Key []byte; Value []byte }
 type TrigramEntry  struct { Trigram uint32; Count int }
 type TokenEntry    struct { Token string; Count int }
-type FileChunkEntry struct { ChunkID uint64; Location string }
+type FileChunkEntry struct { ChunkID uint64; Location string; Locator []byte }
+type FileIDCount   struct { FileID uint64; Count uint64 }
 ```
 
 ## Search types

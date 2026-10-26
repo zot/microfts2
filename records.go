@@ -1,7 +1,5 @@
 package microfts2
 
-// CRC: crc-DB.md | R220, R221, R222, R244, R245, R246, R247, R248, R249, R250, R251, R252, R264, R265, R266, R267, R295, R495, R496, R497, R498
-
 import (
 	"encoding/binary"
 	"fmt"
@@ -9,24 +7,28 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// TxnHolder carries a bbolt transaction's fts bucket. R667
+// TxnHolder carries a bbolt transaction's fts bucket.
 // CRecord implements it; bucketWrap wraps raw buckets from View/Update blocks.
+// CRC: crc-DB.md | R667, R734
 type TxnHolder interface {
 	Bucket() *bbolt.Bucket
 }
 
-// bucketWrap wraps a raw *bbolt.Bucket into a TxnHolder. R667
+// bucketWrap wraps a raw *bbolt.Bucket into a TxnHolder.
+// CRC: crc-DB.md | R734
 type bucketWrap struct{ b *bbolt.Bucket }
 
 func (w bucketWrap) Bucket() *bbolt.Bucket { return w.b }
 
 // TrigramEntry pairs a trigram code with its per-chunk occurrence count.
+// CRC: crc-DB.md | R249
 type TrigramEntry struct {
 	Trigram uint32
 	Count   int
 }
 
 // TokenEntry pairs a token string with its occurrence count.
+// CRC: crc-DB.md | R250
 type TokenEntry struct {
 	Token string
 	Count int
@@ -36,14 +38,15 @@ type TokenEntry struct {
 // Location is the chunker's Range (human display); Locator is the chunker's Locator
 // (per-occurrence opaque bytes for fast retrieval and append-merge resume).
 // Both are length-prefixed in the wire format and either may be empty.
-// CRC: crc-DB.md | R592
+// CRC: crc-DB.md | R251, R592
 type FileChunkEntry struct {
 	ChunkID  uint64
 	Location string
 	Locator  []byte
 }
 
-// FileIDCount records how many times a chunk occurs in a file. // CRC: crc-DB.md | R595
+// FileIDCount records how many times a chunk occurs in a file.
+// CRC: crc-DB.md | R595
 type FileIDCount struct {
 	FileID uint64
 	Count  uint64
@@ -52,6 +55,7 @@ type FileIDCount struct {
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
 // Carries unexported db/bkt — the chunk is tied to the bucket that read it.
+// CRC: crc-DB.md | R244, R496
 type CRecord struct {
 	ChunkID    uint64
 	Hash       [32]byte
@@ -59,7 +63,7 @@ type CRecord struct {
 	Trigrams   []TrigramEntry
 	Tokens     []TokenEntry
 	Attrs      []Pair
-	FileIDs    []FileIDCount // refcounted: per-fileid occurrence count // CRC: crc-DB.md | R595
+	FileIDs    []FileIDCount // R595: refcounted per-fileid occurrence count
 	db         *DB
 	bkt        *bbolt.Bucket
 }
@@ -113,16 +117,19 @@ func removeFileID(s []FileIDCount, fileid uint64) ([]FileIDCount, bool) {
 	return s, false
 }
 
-// attach sets the db and bkt context for a CRecord. R664
+// attach sets the db and bkt context for a CRecord.
+// CRC: crc-DB.md | R664
 func (c *CRecord) attach(db *DB, b *bbolt.Bucket) {
 	c.db = db
 	c.bkt = b
 }
 
-// Bucket returns the bbolt bucket this record was read from. Implements TxnHolder. R664
+// Bucket returns the bbolt bucket this record was read from. Implements TxnHolder.
+// CRC: crc-DB.md | R664, R734
 func (c *CRecord) Bucket() *bbolt.Bucket { return c.bkt }
 
-// Tx returns the bbolt transaction this record is part of. R663, R664
+// Tx returns the bbolt transaction this record is part of.
+// CRC: crc-DB.md | R664, R734
 func (c *CRecord) Tx() *bbolt.Tx {
 	if c.bkt == nil {
 		return nil
@@ -134,21 +141,25 @@ func (c *CRecord) Tx() *bbolt.Tx {
 func (c *CRecord) DB() *DB { return c.db }
 
 // FileRecord navigates to an F record within the same transaction.
+// CRC: crc-DB.md | R266
 func (c *CRecord) FileRecord(fileid uint64) (FRecord, error) {
 	return c.db.readFRecord(c, fileid)
 }
 
-// IncFileID adds an occurrence for fileid. // CRC: crc-DB.md | R596
+// IncFileID adds an occurrence for fileid.
+// CRC: crc-DB.md | R596
 func (c *CRecord) IncFileID(fileid uint64) { c.FileIDs = incFileID(c.FileIDs, fileid) }
 
-// DecFileID removes one occurrence; returns true when the entry was removed entirely. // CRC: crc-DB.md | R597
+// DecFileID removes one occurrence; returns true when the entry was removed entirely.
+// CRC: crc-DB.md | R597
 func (c *CRecord) DecFileID(fileid uint64) bool {
 	var removed bool
 	c.FileIDs, removed = decFileID(c.FileIDs, fileid)
 	return removed
 }
 
-// RemoveFileID drops all occurrences of fileid in one shot. // CRC: crc-DB.md | R599
+// RemoveFileID drops all occurrences of fileid in one shot.
+// CRC: crc-DB.md | R599
 func (c *CRecord) RemoveFileID(fileid uint64) bool {
 	var removed bool
 	c.FileIDs, removed = removeFileID(c.FileIDs, fileid)
@@ -156,13 +167,14 @@ func (c *CRecord) RemoveFileID(fileid uint64) bool {
 }
 
 // FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
+// CRC: crc-DB.md | R245
 type FRecord struct {
 	FileID      uint64
 	ModTime     int64
 	ContentHash [32]byte
 	FileLength  int64
 	Strategy    string
-	// ChunkerVersion is the strategy's chunker version when the file was chunked. R717
+	// R717: the strategy's chunker version when the file was chunked
 	ChunkerVersion uint32
 	Names          []string
 	Chunks         []FileChunkEntry
@@ -170,31 +182,29 @@ type FRecord struct {
 }
 
 // TRecord is the trigram inverted index entry.
+// CRC: crc-DB.md | R246
 type TRecord struct {
 	Trigram  uint32
 	ChunkIDs []uint64
 }
 
 // WRecord is the token inverted index entry.
+// CRC: crc-DB.md | R247
 type WRecord struct {
 	TokenHash uint32
 	ChunkIDs  []uint64
 }
 
-// HRecord maps content hash to chunkid.
-type HRecord struct {
-	Hash    [32]byte
-	ChunkID uint64
-}
-
 // --- Encoding helpers ---
 
+// R220: integers are varints
 func putUvarint(buf []byte, v uint64) int { return binary.PutUvarint(buf, v) }
 func readUvarint(buf []byte) (uint64, int) {
 	v, n := binary.Uvarint(buf)
 	return v, n
 }
 
+// R222: strings and byte slices are varint-length-prefixed
 func putString(buf []byte, s string) int {
 	n := binary.PutUvarint(buf, uint64(len(s)))
 	n += copy(buf[n:], s)
@@ -229,7 +239,8 @@ func readBytes(buf []byte) ([]byte, int) {
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
-// hash + contentLen + trigrams + tokens + attrs + [fileid, count] pairs // R497, R595
+// Layout: hash + contentLen + trigrams + tokens + attrs + [fileid, count] pairs.
+// CRC: crc-DB.md | R221, R495, R497, R595, R735
 func (c *CRecord) MarshalValue() []byte {
 	size := 32                    // hash
 	size += binary.MaxVarintLen64 // contentLen (R495)
@@ -286,7 +297,8 @@ func (c *CRecord) MarshalValue() []byte {
 }
 
 // UnmarshalCValue decodes a CRecord value. ChunkID must be set separately (from key).
-// R498: hash + contentLen + trigrams + tokens + attrs + fileids
+// Layout: hash + contentLen + trigrams + tokens + attrs + fileids.
+// CRC: crc-DB.md | R221, R498, R735
 func UnmarshalCValue(data []byte) (CRecord, error) {
 	var c CRecord
 	if len(data) < 32 {
@@ -401,7 +413,8 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 
 // MarshalValue encodes the FRecord value (everything except the key prefix and fileid).
 // Chunk entries are [chunkid, location, locator] — both location and locator are
-// length-prefixed bytes (either may be empty). // R592
+// length-prefixed bytes (either may be empty).
+// CRC: crc-DB.md | R592, R717, R735
 func (f *FRecord) MarshalValue() []byte {
 	size := 8 + 32                                  // modTime + contentHash
 	size += binary.MaxVarintLen64                   // fileLength
@@ -460,7 +473,7 @@ func (f *FRecord) MarshalValue() []byte {
 }
 
 // unmarshalFHeader decodes the header fields of an F record value:
-// ModTime, ContentHash, FileLength, Strategy, and Names.
+// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names.
 // Returns the record, the byte offset after Names, and any error.
 func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	var f FRecord
@@ -515,13 +528,14 @@ func unmarshalFHeader(data []byte) (FRecord, int, error) {
 }
 
 // UnmarshalFValue decodes an FRecord value. FileID must be set separately (from key).
+// CRC: crc-DB.md | R592, R735
 func UnmarshalFValue(data []byte) (FRecord, error) {
 	f, off, err := unmarshalFHeader(data)
 	if err != nil {
 		return f, err
 	}
 
-	// Chunks: [chunkid, location, locator] // R592
+	// R592: chunks are [chunkid, location, locator]
 	nChunks, n := readUvarint(data[off:])
 	if n <= 0 {
 		return f, fmt.Errorf("FRecord: bad chunkcount")
@@ -575,7 +589,7 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 }
 
 // R451, R452: UnmarshalFHeader decodes only the header fields of an F record value:
-// ModTime, ContentHash, FileLength, Strategy, and Names. Skips Chunks and Tokens.
+// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names. Skips Chunks and Tokens.
 func UnmarshalFHeader(data []byte) (FRecord, error) {
 	f, _, err := unmarshalFHeader(data)
 	return f, err
@@ -596,6 +610,7 @@ func marshalChunkIDs(ids []uint64) []byte {
 // --- TRecord marshal/unmarshal ---
 
 // MarshalValue encodes the TRecord value (packed chunkid list).
+// CRC: crc-DB.md | R735
 func (t *TRecord) MarshalValue() []byte {
 	return marshalChunkIDs(t.ChunkIDs)
 }
@@ -616,6 +631,7 @@ func countTValue(data []byte) int {
 }
 
 // UnmarshalTValue decodes a TRecord value. Trigram must be set separately (from key).
+// CRC: crc-DB.md | R735
 func UnmarshalTValue(data []byte) ([]uint64, error) {
 	var ids []uint64
 	off := 0
@@ -633,18 +649,20 @@ func UnmarshalTValue(data []byte) ([]uint64, error) {
 // --- WRecord marshal/unmarshal ---
 
 // MarshalValue encodes the WRecord value (packed chunkid list, same as TRecord).
+// CRC: crc-DB.md | R735
 func (w *WRecord) MarshalValue() []byte {
 	return marshalChunkIDs(w.ChunkIDs)
 }
 
 // UnmarshalWValue decodes a WRecord value. Same format as TRecord.
+// CRC: crc-DB.md | R735
 func UnmarshalWValue(data []byte) ([]uint64, error) {
 	return UnmarshalTValue(data) // identical format
 }
 
 // --- Key construction ---
 
-// Record prefix bytes for the single subdatabase.
+// Record prefix bytes for the single bucket.
 const (
 	prefixC byte = 'C' // per-chunk record
 	prefixF byte = 'F' // per-file record

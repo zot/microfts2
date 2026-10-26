@@ -8,7 +8,7 @@ Dynamic trigram index, bbolt-backed (pure Go). Go library with CLI.
 All DB operations use bbolt transactions. Reads use `db.View` (read-only) txns; writes use `db.Update` (read-write) txns. bbolt allows one writer at a time; concurrent readers are fine. A `bbolt.Tx` spans all buckets, so the host (ark) can read its own bucket and microfts2's `fts` bucket in one atomic txn (R662).
 
 ### Key and Value Encoding
-Integer fields use varint encoding (`binary.PutUvarint` / `binary.ReadUvarint`). Trigram fields are fixed 3 bytes (24-bit). Hash fields are fixed 32 bytes (SHA-256). Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes. Record structs (CRecord, FRecord, TRecord, WRecord, HRecord) handle marshal/unmarshal.
+Integer fields use varint encoding (`binary.PutUvarint` / `binary.ReadUvarint`). Trigram fields are fixed 3 bytes (24-bit). Hash fields are fixed 32 bytes (SHA-256). Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes. Record structs (CRecord, FRecord, TRecord, WRecord) encode with `MarshalValue` and decode with `UnmarshalCValue`/`UnmarshalFValue`/`UnmarshalTValue`/`UnmarshalWValue`; the H record is a bare chunkid varint with no struct.
 
 ### Error Handling
 Go idiomatic error returns. CLI prints to stderr and exits non-zero.
@@ -16,7 +16,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 ## Artifacts
 
 ### CRC Cards
-- [x] crc-DB.md → `db.go`
+- [x] crc-DB.md → `db.go`, `records.go`
 - [x] crc-CharSet.md → `charset.go`
 - [x] crc-Bitset.md → `bitset.go`
 - [x] crc-Chunker.md → `chunker.go`
@@ -163,3 +163,8 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T79: R521 retired (removed with ChunkTexter; converted from a hand-struck line)
 - T80: R522 retired (removed with ChunkTexter; converted from a hand-struck line)
 - T81: R523 retired (removed with ChunkTexter; converted from a hand-struck line)
+- T82: R265 retired by R734 (2026-10-26 TxnHolder is bucket-based: Bucket() accessor, bucketWrap)
+- T83: R267 retired by R734 (2026-10-26 TxnHolder is bucket-based: bucketWrap replaced txnWrap)
+- T84: R663 retired by R734 (2026-10-26 TxnHolder accessor is Bucket(), not Tx(); bucketWrap, not txnWrap)
+- T85: R252 retired by R735 (2026-10-26 encode/decode is MarshalValue + UnmarshalXValue on C/F/T/W; migration 001's planned R252->R668 pairing was never applied and was wrong)
+- T86: R248 retired (2026-10-26 HRecord deleted: dead exported type, never marshalled)

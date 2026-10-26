@@ -214,19 +214,19 @@
 **Purpose:** record struct encode/decode
 **Input:** create a CRecord with known trigrams, tokens, attrs, fileids, marshal, unmarshal
 **Expected:** all fields match after roundtrip
-**Refs:** crc-DB.md, R244, R252
+**Refs:** crc-DB.md, R244, R735
 
 ## Test: FRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode
 **Input:** create an FRecord with known metadata, names, chunks, token bag, marshal, unmarshal
 **Expected:** all fields match after roundtrip
-**Refs:** crc-DB.md, R245, R252
+**Refs:** crc-DB.md, R245, R735
 
 ## Test: TRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode with varint chunkids
 **Input:** create a TRecord with known chunkids, marshal, unmarshal
 **Expected:** all chunkids match after roundtrip
-**Refs:** crc-DB.md, R246, R252
+**Refs:** crc-DB.md, R246, R735
 
 ## Test: I record data-in-key pattern
 **Purpose:** settings stored as individual records

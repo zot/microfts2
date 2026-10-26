@@ -121,23 +121,25 @@
 
 - **R95:** ~~removed: FileInfo struct replaced by FRecord~~
 - **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
-- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []uint64`
-- **R245:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
+- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []FileIDCount` — `FileIDCount` is `{FileID uint64, Count uint64}`, the refcounted per-fileid occurrence count (R595)
+- **R245:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
 - **R246:** `TRecord` struct: `Trigram uint32, ChunkIDs []uint64`
 - **R247:** `WRecord` struct: `TokenHash uint32, ChunkIDs []uint64`
-- **R248:** `HRecord` struct: `Hash [32]byte, ChunkID uint64`
+- **~~R248:~~** (Retired T86 — no replacement) `HRecord` struct: `Hash [32]byte, ChunkID uint64`
 - **R249:** `TrigramEntry` struct: `Trigram uint32, Count int`
 - **R250:** `TokenEntry` struct: `Token string, Count int`
-- **R251:** `FileChunkEntry` struct: `ChunkID uint64, Location string`
-- **R252:** Each record struct has `Marshal` and `Unmarshal` methods for byte encode/decode
+- **R251:** `FileChunkEntry` struct: `ChunkID uint64, Location string, Locator []byte` (R592)
+- **~~R252:~~** (Retired T85 — see R735) Each record struct has `Marshal` and `Unmarshal` methods for byte encode/decode
+- **R735:** `CRecord`, `FRecord`, `TRecord` and `WRecord` each encode their value with a `MarshalValue() []byte` method and decode with a package function: `UnmarshalCValue` and `UnmarshalFValue` return the struct, `UnmarshalTValue` and `UnmarshalWValue` return the chunkid list. The H record (content hash → chunkid varint) has no struct; it is read and written in place
 
 ## Feature: TxnHolder Interface
 **Source:** specs/storage.md
 
 - **~~R264:~~** (Retired T57 — see R663) `TxnHolder` interface: `Txn() *lmdb.Txn` — any value carrying an LMDB transaction
-- **R265:** CRecord implements `TxnHolder` via its `Tx()` accessor; internal DB methods accept `TxnHolder` instead of raw `*bbolt.Tx`
+- **~~R265:~~** (Retired T82 — see R734) CRecord implements `TxnHolder` via its `Tx()` accessor; internal DB methods accept `TxnHolder` instead of raw `*bbolt.Tx`
 - **R266:** `CRecord.FileRecord(fileid)` passes self as `TxnHolder` to internal read methods — no txn extraction needed
-- **R267:** (inferred) `txnWrap` struct wraps raw `*bbolt.Tx` from View/Update blocks into a `TxnHolder`
+- **~~R267:~~** (Retired T83 — see R734) (inferred) `txnWrap` struct wraps raw `*bbolt.Tx` from View/Update blocks into a `TxnHolder`
+- **R734:** `TxnHolder` interface: `Bucket() *bbolt.Bucket` — any value carrying the index's bucket; the transaction is reached through `bucket.Tx()`. `CRecord` implements it via `Bucket()` and offers `Tx() *bbolt.Tx` as a convenience; an unexported `bucketWrap` wraps a raw bucket from View/Update blocks; internal DB methods accept `TxnHolder` instead of a raw bucket
 - **~~R571:~~** (Retired T58 — see R664) `(db *DB) ReadCRecord(txn *lmdb.Txn, chunkID uint64) (CRecord, error)` — public power-user accessor; fetches a CRecord by chunkID within an existing txn and attaches db/txn to the returned record so `Txn()`, `DB()`, and `FileRecord(fileid)` work on the result
 
 ## Feature: Data-in-Key Pattern
@@ -1011,7 +1013,7 @@
 - **R660:** microfts2 binds `go.etcd.io/bbolt` (pure Go) instead of `github.com/bmatsuo/lmdb-go` (CGO); the package builds with `CGO_ENABLED=0`. The single-writer/multi-reader concurrency model is unchanged.
 - **R661:** microfts2 owns a single `*bbolt.DB` and exposes it via `func (db *DB) DB() *bbolt.DB` (replaces `Env() *lmdb.Env`, R91); the host process opens microfts2 first and shares this handle with other libraries in the same process.
 - **R662:** The single subdatabase (`Options.DBName`, default `fts`) becomes a bbolt bucket of the same name; a `bbolt.Tx` spans all buckets, so a host (ark) opening its own bucket in the same file shares one atomic transaction scope (the shared-env linchpin, preserved).
-- **R663:** `TxnHolder`'s accessor is `Tx() *bbolt.Tx` (replaces `Txn() *lmdb.Txn`, R264); `txnWrap` wraps a raw `*bbolt.Tx`, and `CRecord` carries `*bbolt.Tx` in its unexported field and `Tx()` accessor.
+- **~~R663:~~** (Retired T84 — see R734) `TxnHolder`'s accessor is `Tx() *bbolt.Tx` (replaces `Txn() *lmdb.Txn`, R264); `txnWrap` wraps a raw `*bbolt.Tx`, and `CRecord` carries `*bbolt.Tx` in its unexported field and `Tx()` accessor.
 - **R664:** `func (db *DB) ReadCRecord(tx *bbolt.Tx, chunkID uint64) (CRecord, error)` (replaces the `*lmdb.Txn` signature, R571); the returned CRecord attaches db/tx so `Tx()`, `DB()`, and `FileRecord()` work on the result.
 - **R665:** `RemoveCallback` and `ReindexCallback` carry `*bbolt.Tx` instead of `*lmdb.Txn`.
 - **R666:** `Options.MaxDBs` (R101) and `Options.MapSize` are removed — bbolt has no named-DB limit and grows the file automatically; `Options` retains `CaseInsensitive`, `Aliases`, and `DBName`.
