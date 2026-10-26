@@ -66,6 +66,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 
 - `N` [0-254] [name: str] -> empty — filename prefix chain key
 - `N` [255] [name: str] -> [[full-name: str] [fileid: varint]]... — final chain key; value has full filename + fileid
+  The key's name is the filename key (see filename-case.md): the path folded to upper case when the database was created with `CaseInsensitiveFilenames`, otherwise the path itself. The value's full name is always the path as given.
 
 - `T` [trigram: 3] -> [chunkid: varint]...
   Trigram inverted index. Value is a packed list of chunkids. Document frequency is free: value length / chunkid size. One entry per distinct trigram rather than one per trigram-chunk pair — the primary source of mmap reduction.

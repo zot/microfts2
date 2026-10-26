@@ -1,12 +1,14 @@
 # DB
-**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721, R726-735
+**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721, R726-739, R741-748
 
 Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records (I, H, C, F, N, T, W) are prefix-distinguished within that one bucket. Chunks are deduplicated by content hash. Provides the public library API.
 
 ## Knows
 - db: *bbolt.DB handle — owned; shared with the host process via DB() (R661)
 - bucketName: bbolt bucket name (single, default "fts") — the bucket is obtained from the txn per operation (R662, R667)
-- settings: loaded from I records (chunking strategies, caseInsensitive, aliases)
+- settings: loaded from I records (chunking strategies, caseInsensitive, aliases, caseInsensitiveFilenames — R736)
+- filename key: `FilenameKey(path)` folds the path with `strings.ToUpper` when settings.CaseInsensitiveFilenames is set, returns it unchanged otherwise, and never folds `tmp://` paths (R737, R738, R743). Every N key comes from it through the unexported `encodeFilename`/`finalKey` wrappers (R739); the stored spelling (F Names, final N value) is never folded (R741)
+- respelling: storePrepared first runs respell — on a folded final-key hit whose stored name differs from the given path, rewrite the final N value and F Names[0] (a fresh slice; the F-record cache shares the old one), commit, then refresh pathCache, drop the frecordCache entry, and return ErrAlreadyIndexed (R744, R746). An identical spelling falls through to addFileInTxn's guard and writes nothing (R747); with the option off the keys differ, so nothing is respelled (R748). Reindex respells by re-adding (R745)
 - trigrams: Trigrams instance configured from settings (case insensitivity, byte aliases)
 - chunkers: map[string]any — in-memory chunker strategies (each satisfies Chunker, FileChunker, or both)
 - Record structs: CRecord (with ContentLen), FRecord, TRecord, WRecord — MarshalValue / UnmarshalXValue encode/decode (R735); H record is a bare chunkid varint, no struct
@@ -22,7 +24,7 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - overlay: *Overlay — in-memory tmp:// document store (lazily created)
 - RecordStats: exported struct {Count, KeyBytes, ValueBytes int64} — per-prefix aggregate
 - pathCache: map[uint64]string — cached fileid→path mapping, lazily loaded, incrementally maintained
-- pathToID: map[string]uint64 — reverse cache, built alongside pathCache
+- pathToID: map[string]uint64 — reverse cache keyed by filename key (R742), built alongside pathCache
 - frecordCache: map[uint64]FRecord — opt-in per-batch FRecord cache, nil when inactive
 - ChunkCallback: exported type `func(chunkText string)` — observation callback for indexing
 - IndexOption: exported type `func(*indexConfig)` — functional option for indexing methods
@@ -45,7 +47,7 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - DB(): return the underlying *bbolt.DB for sharing in-process (R661). The host opens microfts2 first and passes this handle to other libraries (ark), which open their own bucket in the same file; a bbolt.Tx spans all buckets (R662)
 - internal helpers obtain the fts bucket from the txn (tx.Bucket) and operate on it; the former (TxnHolder, lmdb.DBI) pair collapses to a single *bbolt.Bucket (R667)
 - Version(): read "version" I record in a View txn, return (string, error)
-- AddFile(path, strategy, idxOpts): check for existing N records via FinalKey — return ErrAlreadyIndexed if present. Allocate fileid, create N/F records. Call Chunker.Chunks (yields Range+Content+Attrs per chunk). For each chunk: fire ChunkCallback with the chunk content if present (R473); compute the dedup hash (SHA-256 over Content, R656) and index trigrams/tokens from that same content (full-text — nothing stripped); check H record for dedup — if hit, add fileid to existing C record; if new, allocate chunkid, create H/C records (with the chunk's native Attrs). Identical content dedups to one chunkid; differing content gets distinct chunkids (R657). Batch T/W updates across all chunks. Update F record with chunk entries and token bag. Returns (fileid, error)
+- AddFile(path, strategy, idxOpts): check for existing N records via finalKey(path), the folded final key — return ErrAlreadyIndexed if present. Allocate fileid, create N/F records. Call Chunker.Chunks (yields Range+Content+Attrs per chunk). For each chunk: fire ChunkCallback with the chunk content if present (R473); compute the dedup hash (SHA-256 over Content, R656) and index trigrams/tokens from that same content (full-text — nothing stripped); check H record for dedup — if hit, add fileid to existing C record; if new, allocate chunkid, create H/C records (with the chunk's native Attrs). Identical content dedups to one chunkid; differing content gets distinct chunkids (R657). Batch T/W updates across all chunks. Update F record with chunk entries and token bag. Returns (fileid, error)
 - AddFileWithContent(path, strategy, idxOpts): like AddFile but also returns the raw file content. Returns (fileid, []byte, error)
 - ErrAlreadyIndexed: sentinel error — caller checks with errors.Is and uses Reindex or AppendChunks instead
 - RemoveFile(path): read F record to get chunk list, for each chunkid: read C record, remove fileid — if no fileids remain, delete C/H records and remove chunkid from T/W records. Delete F and N records

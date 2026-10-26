@@ -52,6 +52,7 @@ FuncChunker: adapter that wraps a ChunkFunc into a Chunker
 
 Options:
 - CaseInsensitive, Aliases — creation-time only
+- CaseInsensitiveFilenames — creation-time only; paths differing only in case are one file (see filename-case.md)
 - DBName — bucket name, default "fts"
 - Timeout — bounds how long Open/Create waits for the bbolt file lock
   before returning bbolt.ErrTimeout; zero blocks until the lock frees
@@ -269,7 +270,7 @@ Opens a read transaction, iterates every key in the subdatabase, and accumulates
 func (db *DB) FileIDPaths() (map[uint64]string, error)
 ```
 
-Lazily loaded, incrementally maintained caches. First call scans F records using `UnmarshalFHeader` to populate both `pathCache` (fileid→path) and `pathToID` (path→fileid). Subsequent calls return directly from cache. AddFile, RemoveFile, and Reindex update both caches after their index writes succeed. `lookupFileByPath` uses `pathToID` to skip the N record lookup when the cache is populated. Since microfts2 owns its bucket (the bucket name is fixed and the handle is unexported), no external writes can invalidate the caches.
+Lazily loaded, incrementally maintained caches. First call scans F records using `UnmarshalFHeader` to populate both `pathCache` (fileid→path) and `pathToID` (filename key→fileid; see filename-case.md). Subsequent calls return directly from cache. AddFile, RemoveFile, and Reindex update both caches after their index writes succeed. `lookupFileByPath` uses `pathToID` to skip the N record lookup when the cache is populated. Since microfts2 owns its bucket (the bucket name is fixed and the handle is unexported), no external writes can invalidate the caches.
 
 ## Partial F Record Unmarshal
 

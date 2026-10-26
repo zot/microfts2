@@ -36,6 +36,8 @@ then open only the specs it points you to.
   reindex callbacks; the two-phase compute/store split for off-actor indexing,
   and its per-chunk split/prepare/assemble decomposition for preemptible,
   hash-reusable compute.
+- [`filename-case.md`](filename-case.md) — case-insensitive filenames: the
+  `CaseInsensitiveFilenames` creation option, folded N keys, `FilenameKey`.
 - [`append.md`](append.md) — `AppendChunks`, the `AppendAwareChunker`
   interface, chunker offset support, the `ErrAppendBoundary` guard, the
   two-phase append split, and its per-chunk decomposition.

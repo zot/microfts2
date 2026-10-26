@@ -59,6 +59,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - [x] test-IndentChunker.md → `indent_chunker_test.go`
 - [x] test-ChunkCache.md → `cache_test.go`
 - [x] test-KeyChain.md → `keychain_test.go`
+- [x] test-FilenameCase.md → `filename_case_test.go`
 
 ## Gaps
 
@@ -173,3 +174,4 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T85: R252 retired by R735 (2026-10-26 encode/decode is MarshalValue + UnmarshalXValue on C/F/T/W; migration 001's planned R252->R668 pairing was never applied and was wrong)
 - T86: R248 retired (2026-10-26 HRecord deleted: dead exported type, never marshalled)
 - [ ] C1: LangByName (bracket_chunker.go) is exported and backs the CLI's -lang flag, but no spec, requirement or CRC card describes it — R321 names only the package-level Lang* variables
+- [ ] O21: FinalKey for a name longer than 509 bytes keys only on the last segment (keychain.go:FinalKey), so two long paths sharing their tail collide on one final N key: the second AddFile returns ErrAlreadyIndexed and a lookup can resolve to the other file. Unverified by test; found 2026-10-26 by reading while carving casefold. bbolt allows 32 KB keys, so dropping the chain would also fix it

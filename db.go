@@ -71,9 +71,11 @@ type DB struct {
 
 // Settings holds the in-memory representation of I records.
 type Settings struct {
-	CaseInsensitive    bool
-	Aliases            map[byte]byte     // byte→byte alias mapping
-	ChunkingStrategies map[string]string // name→cmd (empty cmd = func strategy)
+	CaseInsensitive bool
+	// R736: persisted as the caseInsensitiveFilenames I record; absent means off
+	CaseInsensitiveFilenames bool
+	Aliases                  map[byte]byte     // byte→byte alias mapping
+	ChunkingStrategies       map[string]string // name→cmd (empty cmd = func strategy)
 }
 
 // SearchResult is a single match from Search.
@@ -531,8 +533,12 @@ type FileStatus struct {
 // Options configures database creation and opening. R666
 type Options struct {
 	CaseInsensitive bool
-	Aliases         map[byte]byte // maps input bytes to replacement bytes before trigram extraction
-	DBName          string        // subdatabase name, default "fts"
+	// CaseInsensitiveFilenames treats paths that differ only in case as one
+	// file. Creation-time, persisted.
+	// CRC: crc-DB.md | R736
+	CaseInsensitiveFilenames bool
+	Aliases                  map[byte]byte // maps input bytes to replacement bytes before trigram extraction
+	DBName                   string        // subdatabase name, default "fts"
 	// Timeout bounds how long Open/Create waits for the bbolt file lock
 	// before returning bbolt.ErrTimeout. Zero blocks until the lock is
 	// available (bbolt default). The index is single-process; a bounded
@@ -550,6 +556,15 @@ func (o *Options) dbNameOrDefault() string {
 
 // --- Key construction ---
 
+// nFinalValue encodes an N-255 record value: length-prefixed full name + fileid varint.
+// R741: the name is the path as given, never the filename key
+func nFinalValue(name string, fileid uint64) []byte {
+	v := make([]byte, 2*binary.MaxVarintLen64+len(name))
+	off := putString(v, name)
+	off += putUvarint(v[off:], fileid)
+	return v[:off]
+}
+
 // parseNFinalValue extracts the full filename and fileid from an N-255 record value.
 func parseNFinalValue(val []byte) (string, uint64) {
 	name, n := readString(val)
@@ -562,14 +577,14 @@ func parseNFinalValue(val []byte) (string, uint64) {
 func (db *DB) lookupFileByPath(th TxnHolder, fpath string) (uint64, FRecord, error) {
 	var fileid uint64
 	if db.pathToID != nil {
-		id, ok := db.pathToID[fpath]
+		id, ok := db.pathToID[db.FilenameKey(fpath)]
 		if !ok {
 			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
 		}
 		fileid = id
 	} else {
 		b := th.Bucket()
-		finalKey := FinalKey(fpath)
+		finalKey := db.finalKey(fpath)
 		val := b.Get(finalKey)
 		if val == nil {
 			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
@@ -582,6 +597,26 @@ func (db *DB) lookupFileByPath(th TxnHolder, fpath string) (uint64, FRecord, err
 	}
 	return fileid, frec, nil
 }
+
+// FilenameKey returns the key microfts2 uses to identify a file path: the
+// path folded to upper case when the database was created with
+// CaseInsensitiveFilenames, otherwise the path unchanged. tmp:// overlay
+// paths are never folded.
+// CRC: crc-DB.md | R737, R738, R743
+func (db *DB) FilenameKey(path string) string {
+	if !db.settings.CaseInsensitiveFilenames || isTmpPath(path) {
+		return path
+	}
+	return strings.ToUpper(path)
+}
+
+// encodeFilename returns the N key chain for path's filename key.
+// CRC: crc-DB.md | R739, R740
+func (db *DB) encodeFilename(path string) []KeyPair { return EncodeFilename(db.FilenameKey(path)) }
+
+// finalKey returns the final N key for path's filename key.
+// CRC: crc-DB.md | R739, R740
+func (db *DB) finalKey(path string) []byte { return FinalKey(db.FilenameKey(path)) }
 
 // lookupTrigramCounts reads T records for query trigrams and returns document frequencies.
 // DF is derived from the number of varint-encoded chunkids in the T record value.
@@ -934,6 +969,14 @@ func writeSettings(th TxnHolder, s *Settings) error {
 	if err := iPut(th, "caseInsensitive", ci); err != nil {
 		return err
 	}
+	// R736
+	cif := "false"
+	if s.CaseInsensitiveFilenames {
+		cif = "true"
+	}
+	if err := iPut(th, "caseInsensitiveFilenames", cif); err != nil {
+		return err
+	}
 	for from, to := range s.Aliases {
 		key := fmt.Sprintf("alias:%c", from)
 		if err := iPut(th, key, string([]byte{to})); err != nil {
@@ -970,6 +1013,8 @@ func loadSettings(th TxnHolder) (Settings, error) {
 		switch {
 		case name == "caseInsensitive":
 			s.CaseInsensitive = (value == "true")
+		case name == "caseInsensitiveFilenames": // R736
+			s.CaseInsensitiveFilenames = (value == "true")
 		case strings.HasPrefix(name, "alias:") && len(name) > 6:
 			if s.Aliases == nil {
 				s.Aliases = make(map[byte]byte)
@@ -1003,9 +1048,10 @@ func Create(path string, opts Options) (*DB, error) {
 	}
 
 	settings := Settings{
-		CaseInsensitive:    opts.CaseInsensitive,
-		Aliases:            opts.Aliases,
-		ChunkingStrategies: make(map[string]string),
+		CaseInsensitive:          opts.CaseInsensitive,
+		CaseInsensitiveFilenames: opts.CaseInsensitiveFilenames,
+		Aliases:                  opts.Aliases,
+		ChunkingStrategies:       make(map[string]string),
 	}
 
 	dbName := opts.dbNameOrDefault()
@@ -1313,7 +1359,7 @@ func (db *DB) loadPathCache() (map[uint64]string, error) {
 		db.pathCache = result
 		reverse := make(map[string]uint64, len(result))
 		for id, p := range result {
-			reverse[p] = id
+			reverse[db.FilenameKey(p)] = id // R742
 		}
 		db.pathToID = reverse
 	}
@@ -1683,14 +1729,19 @@ func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, 
 		return 0, errPreparedConsumed
 	}
 	var fileid uint64
+	var respelled bool
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(db.dbName))
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		th := bucketWrap{b}
-		pe := postingEdits{}
 		var txnErr error
+		// R746: commit the respelling; ErrAlreadyIndexed is returned after the txn
+		if fileid, respelled, txnErr = db.respell(th, p.fpath); txnErr != nil || respelled {
+			return txnErr
+		}
+		pe := postingEdits{}
 		fileid, _, txnErr = db.addFileInTxn(th, pe, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
 		if txnErr != nil {
 			return txnErr
@@ -1700,12 +1751,52 @@ func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, 
 	if err != nil {
 		return 0, err
 	}
+	if respelled {
+		// R744: the caches follow the new spelling
+		if db.pathCache != nil {
+			db.pathCache[fileid] = p.fpath
+		}
+		delete(db.frecordCache, fileid)
+		return 0, ErrAlreadyIndexed
+	}
 	p.consumed = true
 	if db.pathCache != nil {
 		db.pathCache[fileid] = p.fpath
-		db.pathToID[p.fpath] = fileid
+		db.pathToID[db.FilenameKey(p.fpath)] = fileid // R742
 	}
 	return fileid, nil
+}
+
+// respell updates the stored spelling of an existing file reached through a
+// different spelling of the same filename key, and reports its fileid and
+// whether it rewrote anything. An identical spelling, or a hit on a different
+// filename key, is left to addFileInTxn's duplicate guard.
+// CRC: crc-DB.md | R744, R746, R747, R748
+func (db *DB) respell(th TxnHolder, fpath string) (uint64, bool, error) {
+	b := th.Bucket()
+	finalKey := db.finalKey(fpath)
+	val := b.Get(finalKey)
+	if val == nil {
+		return 0, false, nil
+	}
+	name, fileid := parseNFinalValue(val)
+	if name == fpath || db.FilenameKey(name) != db.FilenameKey(fpath) {
+		return 0, false, nil
+	}
+	if err := b.Put(finalKey, nFinalValue(fpath, fileid)); err != nil {
+		return 0, false, err
+	}
+	frec, err := db.readFRecord(th, fileid)
+	if err != nil {
+		return 0, false, err
+	}
+	// A fresh slice: the F-record cache may share the old one.
+	names := []string{fpath}
+	if len(frec.Names) > 1 {
+		names = append(names, frec.Names[1:]...)
+	}
+	frec.Names = names
+	return fileid, true, b.Put(makeFKey(fileid), frec.MarshalValue())
 }
 
 // StorePrepared stores a prepared file as a fresh add on the write actor: one
@@ -1819,7 +1910,7 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64, ich IndexedChunkCallback) (uint64, []uint64, error) {
 	b := th.Bucket()
 	// Dedup guard: check for existing N records before allocating a fileid
-	finalKey := FinalKey(fpath)
+	finalKey := db.finalKey(fpath)
 	if existing := b.Get(finalKey); existing != nil {
 		return 0, nil, ErrAlreadyIndexed
 	}
@@ -1830,19 +1921,11 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 	}
 
 	// Write N records (filename key chain)
-	pairs := EncodeFilename(fpath)
-	fileidBuf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(fileidBuf, fileid)
+	pairs := db.encodeFilename(fpath)
 	for i, pair := range pairs {
 		val := []byte{}
 		if i == len(pairs)-1 {
-			// Final key value: length-prefixed full name + fileid varint
-			nameBytes := []byte(fpath)
-			v := make([]byte, binary.MaxVarintLen64+len(nameBytes)+n)
-			off := binary.PutUvarint(v, uint64(len(nameBytes)))
-			off += copy(v[off:], nameBytes)
-			off += copy(v[off:], fileidBuf[:n])
-			val = v[:off]
+			val = nFinalValue(fpath, fileid)
 		}
 		if err := b.Put(pair.Key, val); err != nil {
 			return 0, nil, err
@@ -1887,7 +1970,7 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 		FileLength:     fileLength,
 		Strategy:       strategy,
 		ChunkerVersion: db.chunkerVersion(strategy), // R716
-		Names:          []string{fpath},
+		Names:          []string{fpath},             // R741: stored as given
 		Chunks:         fileChunks,
 		Tokens:         tokenBagToEntries(fileBag),
 	}
@@ -1925,9 +2008,10 @@ func (db *DB) removeFileWithCallbackImpl(fpath string, fn RemoveCallback, rcb Re
 		return nil
 	})
 	if err == nil && db.pathToID != nil {
-		if id, ok := db.pathToID[fpath]; ok {
+		key := db.FilenameKey(fpath) // R742
+		if id, ok := db.pathToID[key]; ok {
 			delete(db.pathCache, id)
-			delete(db.pathToID, fpath)
+			delete(db.pathToID, key)
 		}
 	}
 	return err
@@ -2024,7 +2108,7 @@ func (db *DB) dropFromChunkRef(
 func (db *DB) deleteFileMeta(th TxnHolder, fileid uint64, fpath string) {
 	b := th.Bucket()
 	b.Delete(makeFKey(fileid))
-	for _, pair := range EncodeFilename(fpath) {
+	for _, pair := range db.encodeFilename(fpath) {
 		b.Delete(pair.Key)
 	}
 }
@@ -2146,6 +2230,7 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 		pe := postingEdits{} // the new chunks' additions and the orphans' removals, fused (R731)
 		var newChunkIDs []uint64
 		var txnErr error
+		// R745: re-adding under p.fpath stores the spelling given, so reindex respells
 		fileid, newChunkIDs, txnErr = db.addFileInTxn(th, pe, p.fpath, p.strategy, p.chunks, p.modTime, p.hash, p.fileLength, ich)
 		if txnErr != nil {
 			return txnErr
@@ -2169,11 +2254,12 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 	}
 	p.consumed = true
 	if db.pathToID != nil {
-		if oldID, ok := db.pathToID[p.fpath]; ok {
+		key := db.FilenameKey(p.fpath) // R742
+		if oldID, ok := db.pathToID[key]; ok {
 			delete(db.pathCache, oldID)
 		}
 		db.pathCache[fileid] = p.fpath
-		db.pathToID[p.fpath] = fileid
+		db.pathToID[key] = fileid
 	}
 	return fileid, nil
 }

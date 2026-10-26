@@ -1098,3 +1098,20 @@
 - **~~R723:~~** (Retired T72 — no replacement) In one write transaction the program refuses unless the bucket's `version` is `"2"`, rewrites every F record by inserting a zero `chunkerVersion` varint directly after the strategy string, and sets `version` to `"3"`; any failure leaves the database untouched.
 - **~~R724:~~** (Retired T73 — no replacement) A bucket already at version `"3"` is reported and left unchanged, with a successful exit.
 - **~~R725:~~** (Retired T74 — no replacement) The program reports the number of F records it rewrote.
+
+## Feature: Case-Insensitive Filenames
+**Source:** specs/filename-case.md
+
+- **R736:** `Options.CaseInsensitiveFilenames bool` is creation-time: `Create` writes it to the `I` record `caseInsensitiveFilenames` and `Open` reads it back; an absent record means off
+- **R737:** With the option on, a path's filename key is `strings.ToUpper(path)` over the whole path, extension included; with it off, the filename key is the path unchanged
+- **R738:** `func (db *DB) FilenameKey(path string) string` is exported as the one definition of the fold
+- **R739:** Every N key is computed from the filename key — the lookup, the duplicate guard, the N records written on add, and those deleted on removal
+- **R740:** `EncodeFilename`, `FinalKey` and `DecodeFilename` stay pure encoders of the string they are given; the database folds before calling them
+- **R741:** The stored spelling is not folded: `FRecord.Names` and the final N value keep the path as given
+- **R742:** The in-memory path→fileid cache (`pathToID`) is keyed by the filename key
+- **R743:** `tmp://` overlay paths do not fold
+- **R744:** A path-taking write that reaches an existing file through a spelling different from the stored one (same filename key) updates the stored spelling to the one given: `FRecord.Names[0]`, the final N value, and the path cache
+- **R745:** `Reindex` respells by removing the file's metadata and re-adding it under the path given
+- **R746:** `AddFile` reaching an existing file through a different spelling respells it and returns `ErrAlreadyIndexed`; chunks, fileid and staleness fields are untouched
+- **R747:** `AddFile` with the identical spelling writes nothing and returns `ErrAlreadyIndexed`
+- **R748:** Respelling requires the option: with it off, a different spelling is a different filename key, so no existing record is respelled
