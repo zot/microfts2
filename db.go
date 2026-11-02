@@ -3866,6 +3866,47 @@ func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
 	return frec, err
 }
 
+// FileSummary is what FileSummaries reports for one indexed file: the F
+// record's header fields and its chunk count, without the chunks themselves.
+// CRC: crc-DB.md | R749
+type FileSummary struct {
+	FileID     uint64
+	ModTime    int64
+	FileLength int64
+	Strategy   string
+	ChunkCount int
+}
+
+// FileSummaries reads every F record in one read transaction and decodes only
+// its header and chunk count, never the chunk entries or the token list. For
+// callers that need totals: decoding whole records, one transaction each,
+// cost ark's status about half a second per call on a 9,800-file index.
+// CRC: crc-DB.md | R749, R750
+func (db *DB) FileSummaries() ([]FileSummary, error) {
+	var out []FileSummary
+	err := db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		if b == nil {
+			return fmt.Errorf("bucket %q not found", db.dbName)
+		}
+		c := b.Cursor()
+		for k, v := c.Seek([]byte{prefixF}); k != nil && k[0] == prefixF; k, v = c.Next() {
+			id, n := readUvarint(k[1:])
+			if n <= 0 {
+				return fmt.Errorf("F record key %x: bad fileid", k)
+			}
+			sum, err := unmarshalFSummary(v)
+			if err != nil {
+				return fmt.Errorf("F record %d: %w", id, err)
+			}
+			sum.FileID = id
+			out = append(out, sum)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // SetFileLength rewrites only the FileLength field of a file's F
 // record. Intended for callers that need to advance the append
 // high-water mark without re-chunking — e.g. "checkpoint" operations

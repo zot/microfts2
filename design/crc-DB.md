@@ -1,5 +1,5 @@
 # DB
-**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721, R726-739, R741-748
+**Requirements:** R1, R2, R17, R20, R22-27, R29, R32, R33, R35, R37-42, R51-53, R55, R56, R63-69, R77-82, R84-88, R91-94, R96-99, R101, R103-107, R110-112, R115-122, R124, R125, R127-130, R132, R134-137, R139-144, R146, R147, R150-153, R156-168, R176, R178-191, R196-200, R202, R203, R206, R213-296, R298, R336-341, R343, R345, R346, R348, R358, R360, R361, R363-370, R374-378, R418-425, R427-432, R439, R442-464, R469-498, R500, R513-516, R520, R524-530, R546-562, R571, R592, R594-600, R604-606, R608, R609, R623-625, R655-657, R660-703, R705-707, R709, R710, R712, R715-721, R726-739, R741-750
 
 Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records (I, H, C, F, N, T, W) are prefix-distinguished within that one bucket. Chunks are deduplicated by content hash. Provides the public library API.
 
@@ -79,6 +79,7 @@ Main database handle. Owns a `*bbolt.DB` with a single named bucket. All records
 - AppendPrepared(fileid, p, opts): store phase for append — one Update txn: re-read the F record; when p.replacedLast, verify the committed last locator equals p's assumed locator, else ErrAppendTailMoved; then drop-and-replace + dedup + T/W + counters + F update. Returns error (R687, R688)
 - Fused wrappers: AddFile, AddFileWithContent, the Reindex family, and AppendChunks are now compute-then-store compositions (PrepareFile+StorePrepared, PrepareFile+ReindexPrepared, and — reading the current tail from the F record — PrepareAppend+AppendPrepared); observable behavior is unchanged for existing callers (R684, R689)
 - FileInfoByID(fileid): read F record for fileid, return FRecord. Wraps in a View txn
+- FileSummaries(): one View over the F prefix; per record unmarshalFSummary decodes the header and the chunk count only, giving FileSummary{FileID, ModTime, FileLength, Strategy, ChunkCount} (R749, R750)
 - ReadCRecord(tx *bbolt.Tx, chunkID): public power-user accessor — fetch C record by chunkID inside caller's bbolt txn, attach db/bucket to result for Bucket()/Tx()/DB()/FileRecord navigation (R664)
 - ChunkContentLens(fileid): read F record chunk list, read each C record's ContentLen, return []int in chunk-list order. Single View txn. Overlay-aware (R500, R501)
 - CheckFile(path): stat + hash to determine fresh/stale/missing using F record metadata

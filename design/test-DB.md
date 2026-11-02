@@ -152,6 +152,7 @@
 **Expected:** "4-4" returns content "d\n" at index 3 (the positional match returned "e\n"); the window around "3-3" returns three results in F-record order — "2-2" with Missing set, empty content, index 1; "3-3" "c\n"; "4-4" "d\n"
 **Refs:** crc-DB.md, seq-chunks.md, R701, R702, R703
 **Code:** db_test.go
+**Alarm:** 1
 **Fire alarm:** restore the positional match in the streaming path (take the yielded chunk at the window's position instead of the one whose Range matches); red is "4-4" returning "e\n" and "2-2" carrying "c\n" instead of Missing
 **Inject:** db.go:windowMatcher.yield
 **Pulled:** 2026-10-24 — rang: "4-4" got "e\n"; the tmp test also red (shared matcher)
@@ -162,6 +163,7 @@
 **Expected:** three results; "2-2" has Missing set and empty content; "3-3" and "4-4" carry "c\n" and "d\n"
 **Refs:** crc-ChunkCache.md, seq-chunker-dispatch.md, R702
 **Code:** db_test.go
+**Alarm:** 2
 **Fire alarm:** put back the `continue` on a byRange miss in ChunkCache.GetChunks; red is two results instead of three
 **Inject:** cache.go:ChunkCache.GetChunks
 **Pulled:** 2026-10-24 — rang: expected 3 chunks, got 2
@@ -172,6 +174,7 @@
 **Expected:** on both, the first result is Missing with Attrs `text=DROP`
 **Refs:** crc-DB.md, crc-ChunkCache.md, R702
 **Code:** db_test.go
+**Alarm:** 3
 **Fire alarm:** clear Attrs on the Missing result (DB), or omit streamAttrs from the cache's Missing result; red is "missing chunk should carry its stored attrs", got []
 **Inject:** db.go:windowMatcher.results, cache.go:ChunkCache.GetChunks
 **Pulled:** 2026-10-24 — rang on both sites
@@ -182,6 +185,7 @@
 **Expected:** exactly 2 yields
 **Refs:** crc-DB.md, seq-chunks.md, R701
 **Code:** db_test.go
+**Alarm:** 4
 **Fire alarm:** make windowMatcher.yield always return true; red is 5 yields instead of 2
 **Inject:** db.go:windowMatcher.yield
 **Pulled:** 2026-10-24 — rang: got 5
@@ -423,6 +427,7 @@
 **Expected:** identical RecordCounts per prefix and identical search results
 **Refs:** crc-DB.md, seq-prepare-store.md#1, seq-prepare-store.md#2, R676, R680, R684
 **Code:** db_test.go
+**Alarm:** 5
 **Fire alarm:** in StorePrepared, drop the last prepared chunk before addFileInTxn — the split DB has one fewer C/F chunk than the AddFile DB and the RecordCounts comparison goes red
 **Inject:** db.go:StorePrepared
 **Pulled:** 2026-09-17 — rang (AddFile=[45 393 585] vs split=[32 312 457])
@@ -440,6 +445,7 @@
 **Expected:** RecordCounts is unchanged across the PrepareFile call — no fileid allocated, no records written
 **Refs:** crc-DB.md, seq-prepare-store.md#1, R678
 **Code:** db_test.go
+**Alarm:** 6
 **Fire alarm:** make PrepareFile allocate a fileid or write the N chain (a stray write) — the post-call RecordCounts differ and the assertion goes red
 **Inject:** db.go:PrepareFile
 **Pulled:** 2026-09-17 — rang (RecordCounts 22→23 after PrepareFile)
@@ -450,6 +456,7 @@
 **Expected:** line 2's chunkid is unchanged (dedup hit under the fresh fileid); line 1's old chunk orphan-cascades; line 1's new content gets a fresh chunkid
 **Refs:** crc-DB.md, seq-prepare-store.md#3, R681, R682, R673
 **Code:** db_test.go
+**Alarm:** 7
 **Fire alarm:** reverse the R673 order in reindexPrepared — drop the old fileid's occurrences before storing the new chunks — so an unchanged line's chunk loses its last reference and orphans before the re-add, forcing a fresh chunkid; the chunkid-stability assertion goes red
 **Inject:** db.go:reindexPrepared
 **Pulled:** 2026-10-25 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6); first pulled 2026-09-17
@@ -467,6 +474,7 @@
 **Expected:** AppendPrepared returns ErrAppendTailMoved (errors.Is); the F record is left intact — the stale drop-and-replace is not applied
 **Refs:** crc-DB.md, seq-prepare-store.md#5, R688
 **Code:** db_test.go
+**Alarm:** 8
 **Fire alarm:** defeat the last-locator comparison in appendPrepared (guard it with `if false`, build-safe) — the stale append is applied against the moved tail; the errors.Is(ErrAppendTailMoved) assertion goes red (nil error)
 **Inject:** db.go:appendPrepared
 **Pulled:** 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
@@ -477,6 +485,7 @@
 **Expected:** RecordCounts unchanged across the call
 **Refs:** crc-DB.md, seq-prepare-store.md#4, R685
 **Code:** db_test.go
+**Alarm:** 9
 **Fire alarm:** make PrepareAppend open a write txn and touch a counter — the post-call RecordCounts differ; assertion red
 **Inject:** db.go:PrepareAppend
 **Pulled:** 2026-09-18 — rang (RecordCounts 22→23 after an injected PrepareAppend write); re-pulled after PrepareAppend was restructured to delegate to SplitAppend (R700)
@@ -487,6 +496,7 @@
 **Expected:** the second store returns a non-nil error (handle already consumed); it does not write a second, malformed file
 **Refs:** crc-DB.md, seq-prepare-store.md#2, R679
 **Code:** db_test.go
+**Alarm:** 10
 **Fire alarm:** remove the consumed check in storePrepared — without it the second store hits ErrAlreadyIndexed (masking the guard), so the test asserts errors.Is(err, errPreparedConsumed) specifically and goes red on ErrAlreadyIndexed
 **Inject:** db.go:storePrepared
 **Pulled:** 2026-10-25 — rang (got "file already indexed", want errPreparedConsumed); first pulled 2026-09-17, when the test was strengthened to the specific sentinel
@@ -497,6 +507,7 @@
 **Expected:** every SplitChunk.Hash equals the independently computed sha256 of its Content
 **Refs:** crc-DB.md, seq-prepare-store.md#6, R690, R693
 **Code:** db_test.go
+**Alarm:** 11
 **Fire alarm:** in splitYield, hash the chunk's Range instead of its Content — the recomputed sha256(Content) no longer matches sc.Hash and the assertion goes red
 **Inject:** db.go:splitYield
 **Pulled:** 2026-09-17 — rang (chunk 2 Hash != sha256(Content))
@@ -507,6 +518,7 @@
 **Expected:** identical RecordCounts per prefix and identical search results
 **Refs:** crc-DB.md, seq-prepare-store.md#6, seq-prepare-store.md#8, R694, R695, R696, R699
 **Code:** db_test.go
+**Alarm:** 12
 **Fire alarm:** in the fused-only entriesFromSplits, drop the trailing entry — the fused PrepareFile then has one fewer chunk than the manual Split+PrepareChunk+AssembleFile path, so the RecordCounts/search comparison goes red. (Injecting into the shared AssembleFile moves both sides equally and does NOT ring.)
 **Inject:** db.go:entriesFromSplits
 **Pulled:** 2026-09-17 — rang (PrepareFile search empty vs manual path); verified this drop also rings TestSplitAppendAssembleEqualsPrepareAppend
@@ -517,6 +529,7 @@
 **Expected:** the shared content is found in both files at each file's correct Range; the shared chunk resolves to a single chunkid (dedup); each file's non-shared chunks index independently — reusing the grams did not transplant positions
 **Refs:** crc-DB.md, seq-prepare-store.md#6, R694, R698
 **Code:** db_test.go
+**Alarm:** 13
 **Fire alarm:** add a Range field to `*PreparedChunk` and have collectedFromEntries cache/read it instead of entry.Chunk.Range — the grams token reused across two files carries file A's position into file B, so B's shared chunk resolves to A's Range and the position assertion goes red
 **Inject:** db.go:collectedFromEntries, db.go:PreparedChunk
 **Pulled:** 2026-09-17 — rang (shared chunk missing in B: A=1 B=0)
@@ -527,6 +540,7 @@
 **Expected:** RecordCounts is unchanged across the calls — no fileid allocated, no records written
 **Refs:** crc-DB.md, seq-prepare-store.md#6, R690, R694
 **Code:** db_test.go
+**Alarm:** 14
 **Fire alarm:** make PrepareChunk open a bbolt Update txn and Put a per-chunk (content-keyed) record — the post-call RecordCounts differ and the assertion goes red. The injection MUST be content-keyed: AddFile now composes through PrepareChunk, so a fixed-key stray write lands during the setup AddFile (before the baseline snapshot) and is masked.
 **Inject:** db.go:PrepareChunk
 **Pulled:** 2026-09-17 — rang (content-keyed stray Put; RecordCounts 24->25)
@@ -537,6 +551,7 @@
 **Expected:** identical chunk lists, RecordCounts per prefix, and search results; both carry the same replacedLast into the store phase
 **Refs:** crc-DB.md, seq-prepare-store.md#7, R692, R697, R699
 **Code:** db_test.go
+**Alarm:** 15
 **Fire alarm:** in AssembleAppend, hardcode replacedLast=false — a prepared append that should replace the tail no longer does. Guarded by the replacedLast-exercising tests (TestAppendPreparedRefusesMovedTail plus the markdown/bracket append-aware tests), NOT by this equivalence test: the line strategy never sets replacedLast, and AssembleAppend is shared by both compared paths. This test's own chunk-count equivalence is guarded by the entriesFromSplits fused-path drop (verified).
 **Inject:** db.go:AssembleAppend
 **Pulled:** 2026-09-17 — rang (replacedLast=false -> TestAppendPreparedRefusesMovedTail + markdown/bracket object)
@@ -547,6 +562,7 @@
 **Expected:** with WithBaseLine(3) the two returned SplitChunk ranges are "4-4" and "5-5"; with no options they are "1-1" and "2-2" (so the option carries the offset); and after PrepareAppend+AppendPrepared the stored F-record chunk Locations are "4-4" and "5-5"
 **Refs:** crc-DB.md, seq-prepare-store.md#7, R700
 **Code:** db_test.go
+**Alarm:** 16
 **Fire alarm:** two injections, each turns a "4-4" assertion red. (a) revert SplitAppend to drop its opts — `db.splitAppend(path, lastLocator, content, strategy, nil, 0)` — so the split ignores WithBaseLine and ranges come back "1-1"/"2-2". (b) drop the `opts...` forwarding in PrepareAppend's `db.SplitAppend(path, lastLocator, content, strategy)` call — the stored F-record ranges regress to "1-1"/"2-2" while recordSig equivalence stays green
 **Inject:** db.go:SplitAppend, db.go:PrepareAppend
 **Pulled:** 2026-09-18 — rang: (a) SplitAppend opts dropped -> split ranges and stored ranges both 1-1/2-2 (three assertions red); (b) PrepareAppend opts... forwarding dropped -> stored ranges 1-1/2-2 red while the SplitAppend-direct assertions stayed green, confirming the forwarding seam is guarded independently
@@ -557,6 +573,7 @@
 **Expected:** exactly one result, the in-scope file (the post-cut restriction returned none)
 **Refs:** crc-DB.md, seq-fuzzy-trigram.md, R706, R707
 **Code:** db_test.go
+**Alarm:** 17
 **Fire alarm:** skip Phase-1 admission for disk chunks (admit every tally entry), restoring the post-cut restriction; red is zero results
 **Inject:** db.go:DB.SearchFuzzy
 **Pulled:** 2026-10-24 — rang: got []
@@ -567,6 +584,7 @@
 **Expected:** exactly one result, the in-scope file
 **Refs:** crc-DB.md, seq-fuzzy-trigram.md, R706, R707
 **Code:** db_test.go
+**Alarm:** 18
 **Fire alarm:** same injection as the WithOnly test; red is zero results
 **Inject:** db.go:DB.SearchFuzzy
 **Pulled:** 2026-10-24 — rang: got []
@@ -577,6 +595,7 @@
 **Expected:** one result, for B
 **Refs:** crc-DB.md, R705, R707
 **Code:** db_test.go
+**Alarm:** 19
 **Fire alarm:** make admitDisk reject every chunk in an excepted file's chunk list without reading its C record; red is zero results
 **Inject:** db.go:fileRestriction.admitDisk
 **Pulled:** 2026-10-24 — rang: got []
@@ -587,6 +606,7 @@
 **Expected:** results include tmp://s/doc 1-1 and the disk file
 **Refs:** crc-DB.md, crc-Overlay.md, seq-fuzzy-trigram.md, R709
 **Code:** db_test.go
+**Alarm:** 20
 **Fire alarm:** drop the overlay winners in Phase 2 (resolve disk winners only), the behavior before this change; red is no tmp://s/doc result
 **Inject:** db.go:DB.SearchFuzzy
 **Pulled:** 2026-10-24 — rang: disk.txt only
@@ -597,6 +617,7 @@
 **Expected:** exactly one result, the in-scope tmp doc
 **Refs:** crc-Overlay.md, seq-fuzzy-trigram.md, R708
 **Code:** db_test.go
+**Alarm:** 21
 **Fire alarm:** make overlay.admitLocked return true; red is zero results
 **Inject:** overlay.go:overlay.admitLocked
 **Pulled:** 2026-10-24 — rang: got []
@@ -607,6 +628,7 @@
 **Expected:** exactly one result, the in-scope file
 **Refs:** crc-DB.md, seq-fuzzy-trigram.md, R707
 **Code:** db_test.go
+**Alarm:** 22
 **Fire alarm:** build onlyChunks from every WithOnly file, ignoring WithExcept; red is zero results (found by probing past the list: Phase 2 still filters, so nothing else objects)
 **Inject:** db.go:searchConfig.newFileRestriction
 **Pulled:** 2026-10-24 — rang: got []
@@ -617,6 +639,7 @@
 **Expected:** exact: line 2 only (line 1 is the trigram false positive verify removes); loose: both lines; fuzzy: line 2 found; SearchMulti loose: both lines
 **Refs:** crc-DB.md, seq-search.md, seq-search-multi.md, R124, R710, R424
 **Code:** db_test.go
+**Alarm:** 23
 **Fire alarm:** drop the loose guard on verify in Search or in SearchMulti, or restore verify in SearchFuzzy; red is the loose case returning no lines, or fuzzy returning nothing
 **Inject:** db.go:DB.Search, db.go:DB.SearchFuzzy, db.go:DB.SearchMulti
 **Pulled:** 2026-10-24 — rang at all three sites (SearchMulti found by probing past the list: no test reached it)
@@ -627,6 +650,7 @@
 **Expected:** FileInfoByID ChunkerVersion is 3, 0, 3 (after append), 3 (prepared store)
 **Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R717
 **Code:** db_test.go
+**Alarm:** 24
 **Fire alarm:** stop stamping in addFileInTxn; red is version 0 where 3 was expected
 **Inject:** db.go:DB.addFileInTxn
 **Pulled:** 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
@@ -637,6 +661,7 @@
 **Expected:** fresh before the bump; stale after it from CheckFile and StaleFiles though the file is untouched; RefreshStale refreshes it; then fresh with ChunkerVersion 2. A lowered version (2 → 1) is stale too
 **Refs:** crc-DB.md, seq-stale.md, R719
 **Code:** db_test.go
+**Alarm:** 25
 **Fire alarm:** move the chunker-version check after the mod-time shortcut in classifyFile; red is "fresh" after the bump
 **Inject:** db.go:DB.classifyFile
 **Pulled:** 2026-10-25 — rang: after bump CheckFile fresh, want stale
@@ -647,6 +672,7 @@
 **Expected:** errors.Is(err, ErrChunkerVersionStale) for both; F record unchanged (same chunks)
 **Refs:** crc-DB.md, seq-prepare-store.md, R727
 **Code:** db_test.go
+**Alarm:** 26
 **Fire alarm:** remove the chunkerStale check from appendPrepared; red is a nil error and an extra chunk
 **Inject:** db.go:DB.appendPrepared
 **Pulled:** 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
@@ -657,6 +683,7 @@
 **Expected:** errors.Is(err, ErrChunkerVersionStale) for both; the F record's FileLength is unchanged
 **Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R727
 **Code:** db_test.go
+**Alarm:** 27
 **Fire alarm:** restore the early return in appendPrepared for an append with no chunks and no replace; red is a nil error
 **Inject:** db.go:DB.appendPrepared
 **Pulled:** 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
@@ -667,6 +694,7 @@
 **Expected:** nil error; chunk list unchanged; FileLength, ContentHash and ModTime equal the new values; CheckFile reports fresh
 **Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R726, R728
 **Code:** db_test.go
+**Alarm:** 28
 **Fire alarm:** skip the F record metadata update when the append has no chunks; red is the old FileLength and CheckFile stale
 **Inject:** db.go:DB.appendPrepared
 **Pulled:** 2026-10-25 — rang: F record not moved forward, length 11 want 21
@@ -677,6 +705,7 @@
 **Expected:** Open errors and the error names "2"; a fresh Create reports Version() "3"
 **Refs:** crc-DB.md, R718, R721
 **Code:** db_test.go
+**Alarm:** 29
 **Fire alarm:** delete the version check in Open; red is Open succeeding
 **Inject:** db.go:Open
 **Pulled:** 2026-10-25 — rang: Open accepted format version 2
@@ -687,6 +716,7 @@
 **Expected:** status missing; RefreshStale returns no error
 **Refs:** crc-DB.md, seq-stale.md, R719
 **Code:** db_test.go
+**Alarm:** 30
 **Fire alarm:** move the chunkerStale check above the os.Stat in classifyFile; red is "stale" (found by probing past the list after simplification: the suite stayed green)
 **Inject:** db.go:DB.classifyFile
 **Pulled:** 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
@@ -697,6 +727,7 @@
 **Expected:** 5, 7, 70000, 9; the all-removed case yields an empty value
 **Refs:** crc-DB.md, seq-prepare-store.md, R731, R732
 **Code:** db_test.go
+**Alarm:** 31
 **Fire alarm:** append the additions before copying the survivors; red is 9 listed first
 **Inject:** db.go:rewritePostings
 **Pulled:** 2026-10-25 — rang: rewritePostings = [9 5 7 70000], want [5 7 70000 9]
@@ -707,6 +738,7 @@
 **Expected:** no key written more than once; a search for an old line's text finds nothing, a new line's text finds its chunk, "common" finds all twelve new chunks
 **Refs:** crc-DB.md, seq-prepare-store.md, R729, R730, R731
 **Code:** db_test.go
+**Alarm:** 32
 **Fire alarm:** apply the posting edits from inside cascadeOrphan, once per orphan (the per-chunk rewrite ark profiled); red is a key written more than once
 **Inject:** db.go:DB.cascadeOrphan
 **Pulled:** 2026-10-25 — rang: T records written 2 times, want once
@@ -717,6 +749,7 @@
 **Expected:** no key written more than once; "common" still finds the second file's chunk
 **Refs:** crc-DB.md, R729, R730
 **Code:** db_test.go
+**Alarm:** 33
 **Fire alarm:** apply the posting edits inside dropFileChunkOccurrences' loop, after each chunk; red is a key written more than once
 **Inject:** db.go:DB.dropFileChunkOccurrences
 **Pulled:** 2026-10-25 — rang: T records written 10 and 12 times, want once
@@ -727,6 +760,7 @@
 **Expected:** no key written more than once; "alpha" finds nothing, "beta" finds the new chunk
 **Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R729, R731
 **Code:** db_test.go
+**Alarm:** 34
 **Fire alarm:** apply the posting edits after the drop and again after the new chunks; red is the "sha"/"har" keys written twice
 **Inject:** db.go:DB.appendPrepared
 **Pulled:** 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
@@ -737,6 +771,7 @@
 **Expected:** the orphan is absent from "alp" (record deleted); the new chunkid is present in "ome"
 **Refs:** crc-DB.md, seq-prepare-store.md, R733
 **Code:** db_test.go
+**Alarm:** 35
 **Fire alarm:** fire rcb before applying the posting edits in reindexPrepared; red is the orphan still listed under "alp"
 **Inject:** db.go:DB.reindexPrepared
 **Pulled:** 2026-10-25 — rang: callback saw orphan 1 still listed, new chunk 2 not listed
@@ -747,6 +782,19 @@
 **Expected:** six orphans, not ascending; no T/W record lists any of them
 **Refs:** crc-DB.md, R732
 **Code:** db_test.go
+**Alarm:** 36
 **Fire alarm:** drop slices.Sort(e.del) in applyPostings; red is orphans still listed (found by probing past the list after simplification: the suite stayed green)
 **Inject:** db.go:DB.applyPostings
 **Pulled:** 2026-10-25 — rang: orphans 6, 5, 4 still listed in a T/W record
+
+## Test: file summaries match the full records
+**Purpose:** FileSummaries reports for every file the same chunk count, length, strategy and mod time as FileInfoByID, while decoding only the header and the count.
+**Input:** three files of 3, 1 and 5 lines indexed with the line strategy.
+**Expected:** three summaries, each equal to its FileInfoByID record on all four fields, none with zero chunks.
+**Refs:** crc-DB.md
+**Code:** db_test.go
+**Alarm:** 37
+**Fire alarm:** report the name count as the chunk count, the shape of reading the wrong field after the header; every summary disagrees with FileInfoByID on chunks and the test goes red naming the file.
+**Inject:** records.go:unmarshalFSummary
+@alarm-hash: c86793b2879ca5b4
+**Pulled:** 2026-11-02 — rang — chunk count taken from the name count (with `_ = nChunks` so it builds; a first injection left nChunks unused, failed to build, and was discarded): "file N: summary {… ChunkCount:1 …}, FileInfoByID chunks=3"; restored clean

@@ -527,6 +527,21 @@ func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	return f, off, nil
 }
 
+// unmarshalFSummary decodes an F value's header and chunk count, stopping
+// before the chunk entries and tokens.
+// CRC: crc-DB.md | R750
+func unmarshalFSummary(data []byte) (FileSummary, error) {
+	f, off, err := unmarshalFHeader(data)
+	if err != nil {
+		return FileSummary{}, err
+	}
+	nChunks, n := readUvarint(data[off:])
+	if n <= 0 {
+		return FileSummary{}, fmt.Errorf("FRecord: bad chunkcount")
+	}
+	return FileSummary{ModTime: f.ModTime, FileLength: f.FileLength, Strategy: f.Strategy, ChunkCount: int(nChunks)}, nil
+}
+
 // UnmarshalFValue decodes an FRecord value. FileID must be set separately (from key).
 // CRC: crc-DB.md | R592, R735
 func UnmarshalFValue(data []byte) (FRecord, error) {

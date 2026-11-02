@@ -18,6 +18,7 @@ func (db *DB) Reindex(fpath, strategy string) (uint64, error)
 func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) FileInfoByID(fileid uint64) (FRecord, error)
+func (db *DB) FileSummaries() ([]FileSummary, error)
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error
 
 // Search
@@ -214,6 +215,26 @@ bbolt has no named-DB limit, so there is nothing to pre-size. microfts2 uses one
 ## FileInfo lookup
 
 `FileInfoByID(fileid)` resolves a fileid to its `FRecord`. microvec search returns `(fileid, chunknum, score)` — the CLI needs to resolve these to human-readable output using this method. Wraps the F record read in a read transaction.
+
+`FileSummaries()` returns one summary per indexed file, for callers that need
+totals rather than chunks:
+
+```go
+type FileSummary struct {
+    FileID     uint64
+    ModTime    int64
+    FileLength int64
+    Strategy   string
+    ChunkCount int
+}
+```
+
+It reads every F record in one read transaction and decodes only the header
+and the chunk count, never the chunk locations or the token list. Ark's
+`status` needed only these fields and was decoding whole records, one read
+transaction each: on a 9,800-file index that took about half a second per
+call, nearly all of it decoding (measured 2026-11-02). A record that fails to
+decode is an error.
 
 ## Scoring
 

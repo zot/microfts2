@@ -4631,3 +4631,42 @@ func TestRemoveOutOfOrderChunkIDsClearsPostings(t *testing.T) {
 		return nil
 	})
 }
+
+// Test: test-DB.md | CRC: crc-DB.md | R749, R750
+func TestFileSummariesMatchFileInfo(t *testing.T) {
+	db, dir := testDB(t)
+	contents := map[string]string{
+		"a.txt": "one\ntwo\nthree\n",
+		"b.txt": "alpha\n",
+		"c.txt": "x\ny\nz\nw\nv\n",
+	}
+	for name, body := range contents {
+		fp := filepath.Join(dir, name)
+		if err := os.WriteFile(fp, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AddFile(fp, "line"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sums, err := db.FileSummaries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != len(contents) {
+		t.Fatalf("%d summaries, want %d", len(sums), len(contents))
+	}
+	for _, s := range sums {
+		f, err := db.FileInfoByID(s.FileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.ChunkCount != len(f.Chunks) || s.FileLength != f.FileLength || s.Strategy != f.Strategy || s.ModTime != f.ModTime {
+			t.Errorf("file %d: summary %+v, FileInfoByID chunks=%d length=%d strategy=%q modtime=%d",
+				s.FileID, s, len(f.Chunks), f.FileLength, f.Strategy, f.ModTime)
+		}
+		if s.ChunkCount == 0 {
+			t.Errorf("file %d: zero chunks, the fixture gives every file at least one", s.FileID)
+		}
+	}
+}

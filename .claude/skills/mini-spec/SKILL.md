@@ -13,7 +13,7 @@ description: "**MANDATORY: Invoke BEFORE writing or modifying any code.** Withou
 
 **First**, run `~/.claude/bin/minispec check-version` to verify the tool is installed and matches this skill's version. If it fails, warn the user: the tool and skill must be the same version or there will be compatibility issues.
 
-**Then**, run `~/.claude/bin/minispec query comment-patterns` to learn the recognized comment patterns for traceability comments in code files.
+**Then**, run `~/.claude/bin/minispec query comment-patterns` to learn how to write a traceability comment in each extension, closers included.
 
 ## MANDATORY: Create Tasks First
 
@@ -171,6 +171,38 @@ is blind to what it swallowed. Measured 2026-09-05 on this repository's done fil
 read where 58 existed, nothing said. **For `design/` and `specs/` the rule is still one you
 remember** — the design-document readers do not report an unclosed run yet (gap `O22`); on
 `old-sdom` they did, after one unclosed run hid 78 of 115 gap entries for a day.
+
+### Backquote markdown specials — or the reader skips the line
+
+**Any glob, path, pattern or code expression holding `*`, `_` or `\` goes in backticks — not
+double quotes, not bare — in every markdown file the tool reads: `specs/`, `design/`, both
+queue files, the current file, and every carve.** A quoted `"src/**"` begins with what the
+reader takes for a `**Label:**` marker, a lone `*` pairs with a later one into italics, and
+in the design-document readers a backslash path outside backticks does the same harm; the
+reader skips such a line without a word. Measured 2026-10-26 on ark's
+`design/test-Matcher.md`: 13 lines not read, every one of them a line like these, and none
+after backquoting. Leave bare what the tool parses as a value (`**Code:**`, `**Inject:**`,
+`**Refs:**`) and bold you meant. Inside backticks no escape processing happens, so a
+markdown-escaped `"file\\*name"` becomes `` `file\*name` ``.
+
+The trajectory and carve readers skip the same lines. Measured 2026-10-26 by injecting each
+shape into a copy of this repository's pending, current and done files and `carves/sdom.md`:
+the glob and the lone `*` each cost a line in all four, the backslash path cost nothing
+there — backquote it anyway, one rule for every file. The lone `*` left `validate trajectory`
+passing. The glob, in the carve's status block, took the real part line after it too, and
+the run failed only as an **orphan**: the done entry claiming that part was reported as the
+defect, while the line that ate the part went unnamed.
+
+**The tool now refuses these lines rather than skipping them.** Outside code spans, fences and
+HTML comments, a `*`, `**`, `_` or `__` run is allowed only as bold or italics, and a
+backslash not at all: `validate` holds `specs/` and `design/` to it, `validate trajectory` the
+trajectory files and every carve, and each prose verb (`add-item`, `start`, `finish`,
+`pulled`, `add-gap`, `retire`, `add-req`) refuses a payload before writing. A refusal is a
+block per line naming `file:line`, a caret under each run, the reason, and a fix line with the
+literal already backquoted — at most 20 a run, so fix them and run again until it is clean. An
+intraword `_` (`search_exclude`) is plain text and passes. The rule is
+specified in the mini-spec tool's `specs/markdown-delimiters.md`; the unread notes of both
+validators name each line too.
 
 ### Prose reaches the tool through a file — and the tool enforces it where it can
 
@@ -406,46 +438,42 @@ add(data): Item {
 
 The third `| Rn, Rn` section is optional but recommended — it links specific code locations directly to requirements, enabling implementation coverage validation.
 
-**What counts as an inline `Rn` ref (v2.10.0+).** `minispec validate`
-harvests implementation refs from two comment shapes:
+**What counts as an inline `Rn` ref.** `minispec validate` reads every
+code file in the Artifacts manifest through its **language table** and counts the refs of
+every **traceability comment**: a comment whose whole interior is `|`-separated fields —
+`CRC:`, `Seq:`, `Test:` and a requirement list, each at most once, in any order — then an
+optional description after `--`, `—`, `:`, or a `.` directly after the requirement list.
+So all of these count:
 
-1. **The tail of a `// CRC:` line** — `// CRC: <card> | Seq: <seq> | R5, R12`.
-   The parser is `<comment-prefix>CRC:\s*<card>(\| Seq: <seq>)?<rest>`
-   and pulls every `Rn` from `<rest>`.
-2. **A bare annotation that *leads* with the ref(s)** right after the
-   comment leader: `// R5: desc`, `// R5, R6`, or a trailing
-   `foo() // R7`. The leading comma-separated refs count. This credits
-   the deliberate field/line annotations that sit beside a type's or
-   function's `// CRC:` header.
+- `// CRC: crc-Store.md | Seq: seq-crud.md#1.4 | R4, R5` — the governing header
+- `// Seq: seq-crud.md#2.2 | R6` — a step pin with its refs
+- `// R7: why this line exists` and `// R8. Why this line exists` — a bare annotation
+- `foo() // R9` — trailing, after code
 
-**Ranges (v2.11.0+).** Both shapes expand `Rn-Rm` **range** syntax into
-every member, so `// R5-R8` counts R5, R6, R7, and R8 — no need to spell
-out a long contiguous span. The second `R` is optional (`R5-8`), ranges
-and comma lists mix freely (`// R5-R7, R10`), and a reversed range
-(`R8-R5`) contributes only the low ref.
+**Ranges** expand into every member: `// R5-R8` counts R5 through R8, the second `R` is
+optional (`R5-8`), and ranges mix with comma lists (`// R5-R7, R10`).
 
-The `<comment-prefix>` is the file's line-comment leader and is
-**language-dependent**: `//` for Go/JS/TS/C, `--` for Lua, `#` for
-shell/Python, `<!--` for Markdown/HTML, `/*` for CSS. Run `minispec
-query comment-patterns` for the per-extension list (and the
-block-comment closers below). The examples here are Go. A
-`comment_patterns` entry may be an **alternation** (v2.11.0+) — e.g.
-`.html: "<!--\s*|//\s*"` so an HTML file's embedded-JS `// Rn`
-annotations harvest alongside its `<!-- CRC: … -->` comments.
+What does **not** count, because the comment is not wholly fields — it reads as prose:
 
-What still does **not** count, because the ref does not lead the
-comment and so reads as prose rather than intent:
+- `// computed lazily (R5)` and `// see R5 for the rationale` — the ref does not lead
+- `// R5 handles the retry` — a ref followed by prose **with no separator**. Write
+  `// R5: handles the retry`. (The regex reader this replaced counted that form.)
 
-- `// computed lazily (R5)` (parenthetical mid-prose)
-- `// see R5 for the rationale` (ref after words)
-- `// Seq: seq-foo.md | R5` (no `CRC:`; a `Seq:`-only line does not trigger)
+A requirement annotated only in prose form reads as "missing impl coverage." Lead with the
+ref and a separator, or fold it onto the governing `// CRC:` header (with the card that owns
+the `Rn`, per its `**Requirements:**` field), to anchor the code location.
 
-A requirement annotated only in prose form reads as "missing impl
-coverage." Lead with the ref, or fold it onto the governing `// CRC:`
-header (with the card that owns the `Rn`, per its `**Requirements:**`
-field), to anchor the code location.
+**The comment leader is the language's**, and `minispec query comment-patterns` lists it
+per extension: the form to write, and every form read. The examples here are Go. HTML reads
+its page comments, the `//` and `/* */` comments inside its `<script>`, and the `/* */`
+comments inside its `<style>`, each only where it is live. A script with no extension is
+read by its `#!` interpreter line. A file no table covers is reported as not read, never
+passed over; a project can define more languages in its configuration, or name files for a
+built-in table with `files` (see `config-reference.md` in this skill directory).
 
-**Block-comment languages:** The `minispec query comment-patterns` output lists any `comment_closers`. If a closer exists for the file extension, you MUST append it to every traceability comment. An unclosed block comment silently swallows all subsequent code. See `config-reference.md` (in this skill directory) if you need to configure closers for a new language.
+**Block-comment languages:** where `comment-patterns` shows a closer (` -->`, ` */`,
+` *)`), you MUST append it to every traceability comment. An unclosed block comment
+silently swallows all subsequent code.
 
 Mark implemented using minispec:
 ```bash
@@ -520,11 +548,13 @@ of counting it as a proof.
 5. Simplification Phase
 Invoke the `code-simplifier` agent on the recently modified code. This refines code for clarity, consistency, and maintainability while preserving functionality.
 
+`code-simplifier` is a standard Anthropic plugin. If it is not available, skip the simplification pass and tell the user they can install it with `claude plugin install code-simplifier`. The alarm pulls below still run.
+
 **CRITICAL: Preserve all traceability comments.** The `// CRC:`, `// Seq:`, and requirement references (`R123`) in code comments are load-bearing — they connect code to the design artifacts that justify its existence. Removing or reformatting them breaks the traceability chain that `minispec validate` checks. Simplification means cleaner *logic*, not fewer comments.
 
 **This phase is where the fire alarms get pulled, and that is why the pull waits for it.**
 A refactor is *precisely* when a property moves: it is licensed to change structure while
-preserving behaviour, and "preserving behaviour" is adjudicated by the very tests whose
+preserving behavior, and "preserving behavior" is adjudicated by the very tests whose
 adequacy the alarm was proving. A simplification pass will happily restructure the function
 **and** tighten its test in one go, which is exactly the pair that voids a proof — and
 nothing about it turns anything red. The suite stays green, the injection becomes a memory,
@@ -930,6 +960,12 @@ of more, and a two-item one can stay a working note if nobody needs the name.
 Keep the number of live carves small; they are a management tool, and a directory
 full of them stops being one.
 
+**With several live carves, rank them in a carve of carves**, `.carves/priorities.md` — one private carve whose items are
+the carves, in the order the user means to work them, so *which problem is next* has an answer
+the way *which part is next* does. Start a session there and take the top open item's carve
+unless the user names another; add every new carve to it when it opens. The shape is in
+`trajectory-format.md`, *The carve of carves*.
+
 **An agent proposes; it does not decide.** Raise it once a document has spawned a
 second item — that is the prompt to ask, not a rule that fires. Below that,
 usually stay quiet. Treating the count as the criterion gets it wrong in both
@@ -1056,9 +1092,11 @@ Principles: Single Responsibility, minimal collaborations, PascalCase.
 **Code:** store_test.go
 **Fire alarm:** what to break so this test goes red, and what red looks like
 **Inject:** links.go:SyncLinkPath
+@alarm-hash: 3f9a2c1e7b04d856
 **Pulled:** 2026-08-05 — rang
 ```
-Cover: happy path, errors, edge cases.
+Cover: happy path, errors, edge cases. The `@alarm-hash:` line is written by `minispec update
+pulled`, never by hand — see `**Pulled:**` below.
 
 ### The fire-alarm fields
 
@@ -1077,8 +1115,17 @@ its subject is rewritten and nothing in a green suite will say so.
   *consults*. "Return early when `Lookup` already knows the path" edits the caller —
   `Lookup` is context, and recording it there points every future check at the wrong
   function.
-- **`**Pulled:**`** — the date it was actually run and what happened. **The census reads the
-  *leading* date**, so a re-pull moves that date; appending *"re-pulled today"* further along
+- **`**Pulled:**`** — the date it was actually run and what happened. **Write it with
+  `minispec update pulled <doc>#<n> --body-file <f>`**, which also writes the record's
+  **fingerprint**: an `@alarm-hash:` line hashing the code at every `**Inject:**` site, as the
+  working tree holds it when the injection ran. The census compares that fingerprint with HEAD's
+  copy of the same code — equal is verified, different is stale, **whatever day the change was
+  made**, so an edit later the same afternoon is caught. Before the batch commit the record
+  reads `unchecked` with the reason *the proved code is not committed yet*, which is expected and
+  closes when the commit lands. **Never write or copy an `@alarm-hash:` line by hand**: one the
+  tool did not compute vouches for code nobody hashed. *A record with no fingerprint* — written
+  before 2026-10-30, or at a site the tool cannot hash, which `update pulled` says — is dated
+  instead, and for it **the census reads the *leading* date**, so a re-pull moves that date; appending *"re-pulled today"* further along
   the line records the history for a human and leaves the alarm stale for the tool. Measured
   2026-08-18: three alarms re-pulled, all three rang, and the census stayed red until the
   leading dates moved. **Absence is
@@ -1163,8 +1210,17 @@ thing standing between a delegated loop and confident fiction.
 (`/home/deck/work/go.work` listing `./mini-spec/tool`) routes `go test` inside a worktree at the
 **main checkout**, not the worktree. Three pullers hit it and worked around it with `GOWORK=off`;
 one reported a green baseline for a file its own worktree does not contain. Go refused loudly
-here rather than silently testing the wrong tree, but a delegate whose commands can reach the
-live checkout is a delegate whose isolation is nominal.
+that day; **measured again 2026-09-27, it did not** — `go list -m` in a worktree under the
+workspace named the main checkout's module and nothing objected. A delegate whose commands can
+reach the live checkout is a delegate whose isolation is nominal.
+
+**The fix is a workspace of the worktree's own, not `GOWORK=off`.** A pull proves the alarm rings
+on the code *as it is built*, so it runs in the development environment, local dependencies
+included, and `GOWORK=off` swaps those for published versions, testing a program nobody ships.
+Write a `go.work` at the worktree root naming the worktree's module and each local dependency;
+Go takes the nearest workspace file, so it wins over the one above. Write it by hand: `go work
+init` inside a directory an outer workspace already governs refuses, since the outer file
+already exists. Then check `go list -m` names the worktree's module before trusting a baseline.
 
 **A second environment hazard, measured 2026-08-23, and this one fails silently.** Go's test
 cache keys on source and build inputs and does **not** track files a test reads at run time. So
@@ -1222,6 +1278,12 @@ spawn per run, forever, to perform an omission a filter performs for nothing, an
 filter it can be **wrong**. Delegate the loop; filter the list.
 
 ### The census is blind to whatever git cannot see — scaffolding, and dated as such
+
+*Partly superseded (2026-10-30):* a record with an `@alarm-hash:` fingerprint is checked by
+comparing code, and when the proof is of uncommitted code the census says so by name — *the
+proved code is not committed yet* — which is the closable reason this section asked the tool to
+name. What follows still holds for records without a fingerprint; re-pulling an alarm gives it
+one, and this section goes when no such records remain.
 
 `minispec query alarms` answers freshness by asking git when each `**Inject:**` symbol last
 changed. **So it can only speak for code git already holds.** On an untracked file, or a
@@ -1381,6 +1443,7 @@ The `minispec` CLI tool (at `~/.claude/bin/minispec`) performs structural operat
 
 # Queries
 ~/.claude/bin/minispec query artifacts       # Show all artifacts with checkbox states
+~/.claude/bin/minispec query coverage R5-8   # Design files covering each Rn (ranges honored; no args = all)
 ~/.claude/bin/minispec query uncovered       # List Rn without design refs
 ~/.claude/bin/minispec query gaps            # List gap items
 ~/.claude/bin/minispec query requirements    # List all requirements
@@ -1390,6 +1453,8 @@ The `minispec` CLI tool (at `~/.claude/bin/minispec`) performs structural operat
 ~/.claude/bin/minispec query alarms --unverified --brief  # One spawn prompt per alarm, for a delegated re-pull
 ~/.claude/bin/minispec query carves          # Open, landed and stateless parts per carve, from the status block only
 ~/.claude/bin/minispec query carves --open   # …and the open parts and stateless lines themselves
+~/.claude/bin/minispec query implementation R5-R8   # Where each Rn is implemented, file:line and comment
+~/.claude/bin/minispec query implementation '@status'  # …or by a regexp over requirement text
 ~/.claude/bin/minispec query next-id req     # Next free Rn (counts retired ones too)
 ~/.claude/bin/minispec query next-id gap     # Next free number for every gap type
 ~/.claude/bin/minispec query next-id item    # Next free queue ID (pending + done files)

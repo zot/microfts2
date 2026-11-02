@@ -276,6 +276,8 @@
 - **R92:** `AddFile` returns `(uint64, error)` — the fileid alongside the error
 - **R93:** `Reindex` returns `(uint64, error)` — the fileid alongside the error
 - **R94:** `FileInfoByID(fileid uint64)` returns `(FRecord, error)` — resolves fileid to its F record data
+- **R749:** `FileSummaries()` returns `([]FileSummary, error)`, one summary per F record, each with FileID, ModTime, FileLength, Strategy and ChunkCount equal to what `FileInfoByID` reports for that file (ChunkCount being its number of chunks).
+- **R750:** `FileSummaries()` reads all F records in one read transaction and decodes only each record's header and chunk count, not its chunk entries or tokens; a record that fails to decode is an error.
 - **R96:** `ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)` returns `([]ScoredChunk, error)` — per-chunk scores using the given scoring function
 - **R97:** Coverage score = matching selected trigrams / total selected query trigrams, per chunk (default strategy)
 - **R98:** `ScoredChunk` struct: `Range string, Score float64`
