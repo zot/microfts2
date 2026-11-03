@@ -2898,12 +2898,21 @@ func (s *searchConfig) searchCollect(th TxnHolder, termTrigrams [][]uint32, quer
 	return cands, active
 }
 
-// Seq: seq-search.md | R178, R179, R180, R181, R182
+// Search splits the query into terms by the query syntax and searches with
+// them; everything after the split works on the terms (R753).
+// Seq: seq-search.md | R178, R179, R180, R181, R182, R753
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error) {
+	return db.SearchTerms(parseQueryTerms(strings.TrimSpace(query)), opts...)
+}
+
+// SearchTerms searches with terms the caller has already split, each taken
+// as-is: a space is part of a term and a quote is a character to match.
+// Empty terms are dropped.
+// CRC: crc-DB.md | R752
+func (db *DB) SearchTerms(terms []string, opts ...SearchOption) (*SearchResults, error) {
 	cfg := db.newSearchConfig(opts)
 
-	query = strings.TrimSpace(query)
-	terms := parseQueryTerms(query)
+	terms = nonEmptyTerms(terms)
 	if len(terms) == 0 {
 		return &SearchResults{Status: IndexStatus{Built: true}}, nil
 	}
@@ -2949,7 +2958,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 	// R710, R712: verify checks an exact match — every term — so it would turn loose
 	// search's any-term OR back into AND.
 	if cfg.verify && !cfg.loose {
-		results = cfg.verifyResults(results, query)
+		results = cfg.verifyResults(results, terms)
 	}
 
 	// R188, R189: apply regex post-filters after verify, before sort
@@ -2960,7 +2969,7 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 
 	// R279: proximity rerank if configured
 	if cfg.proximityTopN > 0 {
-		results = cfg.proximityRerank(results, query, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, terms, cfg.proximityTopN)
 	}
 
 	sortResults(results)
@@ -2968,6 +2977,18 @@ func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
 		Results: results,
 		Status:  IndexStatus{Built: true},
 	}, nil
+}
+
+// nonEmptyTerms drops empty terms, which would match everything.
+// CRC: crc-DB.md | R752
+func nonEmptyTerms(terms []string) []string {
+	var out []string
+	for _, t := range terms {
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R420, R421, R422, R423, R425, R427, R706, R709
@@ -3085,7 +3106,7 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 		return nil, ferr
 	}
 	if cfg.proximityTopN > 0 {
-		results = cfg.proximityRerank(results, query, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, parseQueryTerms(query), cfg.proximityTopN)
 	}
 
 	sortResults(results)
@@ -3107,10 +3128,16 @@ type MultiSearchResult struct {
 
 // CRC: crc-DB.md | Seq: seq-search-multi.md | R283, R284, R285, R287, R288, R289, R290
 func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
+	return db.SearchMultiTerms(parseQueryTerms(strings.TrimSpace(query)), strategies, k, opts...)
+}
+
+// SearchMultiTerms is SearchMulti for terms the caller has already split,
+// taken as-is like SearchTerms's.
+// CRC: crc-DB.md | R752
+func (db *DB) SearchMultiTerms(terms []string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error) {
 	cfg := db.newSearchConfig(opts)
 
-	query = strings.TrimSpace(query)
-	terms := parseQueryTerms(query)
+	terms = nonEmptyTerms(terms)
 	if len(terms) == 0 {
 		return nil, nil
 	}
@@ -3165,7 +3192,7 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 	for i := range multiResults {
 		r := multiResults[i].Results
 		if cfg.verify && !cfg.loose { // R710: exact search only
-			r = cfg.verifyResults(r, query)
+			r = cfg.verifyResults(r, terms)
 		}
 		var ferr error
 		r, ferr = cfg.applyRegexPostFilters(r)
@@ -3173,7 +3200,7 @@ func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, 
 			return nil, ferr
 		}
 		if cfg.proximityTopN > 0 {
-			r = cfg.proximityRerank(r, query, cfg.proximityTopN)
+			r = cfg.proximityRerank(r, terms, cfg.proximityTopN)
 		}
 		sortResults(r)
 		if k > 0 && len(r) > k {
@@ -3514,8 +3541,7 @@ func (s *searchConfig) Retrieve(r *SearchResult) []byte {
 }
 
 // verifyResults discards results where any query term is absent. R124, R493
-func (s *searchConfig) verifyResults(results []SearchResult, query string) []SearchResult {
-	terms := parseQueryTerms(query)
+func (s *searchConfig) verifyResults(results []SearchResult, terms []string) []SearchResult {
 	if len(terms) == 0 {
 		return results
 	}
@@ -3561,11 +3587,10 @@ func (s *searchConfig) verifyResultsRegex(results []SearchResult, re *regexp.Reg
 
 // CRC: crc-DB.md | R279, R280, R281, R282, R493
 // proximityRerank reranks the top-N results by query term proximity in chunk text.
-func (s *searchConfig) proximityRerank(results []SearchResult, query string, topN int) []SearchResult {
+func (s *searchConfig) proximityRerank(results []SearchResult, terms []string, topN int) []SearchResult {
 	if topN <= 0 || len(results) == 0 {
 		return results
 	}
-	terms := parseQueryTerms(query)
 	if len(terms) < 2 {
 		return results // proximity only meaningful for multi-term queries
 	}
@@ -3766,7 +3791,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	}
 
 	if cfg.proximityTopN > 0 {
-		results = cfg.proximityRerank(results, pattern, cfg.proximityTopN)
+		results = cfg.proximityRerank(results, parseQueryTerms(pattern), cfg.proximityTopN)
 	}
 
 	sortResults(results)

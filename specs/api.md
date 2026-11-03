@@ -23,8 +23,10 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 
 // Search
 func (db *DB) Search(query string, opts ...SearchOption) (*SearchResults, error)
+func (db *DB) SearchTerms(terms []string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults, error)
 func (db *DB) SearchMulti(query string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error)
+func (db *DB) SearchMultiTerms(terms []string, strategies map[string]ScoreFunc, k int, opts ...SearchOption) ([]MultiSearchResult, error)
 func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption) ([]ScoredChunk, error)
 func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error)
 

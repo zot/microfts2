@@ -415,6 +415,8 @@
 - **R180:** Trigrams are extracted per term, not from the whole query as one byte sequence — prevents cross-boundary trigrams between unrelated words
 - **R181:** Candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms
 - **R182:** (inferred) Query term order does not affect search results — "daneel olivaw" and "olivaw daneel" return the same set
+- **R752:** `SearchTerms(terms, opts...)` searches with the given terms as-is: a space is part of a term, a `"` is a character to match, and empty terms are dropped; it otherwise behaves exactly as `Search`.
+- **R753:** `Search(query)` is `SearchTerms` applied to the terms `parseQueryTerms` splits from the trimmed query, and `WithVerify` and the proximity rerank read those terms rather than splitting the query again.
 
 ## Feature: Multi-Regex Post-Filtering
 **Source:** specs/search.md

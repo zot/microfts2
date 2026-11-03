@@ -810,3 +810,15 @@
 **Inject:** records.go:unmarshalFSummary
 @alarm-hash: c86793b2879ca5b4
 **Pulled:** 2026-11-02 — rang — chunk count taken from the name count (with `_ = nChunks` so it builds; a first injection left nChunks unused, failed to build, and was discarded): "file N: summary {… ChunkCount:1 …}, FileInfoByID chunks=3"; restored clean
+
+## Test: SearchTerms takes terms as given
+**Purpose:** R752, R753: a term is used exactly as given (a quote is a character, a space is part of the term, empty terms dropped), for SearchTerms and SearchMultiTerms; Search reads the same text through the query syntax, a quoted phrase
+**Input:** files holding `"hello world"` (quoted), `hello world` (bare) and the two words apart; SearchTerms with `["\"hello world\""]`, `["hello world"]`, `["hello","world"]`, `["", "hello world", ""]`, all WithVerify; SearchMultiTerms with the quoted term; Search with the quoted text as a query
+**Expected:** the quoted term hits only the quoted file; the spaced term hits quoted and bare, not apart; two terms hit all three; empty terms change nothing; Search's quoted query hits quoted and bare
+**Refs:** crc-DB.md, R752, R753
+**Code:** search_terms_test.go
+**Alarm:** 39
+**Fire alarm:** make SearchTerms re-split its terms, `terms = parseQueryTerms(strings.Join(terms, " "))`, the join-and-decode #206 removes; red is the quoted term also hitting bare.txt
+**Inject:** db.go:SearchTerms
+@alarm-hash: a0769a2f7bc816f7
+**Pulled:** 2026-11-03 — rang: `quote is a character: SearchTerms(["\"hello world\""]) hit map[bare.txt:true quoted.txt:true], want [quoted.txt]`; restore clean

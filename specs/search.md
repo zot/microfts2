@@ -242,6 +242,16 @@ The CLI's `-verify` follows the same rule but refuses rather than ignores: `-ver
 
 # Loose Search
 
+**Terms given directly.** `SearchTerms(terms, opts...)` is `Search` for a caller
+that already has the terms, such as a command line, where the shell has
+already split the arguments. Each term is used exactly as given: a space is
+part of the term, and a `"` is a character to match, not a phrase marker.
+Empty terms are dropped. `SearchMultiTerms` is the same for `SearchMulti`. `Search(query)` is `SearchTerms` applied to the
+query's terms as split by the query syntax above, so the two cannot drift
+apart, and every later step (verify, proximity rerank) reads those same terms
+rather than splitting the query again. Joining terms into a string and
+splitting it back would lose exactly the boundaries the caller had.
+
 OR-semantics search mode for exploratory queries. When the user isn't sure of exact phrasing, loose search returns chunks matching *any* query term, ranked by how many terms match.
 
 ## Semantics

@@ -50,7 +50,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
 - [x] test-Bitset.md → `bitset_test.go`
-- [x] test-DB.md → `db_test.go`, `records_test.go`
+- [x] test-DB.md → `db_test.go`, `records_test.go`, `search_terms_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
 - [x] test-CLI.md → `cmd/microfts/main_test.go`
