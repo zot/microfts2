@@ -61,7 +61,7 @@ Options:
   lets a second opener fail fast instead of hanging while another holds
   the DB.
 
-Format version: `Create` writes the DB format version `"3"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`.
+Format version: `Create` writes the DB format version `"3"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
 
 (bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 

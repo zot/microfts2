@@ -710,6 +710,18 @@
 **Inject:** db.go:Open
 **Pulled:** 2026-10-25 — rang: Open accepted format version 2
 
+## Test: Open's format refusal is typed
+**Purpose:** R751: a caller can recognize the refusal with `errors.As` and read the stored and expected versions from it
+**Input:** the same database as the test above (version I record overwritten with "2"), Open
+**Expected:** `errors.As(err, *FormatVersionError)` holds, with Stored "2" and Want the current format
+**Refs:** crc-DB.md, R751
+**Code:** db_test.go
+**Alarm:** 38
+**Fire alarm:** go back to the untyped error the check returned before, `fmt.Errorf("open db %q: format version %q, want %q", ...)`; red names the error as not a `*FormatVersionError`
+**Inject:** db.go:Open
+@alarm-hash: f4c525ba55db322a
+**Pulled:** 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
+
 ## Test: missing outranks chunker-version stale
 **Purpose:** a deleted file reports missing even when its chunker version is behind, so RefreshStale skips it instead of reindexing a file that is gone
 **Input:** versioned chunker at version 1; AddFile; bump to 2; delete the file; CheckFile; RefreshStale

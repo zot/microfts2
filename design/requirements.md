@@ -1092,6 +1092,7 @@
 **Source:** specs/api.md
 
 - **R721:** `Open` refuses a database whose `version` I record is not `"3"`, closing the bbolt handle and returning an error that names the stored version.
+- **R751:** The format-version refusal in R721 is a `*FormatVersionError` whose `Stored` and `Want` fields hold the stored and expected versions, detectable with `errors.As`; its message still names the stored version.
 
 ## Feature: F Record Chunker-Version Migration
 **Source:** specs/migrations/complete/003-f-chunker-version.md

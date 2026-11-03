@@ -4379,7 +4379,7 @@ func TestAppendNoChunksRecordsFileState(t *testing.T) {
 	}
 }
 
-// CRC: crc-DB.md | Test: test-DB.md | R718, R721
+// CRC: crc-DB.md | Test: test-DB.md | R718, R721, R751
 func TestOpenRefusesOtherFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "db")
@@ -4401,6 +4401,14 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `"2"`) {
 		t.Fatalf("Open error does not name the stored version: %v", err)
+	}
+	// R751: the refusal is typed, so a caller can say what to do about it
+	var fe *FormatVersionError
+	if !errors.As(err, &fe) {
+		t.Fatalf("Open error is not a *FormatVersionError: %T %v", err, err)
+	}
+	if fe.Stored != "2" || fe.Want != formatVersion {
+		t.Fatalf("FormatVersionError = {Stored %q, Want %q}, want {\"2\", %q}", fe.Stored, fe.Want, formatVersion)
 	}
 }
 

@@ -1125,7 +1125,7 @@ func Open(path string, opts Options) (*DB, error) {
 			return err
 		}
 		if v != formatVersion {
-			return fmt.Errorf("open db %q: format version %q, want %q", dbName, v, formatVersion)
+			return &FormatVersionError{DBName: dbName, Stored: v, Want: formatVersion} // R751
 		}
 		s, err := loadSettings(bucketWrap{b})
 		if err != nil {
@@ -1262,6 +1262,21 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 // the F record's chunkerVersion; Open never migrates an older database (see
 // specs/migrations/complete/003-f-chunker-version.md). R718, R721
 const formatVersion = "3"
+
+// FormatVersionError is Open's refusal of a database written in another
+// format: the caller can tell it apart from other open failures with
+// errors.As and say what to do, since the stored and expected versions are
+// fields rather than text.
+// CRC: crc-DB.md | R721, R751
+type FormatVersionError struct {
+	DBName string // the bucket that holds the version
+	Stored string // the version the database carries
+	Want   string // the version this code reads
+}
+
+func (e *FormatVersionError) Error() string {
+	return fmt.Sprintf("open db %q: format version %q, want %q", e.DBName, e.Stored, e.Want)
+}
 
 // DB returns the underlying bbolt database. R661
 func (db *DB) DB() *bbolt.DB {
