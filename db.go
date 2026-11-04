@@ -33,6 +33,10 @@ var ErrNoChunks = errors.New("chunker produced no chunks")
 // has F records in the database. Use Reindex or AppendChunks instead. R215
 var ErrAlreadyIndexed = errors.New("file already indexed")
 
+// ErrNotIndexed is returned (wrapped, with the path) for a path the index does
+// not hold. RemoveFiles skips such a path instead of failing the batch. R755
+var ErrNotIndexed = errors.New("file not found")
+
 // ErrAppendBoundary is returned by AppendChunks when the registered chunker is
 // not an AppendAwareChunker and produces zero chunks from non-empty content —
 // the appended bytes likely straddle a chunk boundary the chunker can't see
@@ -579,7 +583,7 @@ func (db *DB) lookupFileByPath(th TxnHolder, fpath string) (uint64, FRecord, err
 	if db.pathToID != nil {
 		id, ok := db.pathToID[db.FilenameKey(fpath)]
 		if !ok {
-			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
+			return 0, FRecord{}, fmt.Errorf("%w: %s", ErrNotIndexed, fpath)
 		}
 		fileid = id
 	} else {
@@ -587,7 +591,7 @@ func (db *DB) lookupFileByPath(th TxnHolder, fpath string) (uint64, FRecord, err
 		finalKey := db.finalKey(fpath)
 		val := b.Get(finalKey)
 		if val == nil {
-			return 0, FRecord{}, fmt.Errorf("file not found: %s", fpath)
+			return 0, FRecord{}, fmt.Errorf("%w: %s", ErrNotIndexed, fpath)
 		}
 		_, fileid = parseNFinalValue(val)
 	}
@@ -2027,6 +2031,74 @@ func (db *DB) removeFileWithCallbackImpl(fpath string, fn RemoveCallback, rcb Re
 		if id, ok := db.pathToID[key]; ok {
 			delete(db.pathCache, id)
 			delete(db.pathToID, key)
+		}
+	}
+	return err
+}
+
+// RemoveFilesCallback receives the write transaction, the fileids RemoveFiles
+// actually removed, and every chunk the batch left with no file. R756
+type RemoveFilesCallback func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs []uint64) error
+
+// RemoveFiles removes a batch of files in one write transaction. Every file's
+// posting edits go into one set, applied once, so a T/W record several files
+// touch is rewritten once and the batch commits once. A path not indexed is
+// skipped (a caller's batch can race another remover). fn runs once, inside
+// the transaction, after the postings are applied: a chunk shared only by
+// files in the batch is orphaned when the last of them drops it, which per-file
+// callbacks could not attribute. The caller bounds the batch: a transaction
+// holds its dirty pages until it commits.
+// CRC: crc-DB.md | R754, R755, R756, R757, R758
+func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
+	var removed []string
+	err := db.bolt.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		if b == nil {
+			return fmt.Errorf("bucket %q not found", db.dbName)
+		}
+		th := bucketWrap{b}
+		pe := postingEdits{}
+		var fileIDs, orphans []uint64
+		seen := make(map[string]bool, len(paths))
+		for _, fpath := range paths {
+			// A repeated path would find its record through the path cache,
+			// which forgets it only after commit, and read an F record this
+			// transaction already deleted.
+			if seen[fpath] {
+				continue
+			}
+			seen[fpath] = true
+			fileid, frec, err := db.lookupFileByPath(th, fpath)
+			if errors.Is(err, ErrNotIndexed) {
+				continue // R755
+			}
+			if err != nil {
+				return err
+			}
+			dropped, err := db.dropFileChunkOccurrences(th, pe, frec, fileid, nil)
+			if err != nil {
+				return err
+			}
+			orphans = append(orphans, dropped...)
+			db.deleteFileMeta(th, fileid, fpath)
+			fileIDs = append(fileIDs, fileid)
+			removed = append(removed, fpath)
+		}
+		if err := db.applyPostings(th, pe); err != nil { // R754: once for the batch
+			return err
+		}
+		if fn != nil {
+			return fn(tx, fileIDs, orphans) // R756, R757
+		}
+		return nil
+	})
+	if err == nil && db.pathToID != nil { // R758
+		for _, fpath := range removed {
+			key := db.FilenameKey(fpath)
+			if id, ok := db.pathToID[key]; ok {
+				delete(db.pathCache, id)
+				delete(db.pathToID, key)
+			}
 		}
 	}
 	return err

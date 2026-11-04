@@ -198,6 +198,37 @@ func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
 - No orphaned chunks (all chunks shared with other files) → `fn` is called with an empty slice
 - Cache invalidation (pathCache, pathToID) happens after the transaction commits, same as `RemoveFile`
 
+### Removing many files at once
+
+`RemoveFiles` removes a batch of files in one write transaction, for a caller
+removing many at once (ark's reconcile, when a directory's files have all
+vanished). One transaction per file costs a commit per file and rewrites each
+shared trigram and token record once per file; the batch rewrites each record
+once and commits once.
+
+```go
+// RemoveFilesCallback receives the write transaction, the fileids actually
+// removed, and every chunk orphaned by the batch.
+type RemoveFilesCallback func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs []uint64) error
+
+func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error
+```
+
+- One write transaction for the whole batch; the posting edits of every file
+  are collected together and each affected T/W record is rewritten once
+- A path that is not indexed is skipped, not an error: a caller's batch can
+  race another remover (ark's watcher), and one already-removed path must not
+  abort the rest. `fileIDs` lists only the files actually removed
+- `fn` is called once per batch, not per file: a chunk shared by two files in
+  the same batch is orphaned only once both are gone, so per-file orphan lists
+  could not attribute it. `orphanedChunkIDs` holds every chunk the batch left
+  with no file
+- `fn` runs inside the transaction and its error aborts the whole batch, as
+  with `RemoveFileWithCallback`; a nil `fn` is allowed
+- Cache invalidation for every removed path happens after the commit
+- The caller bounds the batch size: a transaction holds its dirty pages until
+  it commits
+
 # Reindex File with Callback
 
 Same pattern as `RemoveFileWithCallback`, but for reindex. Reindexing is a content diff in one transaction (see "When reindexing a file" above): unchanged content keeps its chunkid, so `orphanedChunkIDs` holds only the chunks whose content is gone from the file (their last reference dropped) and `newChunkIDs` holds the re-indexed file's chunk list. The caller cleans up stale records and creates new ones atomically, and chunkid-keyed external state for unchanged content is left untouched.

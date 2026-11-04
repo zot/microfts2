@@ -14,6 +14,7 @@ func (db *DB) AddFile(fpath, strategy string) (uint64, error)
 func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) RemoveFile(fpath string) error
 func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
+func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
 func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)

@@ -881,6 +881,11 @@
 - **R552:** If `fn` is nil, behavior is identical to `RemoveFile` — no callback overhead
 - **R553:** When no chunks are orphaned (all shared), `fn` is called with an empty slice
 - **R554:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `RemoveFile`
+- **R754:** `RemoveFiles(paths []string, fn RemoveFilesCallback) error` removes a batch of files in one write transaction, collecting every file's posting edits together so each affected T/W record is rewritten once
+- **R755:** A path given to `RemoveFiles` that is not indexed is skipped, not an error; the callback's `fileIDs` lists only the files actually removed
+- **R756:** `RemoveFilesCallback` (`func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs []uint64) error`) is called once per batch, inside the transaction, with every chunk the batch left with no file, including a chunk shared only by files in the batch
+- **R757:** If the `RemoveFiles` callback returns an error, the whole batch rolls back; a nil callback is allowed
+- **R758:** `RemoveFiles` invalidates the path caches (pathCache, pathToID) for every removed path after the transaction commits
 
 ## Feature: Reindex File with Callback
 **Source:** specs/indexing.md

@@ -822,3 +822,39 @@
 **Inject:** db.go:SearchTerms
 @alarm-hash: a0769a2f7bc816f7
 **Pulled:** 2026-11-03 — rang: `quote is a character: SearchTerms(["\"hello world\""]) hit map[bare.txt:true quoted.txt:true], want [quoted.txt]`; restore clean
+
+## Test: a batch remove rewrites each posting record once
+**Purpose:** RemoveFiles shares one set of posting edits across the batch, so a record touched by several files is rewritten once; a chunk shared only by files in the batch is orphaned exactly once; a file outside the batch keeps its chunks (R754, R756)
+**Input:** three files of "common" lines, two also sharing one identical line; a keeper file with one "common" line; RemoveFiles on the three while the hook counts writes per key
+**Expected:** no key written more than once; the callback's fileIDs are the three; the shared line's chunk is in the orphans once; "common" finds only the keeper
+**Refs:** crc-DB.md, R754, R756
+**Code:** db_test.go
+**Alarm:** 40
+**Fire alarm:** apply the posting edits once per file inside RemoveFiles' loop instead of once after it; red is a key written more than once
+**Inject:** db.go:DB.RemoveFiles
+@alarm-hash: 0ad8caa63d370270
+**Pulled:** 2026-11-04 — rang: posting records "Tmon", "Tomm" and others written 3 times, want once
+
+## Test: a batch remove skips a path that is not indexed
+**Purpose:** one path already removed (by the watcher, say) must not abort the batch (R755)
+**Input:** two indexed files and one path never indexed, in one RemoveFiles call
+**Expected:** no error; the callback's fileIDs are the two indexed files; neither is searchable afterwards
+**Refs:** crc-DB.md, R755
+**Code:** db_test.go
+**Alarm:** 41
+**Fire alarm:** return the lookup error instead of skipping; red is RemoveFiles failing and both files still searchable
+**Inject:** db.go:DB.RemoveFiles
+@alarm-hash: 0ad8caa63d370270
+**Pulled:** 2026-11-04 — rang: RemoveFiles failed with "file not found: …/never-indexed.txt"
+
+## Test: a failed batch callback rolls back the whole batch
+**Purpose:** the callback's error aborts every removal in the batch; a nil callback is allowed; after a successful batch the path caches forget every removed path (R757, R758)
+**Input:** two files; RemoveFiles with a callback returning a sentinel; then FileIDPaths (the path caches load lazily, and ark always has them loaded), RemoveFiles with nil, and AddFile of the first path again
+**Expected:** the sentinel comes back and both files are still searchable; the nil batch removes both; FileIDPaths no longer lists them and CheckFile on one answers ErrNotIndexed; the re-add succeeds as a fresh file
+**Refs:** crc-DB.md, R757, R758
+**Code:** db_test.go
+**Alarm:** 42
+**Fire alarm:** skip the post-commit cache invalidation for the batch; red is FileIDPaths still listing the removed paths. (First written without loading the caches, it stayed green under this injection: a nil cache cannot go stale.)
+**Inject:** db.go:DB.RemoveFiles
+@alarm-hash: 0ad8caa63d370270
+**Pulled:** 2026-11-04 — rang: path cache still lists a.txt and b.txt after the batch; CheckFile answered "read F record 1: not found", not ErrNotIndexed
