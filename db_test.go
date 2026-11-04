@@ -1246,8 +1246,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "4" { // R761
-		t.Fatalf("Version() = %q, want %q", v, "4")
+	if v != "5" { // R767
+		t.Fatalf("Version() = %q, want %q", v, "5")
 	}
 }
 
@@ -1373,7 +1373,6 @@ func TestUnmarshalFHeader(t *testing.T) {
 		Strategy:    "line",
 		Name:        "/tmp/test.txt",
 		Chunks:      []FileChunkEntry{{ChunkID: 42, Location: "1-10"}},
-		Tokens:      []TokenEntry{{Token: "hello", Count: 5}},
 	}
 	data := orig.MarshalValue()
 
@@ -1396,12 +1395,9 @@ func TestUnmarshalFHeader(t *testing.T) {
 	if hdr.Name != orig.Name {
 		t.Errorf("Name = %q, want %q", hdr.Name, orig.Name)
 	}
-	// Chunks and Tokens must NOT be populated.
+	// Chunks must NOT be populated.
 	if len(hdr.Chunks) != 0 {
 		t.Errorf("Chunks should be nil/empty, got %d", len(hdr.Chunks))
-	}
-	if len(hdr.Tokens) != 0 {
-		t.Errorf("Tokens should be nil/empty, got %d", len(hdr.Tokens))
 	}
 }
 
@@ -2328,9 +2324,6 @@ func TestAppendChunksUpdatesMetadata(t *testing.T) {
 	}
 	if len(frec.Chunks) != 2 {
 		t.Errorf("Chunks len = %d, want 2", len(frec.Chunks))
-	}
-	if len(frec.Tokens) == 0 {
-		t.Error("Tokens should not be empty after append")
 	}
 }
 
@@ -4386,7 +4379,7 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = db.DB().Update(func(tx *bbolt.Tx) error {
-		return iPut(bucketWrap{tx.Bucket([]byte("fts"))}, "version", "3")
+		return iPut(bucketWrap{tx.Bucket([]byte("fts"))}, "version", "4")
 	})
 	db.Close()
 	if err != nil {
@@ -4395,9 +4388,9 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 	db, err = Open(path, Options{})
 	if err == nil {
 		db.Close()
-		t.Fatal("Open accepted format version 3")
+		t.Fatal("Open accepted format version 4")
 	}
-	if !strings.Contains(err.Error(), `"3"`) {
+	if !strings.Contains(err.Error(), `"4"`) {
 		t.Fatalf("Open error does not name the stored version: %v", err)
 	}
 	// R751: the refusal is typed, so a caller can say what to do about it
@@ -4405,7 +4398,7 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 	if !errors.As(err, &fe) {
 		t.Fatalf("Open error is not a *FormatVersionError: %T %v", err, err)
 	}
-	if fe.Stored != "3" || fe.Want != formatVersion {
+	if fe.Stored != "4" || fe.Want != formatVersion {
 		t.Fatalf("FormatVersionError = {Stored %q, Want %q}, want {\"2\", %q}", fe.Stored, fe.Want, formatVersion)
 	}
 }

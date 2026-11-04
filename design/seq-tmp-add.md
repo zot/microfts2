@@ -40,7 +40,7 @@ Caller              DB                    Overlay               Chunker
   |                  |                      |                      |
   |                  |                      |--store overlayFile   |
   |                  |                      |  (content,chunks,    |
-  |                  |                      |   token bag)         |
+  |                  |                      |   locations)         |
   |                  |                      |--update counters     |
   |                  |                      |--WUnlock             |
   |                  |<--fileid-------------|                      |
@@ -106,7 +106,6 @@ Caller              DB                    Overlay               Chunker
   |                  |                       |  for each chunk:     |
   |                  |                       |    dedupOrCreate      |
   |                  |                       |    append to chunks  |
-  |                  |                       |    merge token bag   |
   |                  |                       |--extend content (R437)|
   |                  |                       |--WUnlock             |
   |                  |<--fileid-------------|                      |

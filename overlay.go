@@ -31,8 +31,7 @@ type overlayFile struct {
 	path     string
 	content  []byte // stored for chunk retrieval
 	strategy string
-	chunks   []FileChunkEntry
-	tokens   []TokenEntry
+	chunks   []FileChunkEntry // R769: no file-level token bag, as in the F record
 }
 
 // overlayChunk is the in-memory equivalent of a CRecord.
@@ -136,15 +135,13 @@ func (o *overlay) updateFile(path, strategy string, content []byte, db *DB, cb C
 	old.content = append([]byte(nil), content...)
 	old.strategy = strategy
 	old.chunks = nil
-	old.tokens = nil
 	o.populateFileChunksLocked(old, collected, ich)
 	return nil
 }
 
-// populateFileChunksLocked dedup-creates chunks and builds the file's chunk list
-// and token bag. Must hold write lock. Fires ich for genuinely-new chunks.
+// populateFileChunksLocked dedup-creates chunks and builds the file's chunk
+// list. Must hold write lock. Fires ich for genuinely-new chunks.
 func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []collectedChunk, ich IndexedChunkCallback) {
-	var fileTokMap map[string]int
 	for i := range collected {
 		cc := collected[i]
 		chunkID, isNew := o.dedupOrCreateChunk(cc, ofile.fileID)
@@ -156,16 +153,7 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 			Location: string(cc.Range),
 			Locator:  cc.Locator,
 		})
-		if fileTokMap == nil {
-			fileTokMap = make(map[string]int)
-		}
-		for _, te := range cc.tokens {
-			fileTokMap[te.Token] += te.Count
-		}
 		collected[i].Content = nil // release content after overlay chunk creation (and after callback fire)
-	}
-	for tok, cnt := range fileTokMap {
-		ofile.tokens = append(ofile.tokens, TokenEntry{Token: tok, Count: cnt})
 	}
 }
 
@@ -250,9 +238,6 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 		return 0, fmt.Errorf("tmp file removed during append: %s", path)
 	}
 
-	fileTokMap := make(map[string]int, len(ofile.tokens))
-	mergeTokenBag(fileTokMap, ofile.tokens)
-
 	for i := range collected {
 		cc := collected[i]
 		chunkID, isNew := o.dedupOrCreateChunk(cc, ofile.fileID)
@@ -264,11 +249,9 @@ func (o *overlay) appendFile(path, strategy string, content []byte, db *DB, opts
 			Location: string(cc.Range),
 			Locator:  cc.Locator,
 		})
-		mergeTokenBag(fileTokMap, cc.tokens)
 		collected[i].Content = nil // release content after overlay chunk creation (and after callback fire)
 	}
 
-	ofile.tokens = tokenBagToEntries(fileTokMap)
 	ofile.content = append(ofile.content, content...)
 	return ofile.fileID, nil
 }

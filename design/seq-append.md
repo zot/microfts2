@@ -85,7 +85,6 @@ DB                                          Trigrams       Chunker
  |                                             |              |
  |    update F record:                         |              |
  |      append chunk entries (with locator)    |              |
- |      merge token bag                        |              |
  |      set contentHash (from opt)             |              |
  |      set modTime (from opt)                 |              |
  |      set fileLength (from opt)              |              |

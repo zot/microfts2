@@ -717,33 +717,6 @@ func tokenHash(token string) uint32 {
 	return h
 }
 
-// mergeTokenBag merges source token entries into a destination bag (summing counts).
-func mergeTokenBag(dst map[string]int, src []TokenEntry) {
-	for _, te := range src {
-		dst[te.Token] += te.Count
-	}
-}
-
-// subtractTokenBag removes source token entries from a destination bag.
-// Used by AppendChunks drop-and-replace to undo a dropped chunk's contribution.
-func subtractTokenBag(dst map[string]int, src []TokenEntry) {
-	for _, te := range src {
-		dst[te.Token] -= te.Count
-		if dst[te.Token] <= 0 {
-			delete(dst, te.Token)
-		}
-	}
-}
-
-// tokenBagToEntries converts a map bag to a slice of TokenEntry.
-func tokenBagToEntries(bag map[string]int) []TokenEntry {
-	entries := make([]TokenEntry, 0, len(bag))
-	for tok, cnt := range bag {
-		entries = append(entries, TokenEntry{Token: tok, Count: cnt})
-	}
-	return entries
-}
-
 // --- T/W record helpers ---
 
 // postingKey names one T record (by trigram) or W record (by token hash).
@@ -1128,7 +1101,7 @@ func Open(path string, opts Options) (*DB, error) {
 		if err != nil {
 			return err
 		}
-		if v != formatVersion { // R762
+		if v != formatVersion { // R768
 			return &FormatVersionError{DBName: dbName, Stored: v, Want: formatVersion} // R751
 		}
 		s, err := loadSettings(bucketWrap{b})
@@ -1262,11 +1235,12 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 	return bytes.NewReader(f.content), nil
 }
 
-// formatVersion is the DB format this code reads and writes. Format "4" made
-// the F record's name list one name; "3" added its chunkerVersion. Open never
-// migrates an older database (see specs/migrations/complete/004-f-one-name.md
-// and complete/003-f-chunker-version.md). R761, R762
-const formatVersion = "4"
+// formatVersion is the DB format this code reads and writes. Format "5"
+// dropped the F record's token bag; "4" made its name list one name; "3" added
+// its chunkerVersion. Open never migrates an older database (see
+// specs/migrations/complete/005-f-no-token-bag.md, 004-f-one-name.md and
+// complete/003-f-chunker-version.md). R767, R768
+const formatVersion = "5"
 
 // FormatVersionError is Open's refusal of a database written in another
 // format: the caller can tell it apart from other open failures with
@@ -1950,7 +1924,6 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 	// Process each chunk — chunk dedup via H records
 	fileChunks := make([]FileChunkEntry, len(chunks))
 	chunkIDs := make([]uint64, len(chunks))
-	fileBag := make(map[string]int) // file-level token bag
 	var newChunks []newChunkTW
 
 	for i, ch := range chunks {
@@ -1969,7 +1942,6 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 		fileChunks[i] = FileChunkEntry{ChunkID: chunkid, Location: string(ch.Range), Locator: ch.Locator}
 		chunks[i].Content = nil // release content after C record write (and after callback fire)
 		chunkIDs[i] = chunkid
-		mergeTokenBag(fileBag, ch.tokens)
 	}
 
 	// R275, R276: update corpus counters for new chunks
@@ -1986,8 +1958,7 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 		Strategy:       strategy,
 		ChunkerVersion: db.chunkerVersion(strategy), // R716
 		Name:           fpath,                       // R763: stored as given
-		Chunks:         fileChunks,
-		Tokens:         tokenBagToEntries(fileBag),
+		Chunks:         fileChunks,                  // R765: no token bag
 	}
 	return fileid, chunkIDs, b.Put(makeFKey(fileid), frec.MarshalValue())
 }
@@ -2122,14 +2093,11 @@ func (db *DB) cascadeOrphan(th TxnHolder, pe postingEdits, chunkid uint64, crec 
 	return nil
 }
 
-// dropOccurrenceInline drops one occurrence of fileid from chunkid's C record
-// and subtracts the dropped chunk's tokens from fileBag in a single read.
-// AppendChunks uses this on its drop-and-replace path so bag bookkeeping and
-// the decrement share one C-record read. rcb (if non-nil) fires before
+// dropOccurrenceInline drops one occurrence of fileid from chunkid's C record,
+// on AppendChunks' drop-and-replace path. rcb (if non-nil) fires before
 // orphan deletion. // CRC: crc-DB.md | R608
 func (db *DB) dropOccurrenceInline(
 	th TxnHolder, pe postingEdits, chunkid, fileid uint64,
-	fileBag map[string]int,
 	removedChunks, removedTokens *int64,
 	rcb RemovedChunkCallback,
 ) error {
@@ -2145,7 +2113,6 @@ func (db *DB) dropOccurrenceInline(
 	if err != nil {
 		return nil
 	}
-	subtractTokenBag(fileBag, crec.Tokens)
 	crec.FileIDs, _ = decFileID(crec.FileIDs, fileid)
 	if len(crec.FileIDs) > 0 {
 		return b.Put(cKey, crec.MarshalValue())
@@ -2738,18 +2705,13 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 			}
 		}
 
-		// Build file-level token bag from existing chunks before any drop
-		fileBag := make(map[string]int)
-		mergeTokenBag(fileBag, frec.Tokens)
-
-		// Drop-and-replace: read the dropped chunk's C record once; subtract its
-		// tokens from this file's bag; then either rewrite C with one fewer
-		// occurrence or cascade orphan cleanup. // R604, R608
+		// Drop-and-replace: rewrite the dropped chunk's C record with one fewer
+		// occurrence, or cascade orphan cleanup. // R604, R608
 		var droppedRemoved, droppedTokens int64
 		pe := postingEdits{} // the dropped chunk's removals and the new chunks' additions, fused (R731)
 		if p.replacedLast && len(frec.Chunks) > 0 {
 			last := frec.Chunks[len(frec.Chunks)-1]
-			if err := db.dropOccurrenceInline(th, pe, last.ChunkID, fileid, fileBag, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
+			if err := db.dropOccurrenceInline(th, pe, last.ChunkID, fileid, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
 				return err
 			}
 			frec.Chunks = frec.Chunks[:len(frec.Chunks)-1]
@@ -2772,7 +2734,6 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 				}
 			}
 			frec.Chunks = append(frec.Chunks, FileChunkEntry{ChunkID: chunkid, Location: string(ch.Range), Locator: ch.Locator})
-			mergeTokenBag(fileBag, ch.tokens)
 			p.chunks[i].Content = nil // release content after C record write (and after callback fire)
 		}
 
@@ -2807,9 +2768,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		if cfg.hasFileLength {
 			frec.FileLength = cfg.fileLength
 		}
-		frec.Tokens = tokenBagToEntries(fileBag)
-
-		return b.Put(makeFKey(fileid), frec.MarshalValue())
+		return b.Put(makeFKey(fileid), frec.MarshalValue()) // R769: no token bag to keep
 	})
 	if err != nil {
 		return err

@@ -82,11 +82,11 @@
 ## Feature: F Records (Per-File)
 **Source:** specs/storage.md
 
-- **R233:** `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
+- **~~R233:~~** (Retired T94 — see R765) `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
 - **~~R234:~~** (Retired T67 — see R717) F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
 - **~~R235:~~** (Retired T93 — see R760) F record names: `[filecount:varint] [name:str]...` — multiple names for duplicate/copied files sharing a fileid
 - **R236:** F record chunks: `[chunkcount:varint] [[chunkid:varint] [location:str]]...` — ordered chunk list with opaque range labels from chunker
-- **R237:** F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
+- **~~R237:~~** (Retired T95 — no replacement) F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
 
 ## Feature: I Records (Config)
 **Source:** specs/storage.md
@@ -365,7 +365,7 @@
 - **R154:** ~~removed: forward index replaced by T records~~
 - **R155:** ~~removed: R record replaced by C record fileid list~~
 - **R156:** For each new chunk: hash content, check H for dedup, create/update C records, batch T/W updates
-- **R157:** F record updated: appended chunk entries (chunkid + location), merged token bag, new ContentHash, ModTime, FileLength
+- **~~R157:~~** (Retired T96 — see R769) F record updated: appended chunk entries (chunkid + location), merged token bag, new ContentHash, ModTime, FileLength
 - **R158:** `AppendOption` functional option type: `func(*appendConfig)`
 - **R159:** `WithContentHash(hash string)` option: full-file SHA-256, caller pre-computed
 - **R160:** `WithModTime(t int64)` option: Unix nanoseconds for the updated file
@@ -486,8 +486,8 @@
 ## Feature: File-Level Token Bag
 **Source:** specs/storage.md
 
-- **R261:** F record aggregated token bag is the union of all chunk tokens with summed counts
-- **R262:** Token bag maintained incrementally: AddFile/Reindex rebuilds, AppendChunks merges new chunk tokens
+- **~~R261:~~** (Retired T97 — no replacement) F record aggregated token bag is the union of all chunk tokens with summed counts
+- **~~R262:~~** (Retired T98 — no replacement) Token bag maintained incrementally: AddFile/Reindex rebuilds, AppendChunks merges new chunk tokens
 - **R263:** Enables file-level scoring and pre-filtering without reading every chunk's C record
 
 ## Feature: Overlap Scoring
@@ -666,7 +666,7 @@
 - **R433:** Chunks appended content using the named strategy; adds resulting chunks to the file's chunk list
 - **R434:** Existing chunks untouched — append only extends the chunk list
 - **R435:** Chunk deduplication within the overlay applies to new chunks (via `dedupOrCreateChunk`)
-- **R436:** File-level token bag merged with tokens from new chunks
+- **~~R436:~~** (Retired T99 — no replacement) File-level token bag merged with tokens from new chunks
 - **R437:** Stored content bytes extended: `ofile.content = append(ofile.content, content...)`
 - **R438:** (inferred) `adjustRange(rangeStr string, baseLine int) (string, error)` — shifts line range strings by baseLine offset
 - **R439:** `WithBaseLine(n int)` option: 1-based line offset applied to chunk ranges via `adjustRange` so line numbers are absolute
@@ -1128,10 +1128,19 @@
 
 ## Feature: F record has one name
 **Source:** specs/migrations/complete/004-f-one-name.md
-- **R759:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Name string, Chunks []FileChunkEntry, Tokens []TokenEntry`
-- **R760:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [name:str] [chunks] [tokens]`: one name, no count; `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name
-- **R761:** `Create` writes DB format version `"4"` to the `version` I record
-- **R762:** `Open` refuses a database whose `version` I record is not `"4"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **~~R759:~~** (Retired T100 — see R766) `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Name string, Chunks []FileChunkEntry, Tokens []TokenEntry`
+- **~~R760:~~** (Retired T101 — see R765) The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [name:str] [chunks] [tokens]`: one name, no count; `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name
+- **~~R761:~~** (Retired T102 — see R767) `Create` writes DB format version `"4"` to the `version` I record
+- **~~R762:~~** (Retired T103 — see R768) `Open` refuses a database whose `version` I record is not `"4"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
 - **R763:** The stored spelling is not folded: `FRecord.Name` and the final N value keep the path as given
 - **R764:** A path-taking write that reaches an existing file through a spelling different from the stored one (same filename key) updates the stored spelling to the one given: `FRecord.Name`, the final N value, and the path cache
 
+
+## Feature: F record has no token bag
+**Source:** specs/migrations/complete/005-f-no-token-bag.md
+
+- **R765:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [name:str] [chunkcount:varint] [[chunkid:varint] [location:bytes] [locator:bytes]]...` and ends after the chunk list; `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion and Name
+- **R766:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Name string, Chunks []FileChunkEntry`
+- **R767:** `Create` writes DB format version `"5"` to the `version` I record
+- **R768:** `Open` refuses a database whose `version` I record is not `"5"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **R769:** An append updates the F record's chunk entries (chunkid, location, locator), ContentHash, ModTime and FileLength, and keeps no file-level token counts

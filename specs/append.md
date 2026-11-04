@@ -16,7 +16,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string) error
 
 Chunks `content` using the named strategy, adds the resulting chunks and trigrams to the existing file's records. The `content` parameter is only the new bytes (the appended portion), not the full file.
 
-Updates the F record: new ContentHash, ModTime, FileLength, appended chunk entries, merged token bag. Does NOT touch existing chunks or trigrams — they remain valid.
+Updates the F record: new ContentHash, ModTime, FileLength, appended chunk entries. Does NOT touch existing chunks or trigrams — they remain valid.
 
 For each new chunk: hash content, check H record for dedup. New chunks get C records, T/W record updates. Existing chunks (dedup hit) just add fileid to C record. F record gets new (chunkid, location) entries appended.
 

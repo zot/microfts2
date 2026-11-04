@@ -205,10 +205,6 @@ func TestFRecordRoundtrip(t *testing.T) {
 			{ChunkID: 2, Location: "11-20"},
 			{ChunkID: 3, Location: "21-30", Locator: []byte("docx#para/3")},
 		},
-		Tokens: []TokenEntry{
-			{Token: "hello", Count: 7},
-			{Token: "world", Count: 3},
-		},
 	}
 	copy(orig.ContentHash[:], "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
 
@@ -243,13 +239,21 @@ func TestFRecordRoundtrip(t *testing.T) {
 			t.Errorf("Chunk[%d]: got %+v, want %+v", i, got.Chunks[i], orig.Chunks[i])
 		}
 	}
-	if len(got.Tokens) != len(orig.Tokens) {
-		t.Fatalf("Tokens len: got %d, want %d", len(got.Tokens), len(orig.Tokens))
+}
+
+// TestFRecordEndsAfterItsChunks: the F record value ends after the chunk list,
+// and a value with bytes past it (a format "4" token bag read as format "5")
+// is refused rather than decoded.
+// Test: test-DB.md | CRC: crc-DB.md | R765
+func TestFRecordEndsAfterItsChunks(t *testing.T) {
+	orig := FRecord{Strategy: "lines", Name: "/f", Chunks: []FileChunkEntry{{ChunkID: 7, Location: "1-2"}}}
+	data := orig.MarshalValue()
+	if _, err := UnmarshalFValue(data); err != nil {
+		t.Fatalf("the record itself: %v", err)
 	}
-	for i := range orig.Tokens {
-		if got.Tokens[i] != orig.Tokens[i] {
-			t.Errorf("Token[%d]: got %+v, want %+v", i, got.Tokens[i], orig.Tokens[i])
-		}
+	// A format "4" record's empty token bag is one more byte, a zero count.
+	if _, err := UnmarshalFValue(append(data, 0)); err == nil {
+		t.Fatal("a record with a token bag after its chunks decoded without error")
 	}
 }
 

@@ -1,5 +1,5 @@
 # Sequence: Staleness Check and Refresh
-**Requirements:** R63-69, R719, R760
+**Requirements:** R63-69, R719, R765
 
 Participants: DB
 

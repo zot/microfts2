@@ -10,7 +10,7 @@ We add a file to the database with a chosen chunking strategy:
 - for each chunk: compute the dedup hash (SHA-256 over Content, then the marshaled Attrs when present — see "Chunk identity includes Attrs"), extract trigrams on Content, tokenize Content, copy Attrs
   - look up H record by hash — if chunkid exists, increment this fileid's count in the existing C record's fileids list (insert with count=1 if absent)
   - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + [fileid, count=1]), append chunkid to T records for each trigram, append chunkid to W records for each token
-- update F record: append (chunkid, location, locator) entry, merge tokens into file-level token bag
+- update F record: append (chunkid, location, locator) entry
 - batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record (see "Posting updates are coalesced per write" below)
 
 When removing a file:

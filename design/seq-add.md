@@ -71,7 +71,7 @@ DB                      Chunker       Trigrams      KeyChain
  |                                       |            |
  |  create F record: F[fileid] ->        |            |
  |    modTime, contentHash, fileLength,  |            |
- |    strategy, names, chunks, tokenBag  |            |
+ |    strategy, name, chunks             |            |
  |                                       |            |
  |  return (fileid, nil)                 |            |
  |  WithContent: return (fileid, content, nil)       |

@@ -176,9 +176,8 @@ type FRecord struct {
 	Strategy    string
 	// R717: the strategy's chunker version when the file was chunked
 	ChunkerVersion uint32
-	Name           string // R759, R763: the file's path as last given
-	Chunks         []FileChunkEntry
-	Tokens         []TokenEntry
+	Name           string           // R766, R763: the file's path as last given
+	Chunks         []FileChunkEntry // R766: the record ends here; no token bag since format "5"
 }
 
 // TRecord is the trigram inverted index entry.
@@ -420,18 +419,13 @@ func (f *FRecord) MarshalValue() []byte {
 	size += binary.MaxVarintLen64                   // fileLength
 	size += binary.MaxVarintLen64 + len(f.Strategy) // strategy
 	size += binary.MaxVarintLen64                   // chunkerVersion
-	size += binary.MaxVarintLen64 + len(f.Name)     // name (R760)
+	size += binary.MaxVarintLen64 + len(f.Name)     // name (R765)
 	size += binary.MaxVarintLen64                   // chunkcount
 	for _, ch := range f.Chunks {
 		size += binary.MaxVarintLen64                    // chunkid
 		size += binary.MaxVarintLen64 + len(ch.Location) // location
 		size += binary.MaxVarintLen64 + len(ch.Locator)  // locator
 	}
-	size += binary.MaxVarintLen64 // tokencount
-	for _, t := range f.Tokens {
-		size += binary.MaxVarintLen64 + len(t.Token) + binary.MaxVarintLen64
-	}
-
 	buf := make([]byte, size)
 	off := 0
 
@@ -447,7 +441,7 @@ func (f *FRecord) MarshalValue() []byte {
 
 	off += putUvarint(buf[off:], uint64(f.ChunkerVersion)) // R717
 
-	off += putString(buf[off:], f.Name) // R760: one name, no count
+	off += putString(buf[off:], f.Name) // R765: one name, no count
 
 	// Chunks: [chunkid, location, locator]
 	off += putUvarint(buf[off:], uint64(len(f.Chunks)))
@@ -457,13 +451,7 @@ func (f *FRecord) MarshalValue() []byte {
 		off += putBytes(buf[off:], ch.Locator)
 	}
 
-	off += putUvarint(buf[off:], uint64(len(f.Tokens)))
-	for _, t := range f.Tokens {
-		off += putString(buf[off:], t.Token)
-		off += putUvarint(buf[off:], uint64(t.Count))
-	}
-
-	return buf[:off]
+	return buf[:off] // R765: nothing after the chunk list
 }
 
 // unmarshalFHeader decodes the header fields of an F record value:
@@ -503,7 +491,7 @@ func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	f.ChunkerVersion = uint32(cv)
 	off += n
 
-	name, n := readString(data[off:]) // R760
+	name, n := readString(data[off:]) // R765
 	if n == 0 {
 		return f, 0, fmt.Errorf("FRecord: bad name")
 	}
@@ -564,33 +552,17 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 		off += n
 	}
 
-	// Tokens
-	nTokens, n := readUvarint(data[off:])
-	if n <= 0 {
-		return f, fmt.Errorf("FRecord: bad tokencount")
+	// R765: the record ends after the chunk list. Bytes past it are an older
+	// layout (a format "4" token bag) read as this one, so they are refused
+	// rather than ignored.
+	if off != len(data) {
+		return f, fmt.Errorf("FRecord: %d bytes after the chunk list", len(data)-off)
 	}
-	off += n
-	f.Tokens = make([]TokenEntry, nTokens)
-	for i := range f.Tokens {
-		tok, n := readString(data[off:])
-		if n == 0 {
-			return f, fmt.Errorf("FRecord: bad token")
-		}
-		f.Tokens[i].Token = tok
-		off += n
-		cnt, n := readUvarint(data[off:])
-		if n <= 0 {
-			return f, fmt.Errorf("FRecord: bad token count")
-		}
-		f.Tokens[i].Count = int(cnt)
-		off += n
-	}
-
 	return f, nil
 }
 
 // R451, R452: UnmarshalFHeader decodes only the header fields of an F record value:
-// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name. Skips Chunks and Tokens.
+// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name. Skips Chunks.
 func UnmarshalFHeader(data []byte) (FRecord, error) {
 	f, _, err := unmarshalFHeader(data)
 	return f, err

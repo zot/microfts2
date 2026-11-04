@@ -65,8 +65,8 @@
 ## Test: append chunks updates F record metadata
 **Purpose:** F record metadata after append
 **Input:** add file, AppendChunks with WithContentHash, WithModTime, WithFileLength
-**Expected:** FRecord reflects updated hash, modTime, fileLength, appended chunk entries and merged token bag
-**Refs:** crc-DB.md, seq-append.md, R157
+**Expected:** FRecord reflects updated hash, modTime, fileLength and appended chunk entries
+**Refs:** crc-DB.md, seq-append.md, R769
 
 ## Test: append chunks invalid fileid
 **Purpose:** error on nonexistent fileid
@@ -223,9 +223,9 @@
 
 ## Test: FRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode
-**Input:** create an FRecord with known metadata, names, chunks, token bag, marshal, unmarshal
+**Input:** create an FRecord with known metadata, name and chunks, marshal, unmarshal
 **Expected:** all fields match after roundtrip
-**Refs:** crc-DB.md, R759, R735
+**Refs:** crc-DB.md, R766, R735
 **Code:** records_test.go
 
 ## Test: TRecord marshal/unmarshal roundtrip
@@ -324,12 +324,6 @@
 **Input:** call `FilterByRatio(0.50, 0)` and `FilterByRatio(0.50, 1)` across a table of (Count, totalChunks) pairs spanning both sides of the threshold
 **Expected:** both agree with the pure ratio rule `count <= int(totalChunks × maxRatio)` on every pair, since a trigram past the threshold already has at least one posting
 **Refs:** crc-DB.md, seq-search.md, R675
-
-## Test: file-level token bag
-**Purpose:** F record token bag is aggregated from chunks
-**Input:** add a multi-line file, read FRecord
-**Expected:** token bag contains all tokens from all chunks with summed counts
-**Refs:** crc-DB.md, R237, R261
 
 ## Test: ScoreOverlap
 **Purpose:** overlap scoring counts matching trigrams without normalization
@@ -477,7 +471,8 @@
 **Alarm:** 8
 **Fire alarm:** defeat the last-locator comparison in appendPrepared (guard it with `if false`, build-safe) — the stale append is applied against the moved tail; the errors.Is(ErrAppendTailMoved) assertion goes red (nil error)
 **Inject:** db.go:appendPrepared
-**Pulled:** 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
+@alarm-hash: 5bb486cc944a8beb
+**Pulled:** 2026-11-04 — rang — last-locator comparison guarded with `if false` in appendPrepared, after #218 removed the token-bag bookkeeping around it: TestAppendPreparedRefusesMovedTail red, "expected ErrAppendTailMoved, got <nil>"; restored clean *Earlier —* 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
 
 ## Test: PrepareAppend opens no write transaction
 **Purpose:** append compute is transaction-free (R685)
@@ -648,13 +643,14 @@
 **Purpose:** the F record records the strategy's chunker version when a file is chunked, and an append leaves it alone
 **Input:** register a VersionedChunker at version 3 and a plain chunker; AddFile one file with each; AppendChunks to the versioned file; StorePrepared a third file
 **Expected:** FileInfoByID ChunkerVersion is 3, 0, 3 (after append), 3 (prepared store)
-**Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R760
+**Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R765
 **Code:** db_test.go
 **Alarm:** 24
 **Fire alarm:** stop stamping in addFileInTxn; red is version 0 where 3 was expected
 **Inject:** db.go:DB.addFileInTxn
-@alarm-hash: 1e9e21a2424d45bc
-**Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): ChunkerVersion 0, want 3 *Earlier —* 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
+@alarm-hash: 389251aeaddbe79c
+**Pulled:** 2026-11-04 — rang — addFileInTxn stamps ChunkerVersion 0, after #218 changed the struct literal: TestChunkerVersionStamped red, "ChunkerVersion = 0, want 3"; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): ChunkerVersion 0, want 3 *Earlier —* 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
+
 ## Test: chunker rule change makes files stale
 **Purpose:** a version bump makes untouched files stale, and a refresh re-chunks and clears it
 **Input:** a versioned chunker at version 1; AddFile; bump the chunker's version to 2 (re-register); CheckFile, StaleFiles, RefreshStale, CheckFile
@@ -666,6 +662,7 @@
 **Inject:** db.go:DB.classifyFile
 @alarm-hash: 34a78cc1f82ca562
 **Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): after the bump CheckFile said fresh, want stale *Earlier —* 2026-10-25 — rang: after bump CheckFile fresh, want stale
+
 ## Test: append refused onto old-rule chunks
 **Purpose:** an append onto a file chunked under another version refuses and writes nothing
 **Input:** versioned chunker at version 1; AddFile; bump to 2; AppendChunks with non-empty content; also AppendPrepared with a PreparedAppend
@@ -675,7 +672,8 @@
 **Alarm:** 26
 **Fire alarm:** remove the chunkerStale check from appendPrepared; red is a nil error and an extra chunk
 **Inject:** db.go:DB.appendPrepared
-**Pulled:** 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
+@alarm-hash: 5bb486cc944a8beb
+**Pulled:** 2026-11-04 — rang — chunkerStale check disabled in appendPrepared: TestChunkerVersionAppendRefused red, "err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
 
 ## Test: an append with no chunks is refused onto old-rule chunks
 **Purpose:** the version check is not skipped when the append yields no chunks — ark's chat chunker indexes nothing from a tool-call-only tail, and that append must still refuse on a version-stale file
@@ -686,7 +684,8 @@
 **Alarm:** 27
 **Fire alarm:** restore the early return in appendPrepared for an append with no chunks and no replace; red is a nil error
 **Inject:** db.go:DB.appendPrepared
-**Pulled:** 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
+@alarm-hash: 5bb486cc944a8beb
+**Pulled:** 2026-11-04 — rang — early return for an append with no chunks and no replace: TestChunkerVersionEmptyAppendRefused red, "AppendPrepared with no chunks: err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
 
 ## Test: an append with no chunks records the file's new state
 **Purpose:** an append-aware chunker that indexes nothing from the new bytes still moves the F record's length, hash and modtime forward, so the file does not read stale by content and the next scan does not repeat the append from the old length
@@ -697,19 +696,21 @@
 **Alarm:** 28
 **Fire alarm:** skip the F record metadata update when the append has no chunks; red is the old FileLength and CheckFile stale
 **Inject:** db.go:DB.appendPrepared
-**Pulled:** 2026-10-25 — rang: F record not moved forward, length 11 want 21
+@alarm-hash: 5bb486cc944a8beb
+**Pulled:** 2026-11-04 — rang — F record metadata update skipped when the append has no chunks: TestAppendNoChunksRecordsFileState red, "F record not moved forward: length 11 (want 21)"; restored clean *Earlier —* 2026-10-25 — rang: F record not moved forward, length 11 want 21
 
 ## Test: Open refuses another format version
 **Purpose:** a database in an older layout is refused rather than mis-read
 **Input:** Create a DB, overwrite its version I record with "3", close, Open
 **Expected:** Open errors and the error names "3"; a fresh Create reports Version() "4"
-**Refs:** crc-DB.md, R761, R762
+**Refs:** crc-DB.md, R767, R768
 **Code:** db_test.go
 **Alarm:** 29
 **Fire alarm:** delete the version check in Open; red is Open succeeding
 **Inject:** db.go:Open
-@alarm-hash: f70f26b570710341
-**Pulled:** 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted format version 3 *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted the older format *Earlier —* 2026-10-25 — rang: Open accepted format version 2
+@alarm-hash: 058b5f074fc39827
+**Pulled:** 2026-11-04 — rang — version check in Open disabled: TestOpenRefusesOtherFormat red, "Open accepted format version 4" (the message read 3 until the test text was corrected the same day); restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted format version 3 *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted the older format *Earlier —* 2026-10-25 — rang: Open accepted format version 2
+
 ## Test: Open's format refusal is typed
 **Purpose:** R751: a caller can recognize the refusal with `errors.As` and read the stored and expected versions from it
 **Input:** the same database as the test above (version I record overwritten with "2"), Open
@@ -719,8 +720,9 @@
 **Alarm:** 38
 **Fire alarm:** go back to the untyped error the check returned before, `fmt.Errorf("open db %q: format version %q, want %q", ...)`; red names the error as not a `*FormatVersionError`
 **Inject:** db.go:Open
-@alarm-hash: f70f26b570710341
-**Pulled:** 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
+@alarm-hash: 058b5f074fc39827
+**Pulled:** 2026-11-04 — rang — refusal returned as the old untyped fmt.Errorf: TestOpenRefusesOtherFormat red, "Open error is not a `*FormatVersionError`"; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
+
 ## Test: missing outranks chunker-version stale
 **Purpose:** a deleted file reports missing even when its chunker version is behind, so RefreshStale skips it instead of reindexing a file that is gone
 **Input:** versioned chunker at version 1; AddFile; bump to 2; delete the file; CheckFile; RefreshStale
@@ -732,6 +734,7 @@
 **Inject:** db.go:DB.classifyFile
 @alarm-hash: 34a78cc1f82ca562
 **Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): a deleted file under a bumped chunker read stale, want missing *Earlier —* 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
+
 ## Test: posting rewrite filters bytes and keeps order
 **Purpose:** removal filters the stored varint bytes without disturbing the survivors' order, additions land after the survivors, and a record left empty reads as deleted
 **Input:** stored postings 5, 300, 7, 70000 (one-, two- and three-byte varints); remove {300}, add [9]; separately remove every posting with nothing added
@@ -774,7 +777,8 @@
 **Alarm:** 34
 **Fire alarm:** apply the posting edits after the drop and again after the new chunks; red is the "sha"/"har" keys written twice
 **Inject:** db.go:DB.appendPrepared
-**Pulled:** 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
+@alarm-hash: 5bb486cc944a8beb
+**Pulled:** 2026-11-04 — rang — posting edits applied after the drop and again after the new chunks: TestAppendReplaceRewritesEachPostingOnce red, posting records written 2 times, want once; restored clean *Earlier —* 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
 
 ## Test: reindex callback sees final postings
 **Purpose:** the coalesced edits are applied before ReindexCallback fires, so a callback reading T records inside the txn sees orphans gone and new chunks present
@@ -857,3 +861,15 @@
 **Inject:** db.go:DB.RemoveFiles
 @alarm-hash: 0ad8caa63d370270
 **Pulled:** 2026-11-04 — rang: path cache still lists a.txt and b.txt after the batch; CheckFile answered "read F record 1: not found", not ErrNotIndexed
+
+## Test: the F record ends after its chunks
+**Purpose:** the F record value ends after its chunk list (R765), and a value with bytes past it, which is what a format "4" record's token bag looks like read as format "5", is refused rather than decoded with the tail ignored
+**Input:** an FRecord marshalled; the same bytes with one zero byte appended (a format "4" record's empty token bag)
+**Expected:** the first decodes; the second returns an error
+**Refs:** crc-DB.md, R765
+**Code:** records_test.go
+**Alarm:** 43
+**Fire alarm:** drop the trailing-bytes check in unmarshalFValue (return f, nil after the chunk list whatever is left); red is the appended-byte value decoding without error
+**Inject:** records.go:UnmarshalFValue
+@alarm-hash: ab613b40fc444b81
+**Pulled:** 2026-11-04 — rang — trailing-bytes check disabled in unmarshalFValue: TestFRecordEndsAfterItsChunks red, "a record with a token bag after its chunks decoded without error"; restored clean

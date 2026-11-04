@@ -64,7 +64,7 @@ Options:
   lets a second opener fail fast instead of hanging while another holds
   the DB.
 
-Format version: `Create` writes the DB format version `"4"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
+Format version: `Create` writes the DB format version `"5"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
 
 (bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 
@@ -116,7 +116,7 @@ func (c *CRecord) FileRecord(fileid uint64) (FRecord, error)
 // Update tx — the bucket is part of the CRecord and outlives the call.
 func (db *DB) ReadCRecord(tx *bbolt.Tx, chunkID uint64) (CRecord, error)
 
-// FRecord is the per-file record. Metadata, ordered chunks, file-level token bag.
+// FRecord is the per-file record. Metadata and ordered chunks.
 type FRecord struct {
     FileID      uint64
     ModTime     int64                // Unix nanos
@@ -126,7 +126,6 @@ type FRecord struct {
     ChunkerVersion uint32            // version of the strategy's chunker when the file was chunked
     Name        string               // the file's path, as last given
     Chunks      []FileChunkEntry     // {ChunkID uint64, Location string, Locator []byte}
-    Tokens      []TokenEntry         // aggregated bag across all chunks
 }
 
 // TRecord is the trigram inverted index entry.

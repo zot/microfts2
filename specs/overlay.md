@@ -15,7 +15,7 @@ Temporary document fileids count down from `math.MaxUint64`. The overlay maintai
 The overlay holds the same data that the index holds for disk-backed files, but in Go maps:
 
 - Per-chunk data: hash, trigram counts, token counts, attrs, fileids — equivalent to C records
-- Per-file data: chunk list with locations, token bag — equivalent to F records
+- Per-file data: chunk list with locations — equivalent to F records
 - Trigram inverted index: trigram → chunkid set — equivalent to T records
 - Token inverted index: token hash → chunkid set — equivalent to W records
 - Content hash → chunkid lookup — equivalent to H records
@@ -73,7 +73,7 @@ Shell `>>` semantics: append new content to an existing tmp:// document, or crea
 - Chunks the appended content using the named strategy, adds resulting chunks to the existing file's chunk list
 - Existing chunks are untouched — append only extends
 - Chunk deduplication within the overlay applies to new chunks
-- F record equivalent updated: chunk entries appended, token bag merged, content extended
+- F record equivalent updated: chunk entries appended, content extended
 - Returns the file's fileid (same fileid whether created or appended)
 - `WithBaseLine(n int)` option: 1-based line offset applied to chunk ranges so line numbers are absolute, not relative to the appended slice. Uses `adjustRange` to shift range strings.
 - Chunking happens outside the write lock (RLock to read file state, then chunk, then Lock to mutate)
