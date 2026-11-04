@@ -37,7 +37,7 @@ added, and the ones deleted when it is removed. The exported key-chain
 functions (`EncodeFilename`, `FinalKey`, `DecodeFilename`) stay pure
 encoders of the string they are given; the database folds before calling them.
 
-**The stored spelling is not folded.** The F record's `Names` and the final N
+**The stored spelling is not folded.** The F record's `Name` and the final N
 value keep the path as given, so every path microfts2 reports is spelled the
 way it was last given (see Respelling below).
 
@@ -52,7 +52,7 @@ After `Casey.md` is renamed `CASEY.md`, the folded key still finds the file,
 but its stored spelling is `Casey.md`, and that is what microfts2 would report
 forever. So **a path-taking write that reaches an existing file through a
 spelling different from the stored one updates the stored spelling** to the
-one it was given: the F record's `Names`, the final N value, and the in-memory
+one it was given: the F record's `Name`, the final N value, and the in-memory
 path cache.
 
 - **`Reindex` respells** as a consequence of what it already does: it removes

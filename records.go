@@ -176,7 +176,7 @@ type FRecord struct {
 	Strategy    string
 	// R717: the strategy's chunker version when the file was chunked
 	ChunkerVersion uint32
-	Names          []string
+	Name           string // R759, R763: the file's path as last given
 	Chunks         []FileChunkEntry
 	Tokens         []TokenEntry
 }
@@ -420,11 +420,8 @@ func (f *FRecord) MarshalValue() []byte {
 	size += binary.MaxVarintLen64                   // fileLength
 	size += binary.MaxVarintLen64 + len(f.Strategy) // strategy
 	size += binary.MaxVarintLen64                   // chunkerVersion
-	size += binary.MaxVarintLen64                   // filecount
-	for _, name := range f.Names {
-		size += binary.MaxVarintLen64 + len(name)
-	}
-	size += binary.MaxVarintLen64 // chunkcount
+	size += binary.MaxVarintLen64 + len(f.Name)     // name (R760)
+	size += binary.MaxVarintLen64                   // chunkcount
 	for _, ch := range f.Chunks {
 		size += binary.MaxVarintLen64                    // chunkid
 		size += binary.MaxVarintLen64 + len(ch.Location) // location
@@ -450,10 +447,7 @@ func (f *FRecord) MarshalValue() []byte {
 
 	off += putUvarint(buf[off:], uint64(f.ChunkerVersion)) // R717
 
-	off += putUvarint(buf[off:], uint64(len(f.Names)))
-	for _, name := range f.Names {
-		off += putString(buf[off:], name)
-	}
+	off += putString(buf[off:], f.Name) // R760: one name, no count
 
 	// Chunks: [chunkid, location, locator]
 	off += putUvarint(buf[off:], uint64(len(f.Chunks)))
@@ -473,8 +467,8 @@ func (f *FRecord) MarshalValue() []byte {
 }
 
 // unmarshalFHeader decodes the header fields of an F record value:
-// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names.
-// Returns the record, the byte offset after Names, and any error.
+// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name.
+// Returns the record, the byte offset after Name, and any error.
 func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	var f FRecord
 	if len(data) < 40 {
@@ -509,20 +503,12 @@ func unmarshalFHeader(data []byte) (FRecord, int, error) {
 	f.ChunkerVersion = uint32(cv)
 	off += n
 
-	nNames, n := readUvarint(data[off:])
-	if n <= 0 {
-		return f, 0, fmt.Errorf("FRecord: bad namecount")
+	name, n := readString(data[off:]) // R760
+	if n == 0 {
+		return f, 0, fmt.Errorf("FRecord: bad name")
 	}
+	f.Name = name
 	off += n
-	f.Names = make([]string, nNames)
-	for i := range f.Names {
-		s, n := readString(data[off:])
-		if n == 0 {
-			return f, 0, fmt.Errorf("FRecord: bad name")
-		}
-		f.Names[i] = s
-		off += n
-	}
 
 	return f, off, nil
 }
@@ -604,7 +590,7 @@ func UnmarshalFValue(data []byte) (FRecord, error) {
 }
 
 // R451, R452: UnmarshalFHeader decodes only the header fields of an F record value:
-// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names. Skips Chunks and Tokens.
+// ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name. Skips Chunks and Tokens.
 func UnmarshalFHeader(data []byte) (FRecord, error) {
 	f, _, err := unmarshalFHeader(data)
 	return f, err

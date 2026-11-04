@@ -299,7 +299,7 @@ func TestFilenameCaseRespellSearchCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frec.Names) == 0 || frec.Names[0] != upper {
-		t.Errorf("cached F record after respell names %v, want %q", frec.Names, upper)
+	if frec.Name != upper {
+		t.Errorf("cached F record after respell names %q, want %q", frec.Name, upper)
 	}
 }

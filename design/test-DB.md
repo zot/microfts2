@@ -225,7 +225,7 @@
 **Purpose:** record struct encode/decode
 **Input:** create an FRecord with known metadata, names, chunks, token bag, marshal, unmarshal
 **Expected:** all fields match after roundtrip
-**Refs:** crc-DB.md, R245, R735
+**Refs:** crc-DB.md, R759, R735
 **Code:** records_test.go
 
 ## Test: TRecord marshal/unmarshal roundtrip
@@ -648,13 +648,13 @@
 **Purpose:** the F record records the strategy's chunker version when a file is chunked, and an append leaves it alone
 **Input:** register a VersionedChunker at version 3 and a plain chunker; AddFile one file with each; AppendChunks to the versioned file; StorePrepared a third file
 **Expected:** FileInfoByID ChunkerVersion is 3, 0, 3 (after append), 3 (prepared store)
-**Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R717
+**Refs:** crc-DB.md, crc-Chunker.md, R714, R715, R716, R760
 **Code:** db_test.go
 **Alarm:** 24
 **Fire alarm:** stop stamping in addFileInTxn; red is version 0 where 3 was expected
 **Inject:** db.go:DB.addFileInTxn
-**Pulled:** 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
-
+@alarm-hash: 1e9e21a2424d45bc
+**Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): ChunkerVersion 0, want 3 *Earlier —* 2026-10-25 — rang: versioned AddFile ChunkerVersion = 0, want 3
 ## Test: chunker rule change makes files stale
 **Purpose:** a version bump makes untouched files stale, and a refresh re-chunks and clears it
 **Input:** a versioned chunker at version 1; AddFile; bump the chunker's version to 2 (re-register); CheckFile, StaleFiles, RefreshStale, CheckFile
@@ -664,8 +664,8 @@
 **Alarm:** 25
 **Fire alarm:** move the chunker-version check after the mod-time shortcut in classifyFile; red is "fresh" after the bump
 **Inject:** db.go:DB.classifyFile
-**Pulled:** 2026-10-25 — rang: after bump CheckFile fresh, want stale
-
+@alarm-hash: 34a78cc1f82ca562
+**Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): after the bump CheckFile said fresh, want stale *Earlier —* 2026-10-25 — rang: after bump CheckFile fresh, want stale
 ## Test: append refused onto old-rule chunks
 **Purpose:** an append onto a file chunked under another version refuses and writes nothing
 **Input:** versioned chunker at version 1; AddFile; bump to 2; AppendChunks with non-empty content; also AppendPrepared with a PreparedAppend
@@ -701,15 +701,15 @@
 
 ## Test: Open refuses another format version
 **Purpose:** a database in an older layout is refused rather than mis-read
-**Input:** Create a DB, overwrite its version I record with "2", close, Open
-**Expected:** Open errors and the error names "2"; a fresh Create reports Version() "3"
-**Refs:** crc-DB.md, R718, R721
+**Input:** Create a DB, overwrite its version I record with "3", close, Open
+**Expected:** Open errors and the error names "3"; a fresh Create reports Version() "4"
+**Refs:** crc-DB.md, R761, R762
 **Code:** db_test.go
 **Alarm:** 29
 **Fire alarm:** delete the version check in Open; red is Open succeeding
 **Inject:** db.go:Open
-**Pulled:** 2026-10-25 — rang: Open accepted format version 2
-
+@alarm-hash: f70f26b570710341
+**Pulled:** 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted format version 3 *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted the older format *Earlier —* 2026-10-25 — rang: Open accepted format version 2
 ## Test: Open's format refusal is typed
 **Purpose:** R751: a caller can recognize the refusal with `errors.As` and read the stored and expected versions from it
 **Input:** the same database as the test above (version I record overwritten with "2"), Open
@@ -719,9 +719,8 @@
 **Alarm:** 38
 **Fire alarm:** go back to the untyped error the check returned before, `fmt.Errorf("open db %q: format version %q, want %q", ...)`; red names the error as not a `*FormatVersionError`
 **Inject:** db.go:Open
-@alarm-hash: f4c525ba55db322a
-**Pulled:** 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
-
+@alarm-hash: f70f26b570710341
+**Pulled:** 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
 ## Test: missing outranks chunker-version stale
 **Purpose:** a deleted file reports missing even when its chunker version is behind, so RefreshStale skips it instead of reindexing a file that is gone
 **Input:** versioned chunker at version 1; AddFile; bump to 2; delete the file; CheckFile; RefreshStale
@@ -731,8 +730,8 @@
 **Alarm:** 30
 **Fire alarm:** move the chunkerStale check above the os.Stat in classifyFile; red is "stale" (found by probing past the list after simplification: the suite stayed green)
 **Inject:** db.go:DB.classifyFile
-**Pulled:** 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
-
+@alarm-hash: 34a78cc1f82ca562
+**Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): a deleted file under a bumped chunker read stale, want missing *Earlier —* 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
 ## Test: posting rewrite filters bytes and keeps order
 **Purpose:** removal filters the stored varint bytes without disturbing the survivors' order, additions land after the survivors, and a record left empty reads as deleted
 **Input:** stored postings 5, 300, 7, 70000 (one-, two- and three-byte varints); remove {300}, add [9]; separately remove every posting with nothing added

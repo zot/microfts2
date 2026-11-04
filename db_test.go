@@ -1246,8 +1246,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "3" { // R718
-		t.Fatalf("Version() = %q, want %q", v, "3")
+	if v != "4" { // R761
+		t.Fatalf("Version() = %q, want %q", v, "4")
 	}
 }
 
@@ -1371,7 +1371,7 @@ func TestUnmarshalFHeader(t *testing.T) {
 		ContentHash: [32]byte{1, 2, 3},
 		FileLength:  999,
 		Strategy:    "line",
-		Names:       []string{"/tmp/test.txt"},
+		Name:        "/tmp/test.txt",
 		Chunks:      []FileChunkEntry{{ChunkID: 42, Location: "1-10"}},
 		Tokens:      []TokenEntry{{Token: "hello", Count: 5}},
 	}
@@ -1393,8 +1393,8 @@ func TestUnmarshalFHeader(t *testing.T) {
 	if hdr.Strategy != orig.Strategy {
 		t.Errorf("Strategy = %q, want %q", hdr.Strategy, orig.Strategy)
 	}
-	if len(hdr.Names) != 1 || hdr.Names[0] != orig.Names[0] {
-		t.Errorf("Names = %v, want %v", hdr.Names, orig.Names)
+	if hdr.Name != orig.Name {
+		t.Errorf("Name = %q, want %q", hdr.Name, orig.Name)
 	}
 	// Chunks and Tokens must NOT be populated.
 	if len(hdr.Chunks) != 0 {
@@ -1500,8 +1500,8 @@ func TestDBFileInfoByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frec.Names) == 0 || frec.Names[0] != fp {
-		t.Errorf("Names = %v, want [%q]", frec.Names, fp)
+	if frec.Name != fp {
+		t.Errorf("Name = %q, want %q", frec.Name, fp)
 	}
 	if frec.Strategy != "line" {
 		t.Errorf("Strategy = %q, want line", frec.Strategy)
@@ -2856,10 +2856,8 @@ func TestSearchMultiSharedFilters(t *testing.T) {
 	filter := func(c CRecord) bool {
 		for _, fc := range c.FileIDs {
 			frec, err := c.FileRecord(fc.FileID)
-			if err == nil && len(frec.Names) > 0 {
-				if frec.Names[0] == dir+"/b.txt" {
-					return false
-				}
+			if err == nil && frec.Name == dir+"/b.txt" {
+				return false
 			}
 		}
 		return true
@@ -4388,7 +4386,7 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = db.DB().Update(func(tx *bbolt.Tx) error {
-		return iPut(bucketWrap{tx.Bucket([]byte("fts"))}, "version", "2")
+		return iPut(bucketWrap{tx.Bucket([]byte("fts"))}, "version", "3")
 	})
 	db.Close()
 	if err != nil {
@@ -4397,9 +4395,9 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 	db, err = Open(path, Options{})
 	if err == nil {
 		db.Close()
-		t.Fatal("Open accepted format version 2")
+		t.Fatal("Open accepted format version 3")
 	}
-	if !strings.Contains(err.Error(), `"2"`) {
+	if !strings.Contains(err.Error(), `"3"`) {
 		t.Fatalf("Open error does not name the stored version: %v", err)
 	}
 	// R751: the refusal is typed, so a caller can say what to do about it
@@ -4407,7 +4405,7 @@ func TestOpenRefusesOtherFormat(t *testing.T) {
 	if !errors.As(err, &fe) {
 		t.Fatalf("Open error is not a *FormatVersionError: %T %v", err, err)
 	}
-	if fe.Stored != "2" || fe.Want != formatVersion {
+	if fe.Stored != "3" || fe.Want != formatVersion {
 		t.Fatalf("FormatVersionError = {Stored %q, Want %q}, want {\"2\", %q}", fe.Stored, fe.Want, formatVersion)
 	}
 }

@@ -1128,7 +1128,7 @@ func Open(path string, opts Options) (*DB, error) {
 		if err != nil {
 			return err
 		}
-		if v != formatVersion {
+		if v != formatVersion { // R762
 			return &FormatVersionError{DBName: dbName, Stored: v, Want: formatVersion} // R751
 		}
 		s, err := loadSettings(bucketWrap{b})
@@ -1262,10 +1262,11 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 	return bytes.NewReader(f.content), nil
 }
 
-// formatVersion is the DB format this code reads and writes. Format "3" added
-// the F record's chunkerVersion; Open never migrates an older database (see
-// specs/migrations/complete/003-f-chunker-version.md). R718, R721
-const formatVersion = "3"
+// formatVersion is the DB format this code reads and writes. Format "4" made
+// the F record's name list one name; "3" added its chunkerVersion. Open never
+// migrates an older database (see specs/migrations/complete/004-f-one-name.md
+// and complete/003-f-chunker-version.md). R761, R762
+const formatVersion = "4"
 
 // FormatVersionError is Open's refusal of a database written in another
 // format: the caller can tell it apart from other open failures with
@@ -1368,8 +1369,8 @@ func (db *DB) loadPathCache() (map[uint64]string, error) {
 			data := make([]byte, len(v))
 			copy(data, v)
 			frec, fErr := UnmarshalFHeader(data)
-			if fErr == nil && len(frec.Names) > 0 {
-				result[fileid] = frec.Names[0]
+			if fErr == nil && frec.Name != "" {
+				result[fileid] = frec.Name
 			}
 		}
 		return nil
@@ -1809,12 +1810,7 @@ func (db *DB) respell(th TxnHolder, fpath string) (uint64, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	// A fresh slice: the F-record cache may share the old one.
-	names := []string{fpath}
-	if len(frec.Names) > 1 {
-		names = append(names, frec.Names[1:]...)
-	}
-	frec.Names = names
+	frec.Name = fpath // R764
 	return fileid, true, b.Put(makeFKey(fileid), frec.MarshalValue())
 }
 
@@ -1989,7 +1985,7 @@ func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string
 		FileLength:     fileLength,
 		Strategy:       strategy,
 		ChunkerVersion: db.chunkerVersion(strategy), // R716
-		Names:          []string{fpath},             // R741: stored as given
+		Name:           fpath,                       // R763: stored as given
 		Chunks:         fileChunks,
 		Tokens:         tokenBagToEntries(fileBag),
 	}
@@ -2858,8 +2854,8 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 		if err != nil {
 			return err
 		}
-		if len(frec.Names) > 0 {
-			filename = frec.Names[0]
+		if frec.Name != "" {
+			filename = frec.Name
 		}
 		if len(frec.Chunks) > 0 {
 			lastLocator = frec.Chunks[len(frec.Chunks)-1].Locator
@@ -3513,10 +3509,7 @@ func (s *searchConfig) scoreAndResolve(th TxnHolder, candidates []candidateChunk
 
 			for _, fce := range frec.Chunks {
 				if fce.ChunkID == cand.chunkID {
-					path := ""
-					if len(frec.Names) > 0 {
-						path = frec.Names[0]
-					}
+					path := frec.Name
 					results = append(results, SearchResult{
 						Path:    path,
 						Range:   fce.Location,
@@ -4600,10 +4593,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 
 	var statuses []FileStatus
 	for _, frec := range frecords {
-		path := ""
-		if len(frec.Names) > 0 {
-			path = frec.Names[0]
-		}
+		path := frec.Name
 		statuses = append(statuses, FileStatus{
 			Path:     path,
 			FileID:   frec.FileID,
@@ -4648,10 +4638,7 @@ func (db *DB) RefreshStale(strategy string, opts ...IndexOption) ([]FileStatus, 
 // any LMDB transaction.
 // CRC: crc-DB.md | Seq: seq-stale.md | R64, R719
 func (db *DB) classifyFile(frec FRecord) string {
-	filename := ""
-	if len(frec.Names) > 0 {
-		filename = frec.Names[0]
-	}
+	filename := frec.Name
 	fi, err := os.Stat(filename)
 	if err != nil {
 		return "missing"

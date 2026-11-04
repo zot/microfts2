@@ -151,7 +151,7 @@ func TestFRecordLocatorRoundtrip(t *testing.T) {
 	orig := FRecord{
 		FileID:   1,
 		Strategy: "line",
-		Names:    []string{"/x/y.txt"},
+		Name:     "/x/y.txt",
 		Chunks: []FileChunkEntry{
 			{ChunkID: 10, Location: "1-1", Locator: []byte{0, 100}},
 			{ChunkID: 11, Location: "2-2", Locator: nil},
@@ -199,7 +199,7 @@ func TestFRecordRoundtrip(t *testing.T) {
 		ModTime:    1709900000000000000,
 		FileLength: 12345,
 		Strategy:   "chunk-lines",
-		Names:      []string{"/home/user/file.txt", "/home/user/link.txt"},
+		Name:       "/home/user/file.txt",
 		Chunks: []FileChunkEntry{
 			{ChunkID: 1, Location: "1-10", Locator: []byte{0, 100}},
 			{ChunkID: 2, Location: "11-20"},
@@ -230,13 +230,8 @@ func TestFRecordRoundtrip(t *testing.T) {
 	if got.Strategy != orig.Strategy {
 		t.Errorf("Strategy: got %q, want %q", got.Strategy, orig.Strategy)
 	}
-	if len(got.Names) != len(orig.Names) {
-		t.Fatalf("Names len: got %d, want %d", len(got.Names), len(orig.Names))
-	}
-	for i := range orig.Names {
-		if got.Names[i] != orig.Names[i] {
-			t.Errorf("Name[%d]: got %q, want %q", i, got.Names[i], orig.Names[i])
-		}
+	if got.Name != orig.Name {
+		t.Errorf("Name: got %q, want %q", got.Name, orig.Name)
 	}
 	if len(got.Chunks) != len(orig.Chunks) {
 		t.Fatalf("Chunks len: got %d, want %d", len(got.Chunks), len(orig.Chunks))

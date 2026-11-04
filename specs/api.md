@@ -64,7 +64,7 @@ Options:
   lets a second opener fail fast instead of hanging while another holds
   the DB.
 
-Format version: `Create` writes the DB format version `"3"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
+Format version: `Create` writes the DB format version `"4"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
 
 (bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 
@@ -124,7 +124,7 @@ type FRecord struct {
     FileLength  int64
     Strategy    string
     ChunkerVersion uint32            // version of the strategy's chunker when the file was chunked
-    Names       []string             // multiple names for dup/copied files
+    Name        string               // the file's path, as last given
     Chunks      []FileChunkEntry     // {ChunkID uint64, Location string, Locator []byte}
     Tokens      []TokenEntry         // aggregated bag across all chunks
 }
@@ -298,7 +298,7 @@ Lazily loaded, incrementally maintained caches. First call scans F records using
 
 ## Partial F Record Unmarshal
 
-`UnmarshalFHeader(data)` decodes only the fixed-offset header fields of an F record value: ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names. Stops before Chunks and Tokens — those are the bulk of the value and are not needed by StaleFiles or any staleness check. `StaleFiles` uses this instead of `UnmarshalFValue` to avoid deserializing chunk and token arrays.
+`UnmarshalFHeader(data)` decodes only the fixed-offset header fields of an F record value: ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name. Stops before Chunks and Tokens — those are the bulk of the value and are not needed by StaleFiles or any staleness check. `StaleFiles` uses this instead of `UnmarshalFValue` to avoid deserializing chunk and token arrays.
 
 ## Search Cache
 

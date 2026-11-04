@@ -175,3 +175,10 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T86: R248 retired (2026-10-26 HRecord deleted: dead exported type, never marshalled)
 - [ ] C1: LangByName (bracket_chunker.go) is exported and backs the CLI's -lang flag, but no spec, requirement or CRC card describes it — R321 names only the package-level Lang* variables
 - [ ] O21: FinalKey for a name longer than 509 bytes keys only on the last segment (keychain.go:FinalKey), so two long paths sharing their tail collide on one final N key: the second AddFile returns ErrAlreadyIndexed and a lookup can resolve to the other file. Unverified by test; found 2026-10-26 by reading while carving casefold. bbolt allows 32 KB keys, so dropping the chain would also fix it
+- T87: R245 retired by R759 (2026-11-04 f-one-name: the F record holds one name)
+- T88: R717 retired by R760 (2026-11-04 f-one-name: the F record holds one name)
+- T89: R718 retired by R761 (2026-11-04 f-one-name: the F record holds one name)
+- T90: R721 retired by R762 (2026-11-04 f-one-name: the F record holds one name)
+- T91: R741 retired by R763 (2026-11-04 f-one-name: the F record holds one name)
+- T92: R744 retired by R764 (2026-11-04 f-one-name: the F record holds one name)
+- T93: R235 retired by R760 (2026-11-04 f-one-name: one name, no count; copies are separate records)

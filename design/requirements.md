@@ -84,7 +84,7 @@
 
 - **R233:** `F` records: `F[fileid:varint] → metadata + names + chunks + token bag`
 - **~~R234:~~** (Retired T67 — see R717) F record metadata: `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str]` — staleness detection and chunking strategy
-- **R235:** F record names: `[filecount:varint] [name:str]...` — multiple names for duplicate/copied files sharing a fileid
+- **~~R235:~~** (Retired T93 — see R760) F record names: `[filecount:varint] [name:str]...` — multiple names for duplicate/copied files sharing a fileid
 - **R236:** F record chunks: `[chunkcount:varint] [[chunkid:varint] [location:str]]...` — ordered chunk list with opaque range labels from chunker
 - **R237:** F record token bag: `[tokencount:varint] [[token:str] [count:varint]]` — aggregated union of all chunk tokens with summed counts, for file-level scoring
 
@@ -122,7 +122,7 @@
 - **R95:** ~~removed: FileInfo struct replaced by FRecord~~
 - **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
 - **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []FileIDCount` — `FileIDCount` is `{FileID uint64, Count uint64}`, the refcounted per-fileid occurrence count (R595)
-- **R245:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
+- **~~R245:~~** (Retired T87 — see R759) `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
 - **R246:** `TRecord` struct: `Trigram uint32, ChunkIDs []uint64`
 - **R247:** `WRecord` struct: `TokenHash uint32, ChunkIDs []uint64`
 - **~~R248:~~** (Retired T86 — no replacement) `HRecord` struct: `Hash [32]byte, ChunkID uint64`
@@ -1080,8 +1080,8 @@
 ## Feature: F Record Chunker Version
 **Source:** specs/storage.md
 
-- **R717:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [filecount:varint] [name:str]... [chunks] [tokens]`; `FRecord.ChunkerVersion uint32` holds it, and `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names.
-- **R718:** `Create` writes DB format version `"3"` to the `version` I record.
+- **~~R717:~~** (Retired T88 — see R760) The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [filecount:varint] [name:str]... [chunks] [tokens]`; `FRecord.ChunkerVersion uint32` holds it, and `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Names.
+- **~~R718:~~** (Retired T89 — see R761) `Create` writes DB format version `"3"` to the `version` I record.
 
 ## Feature: Chunker-Version Staleness
 **Source:** specs/indexing.md
@@ -1098,7 +1098,7 @@
 ## Feature: Format Version Check
 **Source:** specs/api.md
 
-- **R721:** `Open` refuses a database whose `version` I record is not `"3"`, closing the bbolt handle and returning an error that names the stored version.
+- **~~R721:~~** (Retired T90 — see R762) `Open` refuses a database whose `version` I record is not `"3"`, closing the bbolt handle and returning an error that names the stored version.
 - **R751:** The format-version refusal in R721 is a `*FormatVersionError` whose `Stored` and `Want` fields hold the stored and expected versions, detectable with `errors.As`; its message still names the stored version.
 
 ## Feature: F Record Chunker-Version Migration
@@ -1117,11 +1117,21 @@
 - **R738:** `func (db *DB) FilenameKey(path string) string` is exported as the one definition of the fold
 - **R739:** Every N key is computed from the filename key — the lookup, the duplicate guard, the N records written on add, and those deleted on removal
 - **R740:** `EncodeFilename`, `FinalKey` and `DecodeFilename` stay pure encoders of the string they are given; the database folds before calling them
-- **R741:** The stored spelling is not folded: `FRecord.Names` and the final N value keep the path as given
+- **~~R741:~~** (Retired T91 — see R763) The stored spelling is not folded: `FRecord.Names` and the final N value keep the path as given
 - **R742:** The in-memory path→fileid cache (`pathToID`) is keyed by the filename key
 - **R743:** `tmp://` overlay paths do not fold
-- **R744:** A path-taking write that reaches an existing file through a spelling different from the stored one (same filename key) updates the stored spelling to the one given: `FRecord.Names[0]`, the final N value, and the path cache
+- **~~R744:~~** (Retired T92 — see R764) A path-taking write that reaches an existing file through a spelling different from the stored one (same filename key) updates the stored spelling to the one given: `FRecord.Names[0]`, the final N value, and the path cache
 - **R745:** `Reindex` respells by removing the file's metadata and re-adding it under the path given
 - **R746:** `AddFile` reaching an existing file through a different spelling respells it and returns `ErrAlreadyIndexed`; chunks, fileid and staleness fields are untouched
 - **R747:** `AddFile` with the identical spelling writes nothing and returns `ErrAlreadyIndexed`
 - **R748:** Respelling requires the option: with it off, a different spelling is a different filename key, so no existing record is respelled
+
+## Feature: F record has one name
+**Source:** specs/migrations/complete/004-f-one-name.md
+- **R759:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Name string, Chunks []FileChunkEntry, Tokens []TokenEntry`
+- **R760:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [name:str] [chunks] [tokens]`: one name, no count; `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion, and Name
+- **R761:** `Create` writes DB format version `"4"` to the `version` I record
+- **R762:** `Open` refuses a database whose `version` I record is not `"4"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **R763:** The stored spelling is not folded: `FRecord.Name` and the final N value keep the path as given
+- **R764:** A path-taking write that reaches an existing file through a spelling different from the stored one (same filename key) updates the stored spelling to the one given: `FRecord.Name`, the final N value, and the path cache
+
