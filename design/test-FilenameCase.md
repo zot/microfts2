@@ -36,9 +36,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 3
 **Fire alarm:** build the reverse cache from the raw `Name`; red is GetChunks via `CASEY.md` reporting file not found through the cache
 **Inject:** db.go:DB.loadPathCache
-@alarm-hash: bfa7f2787fcc1cfa
-**Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): reverse cache built from the raw Name; GetChunks via CASEY.md reported file not found *Earlier —* 2026-10-26 — rang: `GetChunks via other spelling with a warm cache: file not found`
-
+@alarm-hash: 99c86b575f7e104a
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved loadPathCache: reverse map keyed by the raw path, TestFilenameCaseWarmCacheFolds red (`file not found` via the other spelling), three sibling warm-cache tests red too; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): reverse cache built from the raw Name; GetChunks via CASEY.md reported file not found *Earlier —* 2026-10-26 — rang: `GetChunks via other spelling with a warm cache: file not found`
 ## Test: removal by another spelling clears the N records
 **Purpose:** removal deletes the N records under the folded key, so the file can be added again
 **Input:** option on; AddFile `Casey.md`; RemoveFile `CASEY.md`; AddFile `Casey.md`
@@ -59,9 +58,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 5
 **Fire alarm:** cache the raw path in `storePrepared`; red is GetChunks via `CASEY.md` reporting file not found. Found by injecting past the list: no earlier test warmed the cache before adding
 **Inject:** db.go:DB.storePrepared
-@alarm-hash: 5113243ac224b732
-**Pulled:** 2026-11-05 — rang — raw path cached in storePrepared: TestFilenameCaseWarmCacheAdd red, GetChunks via `CASEY.md` "file not found"; restored clean *Earlier —* 2026-10-26 — rang: `GetChunks via other spelling after a warm-cache add: file not found`
-
+@alarm-hash: 53b3df9faa40890d
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved storePrepared: pathToID keyed by the raw path, TestFilenameCaseWarmCacheAdd red, `file not found` via the other spelling; restored clean *Earlier —* 2026-11-05 — rang — raw path cached in storePrepared: TestFilenameCaseWarmCacheAdd red, GetChunks via `CASEY.md` "file not found"; restored clean *Earlier —* 2026-10-26 — rang: `GetChunks via other spelling after a warm-cache add: file not found`
 ## Test: a warm-cache removal by another spelling drops the entry
 **Purpose:** removal clears the cache entry under the filename key
 **Input:** option on; AddFile `Casey.md`; FileIDPaths; RemoveFile `CASEY.md`; FileIDPaths
@@ -71,8 +69,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 6
 **Fire alarm:** delete the cache entry by the raw path on removal; red is FileIDPaths still listing `Casey.md`
 **Inject:** db.go:DB.removeFileWithCallbackImpl
-**Pulled:** 2026-10-26 — rang: `FileIDPaths still lists map[1:…/Casey.md]`
-
+@alarm-hash: 032c188aadb83a3e
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved removeFileWithCallbackImpl: cache key the raw path, TestFilenameCaseWarmCacheRemove red, FileIDPaths still lists the removed file; restored clean *Earlier —* 2026-10-26 — rang: `FileIDPaths still lists map[1:…/Casey.md]`
 ## Test: a warm-cache reindex by another spelling replaces the fileid
 **Purpose:** reindex retires the old fileid's cache entry found under the filename key
 **Input:** option on; AddFile `Casey.md`; FileIDPaths; Reindex `CASEY.md`; FileIDPaths; GetChunks via `Casey.md`
@@ -82,9 +80,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 7
 **Fire alarm:** key the cache by the raw path in `reindexPrepared`; red is two files listed and GetChunks reading the deleted fileid
 **Inject:** db.go:DB.reindexPrepared
-@alarm-hash: c6d37c83ee379fe6
-**Pulled:** 2026-11-05 — rang — cache keyed by the raw path in reindexPrepared: TestFilenameCaseWarmCacheReindex red, FileIDPaths lists 2 files and GetChunks reads the deleted fileid; restored clean *Earlier —* 2026-10-26 — rang: `FileIDPaths lists 2 files, want 1`; `read F record 1: not found`
-
+@alarm-hash: af9fa204f41eead9
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved reindexPrepared: cache key the raw path, TestFilenameCaseWarmCacheReindex red, FileIDPaths lists 2 files, want 1; restored clean *Earlier —* 2026-11-05 — rang — cache keyed by the raw path in reindexPrepared: TestFilenameCaseWarmCacheReindex red, FileIDPaths lists 2 files and GetChunks reads the deleted fileid; restored clean *Earlier —* 2026-10-26 — rang: `FileIDPaths lists 2 files, want 1`; `read F record 1: not found`
 ## Test: with the option off, spellings are distinct files
 **Purpose:** the default is unchanged: two spellings index as two files
 **Input:** option off; AddFile `Casey.md` and `CASEY.md`
@@ -101,9 +98,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 8
 **Fire alarm:** (1) skip the respell; red is the stored spelling still `Casey.md`. (2) return the error from inside the write transaction so bbolt rolls back; same red. (3) rewrite Name but not the N value; red is the N record still naming `Casey.md`
 **Inject:** db.go:DB.respell, db.go:DB.storePrepared
-@alarm-hash: 15f6c9b126469bcc
-**Pulled:** 2026-11-05 — rang — (1) respell skipped in storePrepared: TestFilenameCaseAddFileRespells red, the stored spelling and the final N value still `Casey.md`; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): with the Name not respelled, the F record still stored Casey.md; with the N value not rewritten, the final N value still named Casey.md *Earlier —* 2026-10-26 — all three rang: (1) and (2) `F record after respell: …Casey.md` plus the N value and warm-cache failures; (3) `final N value after respell names …Casey.md`
-
+@alarm-hash: 81b1d9debc131821
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved storePrepared, three injections each from a clean tree: respell skipped, ErrAlreadyIndexed returned inside the txn, N value left at the old name; each red in TestFilenameCaseAddFileRespells (F record or final N value naming the old spelling); restored clean *Earlier —* 2026-11-05 — rang — (1) respell skipped in storePrepared: TestFilenameCaseAddFileRespells red, the stored spelling and the final N value still `Casey.md`; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): with the Name not respelled, the F record still stored Casey.md; with the N value not rewritten, the final N value still named Casey.md *Earlier —* 2026-10-26 — all three rang: (1) and (2) `F record after respell: …Casey.md` plus the N value and warm-cache failures; (3) `final N value after respell names …Casey.md`
 ## Test: respelling refreshes a warm path cache
 **Purpose:** the in-memory path cache reports the new spelling at once
 **Input:** option on; AddFile `Casey.md`; FileIDPaths (warm); AddFile `CASEY.md`; FileIDPaths
@@ -113,9 +109,8 @@ filesystem, where both spellings name one file.
 **Alarm:** 9
 **Fire alarm:** skip the pathCache update after a respell; red is FileIDPaths still reporting `Casey.md`
 **Inject:** db.go:DB.storePrepared
-@alarm-hash: 5113243ac224b732
-**Pulled:** 2026-11-05 — rang — pathCache update skipped after a respell: TestFilenameCaseRespellWarmCache red, warm cache still reports `Casey.md`; restored clean *Earlier —* 2026-10-26 — rang: `warm cache after respell reports …Casey.md`
-
+@alarm-hash: 53b3df9faa40890d
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved storePrepared: pathCache refresh removed from the respell block, TestFilenameCaseRespellWarmCache red, warm cache reports the old spelling; restored clean *Earlier —* 2026-11-05 — rang — pathCache update skipped after a respell: TestFilenameCaseRespellWarmCache red, warm cache still reports `Casey.md`; restored clean *Earlier —* 2026-10-26 — rang: `warm cache after respell reports …Casey.md`
 ## Test: Reindex by another spelling respells
 **Purpose:** reindex stores the spelling it was given
 **Input:** option on; AddFile `Casey.md`; Reindex `CASEY.md`; FileIDPaths on a cold cache
@@ -132,5 +127,5 @@ filesystem, where both spellings name one file.
 **Alarm:** 10
 **Fire alarm:** keep the frecordCache entry after a respell; red is the cached record still naming `Casey.md`. Found by injecting past the list: no earlier test ran a respell with the cache active
 **Inject:** db.go:DB.storePrepared
-@alarm-hash: 5113243ac224b732
-**Pulled:** 2026-11-05 — rang — frecordCache entry kept after a respell: TestFilenameCaseRespellSearchCache red, the cached F record still names `Casey.md`; restored clean *Earlier —* 2026-10-26 — rang: `cached F record after respell names […Casey.md]`
+@alarm-hash: 53b3df9faa40890d
+**Pulled:** 2026-11-05 — 2026-11-05 — rang — re-pulled after #221 moved storePrepared: frecordCache delete removed from the respell block, TestFilenameCaseRespellSearchCache red, cached F record names the old spelling; restored clean *Earlier —* 2026-11-05 — rang — frecordCache entry kept after a respell: TestFilenameCaseRespellSearchCache red, the cached F record still names `Casey.md`; restored clean *Earlier —* 2026-10-26 — rang: `cached F record after respell names […Casey.md]`

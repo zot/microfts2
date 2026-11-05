@@ -1246,8 +1246,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "6" { // R781
-		t.Fatalf("Version() = %q, want %q", v, "6")
+	if v != "7" { // R797
+		t.Fatalf("Version() = %q, want %q", v, "7")
 	}
 }
 

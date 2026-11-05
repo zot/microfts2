@@ -228,3 +228,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T137: R754 retired by R788 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
 - T138: R680 retired by R789 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
 - T139: R687 retired by R790 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T140: R781 retired by R797 (2026-11-05 ordered-id-keys: format 7)
+- T141: R782 retired by R798 (2026-11-05 ordered-id-keys: format 7)

@@ -24,7 +24,7 @@ func loadDeadSet(th TxnHolder) map[uint64]struct{} {
 	dead := map[uint64]struct{}{}
 	c := th.Bucket().Cursor()
 	for k, _ := c.Seek([]byte{prefixD}); k != nil && k[0] == prefixD; k, _ = c.Next() {
-		if id, n := readUvarint(k[1:]); n > 0 {
+		if id, n := KeyID(k[1:]); n > 0 { // R794
 			dead[id] = struct{}{}
 		}
 	}
@@ -194,7 +194,7 @@ func (db *DB) Purge() (PurgeStats, error) {
 	var st PurgeStats
 	var dead map[uint64]struct{}
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -207,7 +207,7 @@ func (db *DB) Purge() (PurgeStats, error) {
 	next := []byte{prefixT}
 	for next != nil {
 		err := db.bolt.Update(func(tx *bbolt.Tx) error {
-			b := tx.Bucket([]byte(db.dbName))
+			b := db.bucket(tx)
 			c := b.Cursor()
 			type rewrite struct{ key, val []byte }
 			var work []rewrite
@@ -248,7 +248,7 @@ func (db *DB) Purge() (PurgeStats, error) {
 		}
 	}
 	err = db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		for id := range dead {
 			if err := b.Delete(makeDKey(id)); err != nil {
 				return err

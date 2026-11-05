@@ -33,7 +33,9 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 
 ### Encoding conventions
 
-- Integer fields use varint encoding (Go binary.PutUvarint / binary.ReadUvarint)
+- Integer fields in values use varint encoding (Go binary.PutUvarint / binary.ReadUvarint)
+- Ids in keys (the chunkid in C and D keys, the fileid in F keys) use the order-preserving varint, `AppendKeyID` / `KeyID` (SQLite4's varint, format `"7"`): byte order is numeric order, so a new id appends at the tree's right edge instead of splitting a page in the middle. The first byte gives the length: 0-240 in one byte; 241-248 begin two bytes (240 to 2287); 249 begins three (2288 to 67823); 250-255 are followed by 3 to 8 big-endian bytes. Only the shortest encoding is valid
+- Every write sets the bucket's `FillPercent` to 0.9: a page split by right-edge appends keeps that fill, where bbolt's default 0.5 would leave it half empty
 - Trigram fields are fixed 3 bytes (24-bit)
 - Hash fields are fixed 32 bytes (SHA-256)
 - Strings are length-prefixed (varint length + bytes), except the final field in a key can use remaining bytes (computed from record length)
@@ -44,24 +46,24 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 |--------|------------------------|----------------------------------------------------|---------------------------------------------------------|
 | I      | name: str              | empty (value encoded in key)                       | Config settings, data-in-key pattern                    |
 | H      | hash: 32               | chunkid: varint                                    | Content hash → chunkid lookup                           |
-| C      | chunkid: varint        | hash + contentLen + token counts + attrs + fileids | Per-chunk: identity, length, metadata, files            |
-| F      | fileid: varint         | metadata + name + chunks                           | Per-file: staleness info, ordered chunk list            |
+| C      | chunkid: ordered varint | hash + contentLen + token counts + attrs + fileids | Per-chunk: identity, length, metadata, files            |
+| F      | fileid: ordered varint  | metadata + name + chunks                           | Per-file: staleness info, ordered chunk list            |
 | N      | chain-byte + name: str | (varies by chain-byte)                             | Filename → fileid mapping via key chains                |
 | T      | trigram: 3             | postings: chunkid delta + count...                 | Trigram inverted index, with each chunk's count         |
-| D      | chunkid: varint        | empty                                              | Dead set: chunks removed but still in some posting list |
+| D      | chunkid: ordered varint | empty                                              | Dead set: chunks removed but still in some posting list |
 
 ### Record details
 
 - `I` [name: str] = [value: str] -> empty
-  Config record using data-in-key pattern. Each setting is independently readable and writable — no JSON parse/serialize cycle. The `version` setting holds the DB format version, currently `"6"` (postings carry the counts and C records no lists; `"5"` dropped the F record's file-level token bag; `"4"` made its name list one name; `"3"` added `chunkerVersion`); `Open` refuses any other value.
+  Config record using data-in-key pattern. Each setting is independently readable and writable — no JSON parse/serialize cycle. The `version` setting holds the DB format version, currently `"7"` (ids in C, F and D keys are order-preserving varints; `"6"` put the counts in the postings and took the lists out of C records; `"5"` dropped the F record's file-level token bag; `"4"` made its name list one name; `"3"` added `chunkerVersion`); `Open` refuses any other value.
 
 - `H` [hash: 32] -> [chunkid: varint]
   Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
 
-- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [distinctTokens: varint] [tokenTotal: varint] [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [[fileid: varint] [count: varint]]...
+- `C` [chunkid: ordered varint] -> [hash: 32] [contentLen: varint] [distinctTokens: varint] [tokenTotal: varint] [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [[fileid: varint] [count: varint]]...
   Per-chunk record: content hash, byte length of the chunk content, the number of distinct tokens in the chunk (the chunk length scoring normalizes by) and their summed count (what the `totalTokens` corpus counter adds and subtracts), optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk with per-file occurrence counts. It carries no trigram or token list: a chunk's per-trigram counts live in the T postings (format `"6"`), which is all any scorer reads. The `[fileid, count]` count is the number of times this chunk occurs in that file. Add-occurrence increments the count (or inserts with count=1 if absent); drop-occurrence decrements (count=0 removes the fileid entry; empty fileids list cascades the orphan cleanup). Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
 
-- `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [chunkerVersion: varint] [name: str] [chunkcount: varint] [[chunkid: varint] [location: bytes] [locator: bytes]]...
+- `F` [fileid: ordered varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [chunkerVersion: varint] [name: str] [chunkcount: varint] [[chunkid: varint] [location: bytes] [locator: bytes]]...
   Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name, and the version of that strategy's chunker when the file was chunked — see the VersionedChunker section of `chunking.md`), and the file's one name. A copy of a file is a record of its own; deduplication is per chunk, the C record listing every fileid that holds the chunk. Ordered chunk list with two per-occurrence opaque labels: `location` (the chunker's Range — used for CLI/human display) and `locator` (the chunker's Locator — used for fast random-access retrieval and append-merge resume). Both are length-prefixed byte strings so they can be empty. The record ends after the chunk list: it once carried a file-level token bag, written and kept current but never read, and dropped in format `"5"` (it was 94.7% of every F record's bytes in ark's index).
 
 - `N` [0-254] [name: str] -> empty — filename prefix chain key
@@ -71,7 +73,7 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 - `T` [trigram: 3] -> [[(delta << 1) | hasCount: uvarint] [count: uvarint, only when hasCount]]...
   Trigram inverted index. Value is the trigram's postings in ascending chunkid order: each chunkid delta-coded against the previous one (the first against 0), its low bit saying whether a count follows; a posting with no count has count 1 (most do). The count is how many times the trigram occurs in that chunk. A trigram's document frequency is its number of live postings: postings whose chunkid is in the dead set are skipped by every reader. One entry per distinct trigram rather than one per trigram-chunk pair — the primary source of mmap reduction.
 
-- `D` [chunkid: varint] -> empty
+- `D` [chunkid: ordered varint] -> empty
   The dead set. When a chunk's last occurrence goes, its C and H records are deleted and its D record written; no posting is edited. Its chunkid stays in the T postings until a write rewrites each list, dropping dead postings as it goes, or until `Purge` rewrites them all and clears the D records it started with. Chunkids come from a counter and are never reused, so a dead posting can only name a chunk that no longer exists.
 
 There are no W records (token postings) since format `"6"`: they were written on every add and removal and never read.

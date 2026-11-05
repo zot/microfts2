@@ -474,7 +474,7 @@ func ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc {
 func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error) {
 	var scoreFn ScoreFunc
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -916,6 +916,7 @@ func Create(path string, opts Options) (*DB, error) {
 		if err != nil {
 			return err
 		}
+		b.FillPercent = keyFill // R796
 		th := bucketWrap{b}
 		if err := writeSettings(th, &settings); err != nil {
 			return err
@@ -1006,7 +1007,7 @@ func (db *DB) QueryTrigramCounts(query string) ([]TrigramCount, error) {
 	}
 	var result []TrigramCount
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -1107,13 +1108,32 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 	return bytes.NewReader(f.content), nil
 }
 
-// formatVersion is the DB format this code reads and writes. Format "6" put
+// keyFill is the FillPercent every write sets on the fts bucket: keys hold
+// ordered ids, so most inserts append at the right edge, and a page split
+// there keeps this fill for good (bbolt's default 0.5 would leave it half
+// empty).
+const keyFill = 0.9
+
+// bucket returns the fts bucket in tx, setting its FillPercent to keyFill
+// when tx is writable. bbolt caches the handle per writable txn and reads
+// FillPercent when it splits pages at commit, so this covers the whole txn.
+// CRC: crc-DB.md | R796
+func (db *DB) bucket(tx *bbolt.Tx) *bbolt.Bucket {
+	b := tx.Bucket([]byte(db.dbName))
+	if b != nil && tx.Writable() {
+		b.FillPercent = keyFill
+	}
+	return b
+}
+
+// formatVersion is the DB format this code reads and writes. Format "7" put
+// the ids in C, F and D keys in the order-preserving varint; "6" put
 // the counts in the T postings and took the lists out of the C records (no W
 // records); "5" dropped the F record's token bag; "4" made its name list one
 // name; "3" added its chunkerVersion. Open never migrates an older database
-// (see specs/migrations/complete/006-postings-carry-counts.md, 005, 004, 003).
-// R781, R782
-const formatVersion = "6"
+// (see specs/migrations/complete/007-ordered-id-keys.md, 006, 005, 004, 003).
+// R797, R798
+const formatVersion = "7"
 
 // FormatVersionError is Open's refusal of a database written in another
 // format: the caller can tell it apart from other open failures with
@@ -1139,7 +1159,7 @@ func (db *DB) DB() *bbolt.DB {
 func (db *DB) Version() (string, error) {
 	var version string
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -1161,7 +1181,7 @@ type RecordStats struct {
 func (db *DB) RecordCounts() (map[byte]RecordStats, error) {
 	counts := make(map[byte]RecordStats)
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -1206,13 +1226,13 @@ func (db *DB) FileIDPaths() (map[uint64]string, error) {
 func (db *DB) loadPathCache() (map[uint64]string, error) {
 	result := make(map[uint64]string)
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		cursor := b.Cursor()
 		for k, v := cursor.Seek([]byte{prefixF}); k != nil && len(k) > 0 && k[0] == prefixF; k, v = cursor.Next() {
-			fileid, _ := readUvarint(k[1:])
+			fileid, _ := KeyID(k[1:]) // R794
 			data := make([]byte, len(v))
 			copy(data, v)
 			frec, fErr := UnmarshalFHeader(data)
@@ -1598,7 +1618,7 @@ func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, 
 	var fileid uint64
 	var respelled bool
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -1851,7 +1871,7 @@ func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error {
 
 func (db *DB) removeFileWithCallbackImpl(fpath string, fn RemoveCallback, rcb RemovedChunkCallback) error {
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -1890,7 +1910,7 @@ type RemoveFilesCallback func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs [
 func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
 	var removed []string
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -2140,7 +2160,7 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 	}
 	var fileid uint64
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -2552,7 +2572,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		return errPreparedConsumed
 	}
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -2678,7 +2698,7 @@ func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts 
 	var filename string
 	var lastLocator []byte
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -2857,7 +2877,7 @@ func (db *DB) SearchTerms(terms []string, opts ...SearchOption) (*SearchResults,
 	var results []SearchResult
 
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -2939,7 +2959,7 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 	var results []SearchResult
 
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3069,7 +3089,7 @@ func (db *DB) SearchMultiTerms(terms []string, strategies map[string]ScoreFunc, 
 	var multiResults []MultiSearchResult
 
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3652,7 +3672,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 	var results []SearchResult
 
 	err = db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3761,7 +3781,7 @@ func allChunkIDs(th TxnHolder) map[uint64]bool {
 	result := make(map[uint64]bool)
 	cursor := b.Cursor()
 	for key, _ := cursor.Seek([]byte{prefixC}); key != nil && len(key) > 0 && key[0] == prefixC; key, _ = cursor.Next() {
-		chunkid, _ := readUvarint(key[1:])
+		chunkid, _ := KeyID(key[1:]) // R794
 		result[chunkid] = true
 	}
 	return result
@@ -3773,7 +3793,7 @@ func allChunkIDs(th TxnHolder) map[uint64]bool {
 func (db *DB) FileInfoByID(fileid uint64) (FRecord, error) {
 	var frec FRecord
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3803,13 +3823,13 @@ type FileSummary struct {
 func (db *DB) FileSummaries() ([]FileSummary, error) {
 	var out []FileSummary
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		c := b.Cursor()
 		for k, v := c.Seek([]byte{prefixF}); k != nil && k[0] == prefixF; k, v = c.Next() {
-			id, n := readUvarint(k[1:])
+			id, n := KeyID(k[1:]) // R794
 			if n <= 0 {
 				return fmt.Errorf("F record key %x: bad fileid", k)
 			}
@@ -3833,7 +3853,7 @@ func (db *DB) FileSummaries() ([]FileSummary, error) {
 // Returns an error if the file is unknown.
 func (db *DB) SetFileLength(fileid uint64, length int64) error {
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3864,7 +3884,7 @@ func (db *DB) ChunkContentLens(fileid uint64) ([]int, error) {
 	}
 	var lens []int
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -3908,7 +3928,7 @@ func (db *DB) GetChunks(fpath, targetRange string, before, after int) ([]ChunkRe
 
 	var frec FRecord
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4042,7 +4062,7 @@ func (m *windowMatcher) results(fpath string, attrsByID map[uint64][]Pair) []Chu
 func (db *DB) chunkAttrs(chunks []FileChunkEntry, lo, hi int) (map[uint64][]Pair, error) {
 	attrsByID := make(map[uint64][]Pair, hi-lo+1)
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4164,7 +4184,7 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 
 	var results []ScoredChunk
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4240,7 +4260,7 @@ func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 func (db *DB) AddStrategy(name, cmd string) error {
 	db.settings.ChunkingStrategies[name] = cmd
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4253,7 +4273,7 @@ func (db *DB) AddStrategy(name, cmd string) error {
 // to the result so Bucket(), Tx(), DB(), and FileRecord(fileid) work on it. Must be
 // called inside a bbolt View or Update txn — the bucket is part of the CRecord.
 func (db *DB) ReadCRecord(tx *bbolt.Tx, chunkID uint64) (CRecord, error) {
-	b := tx.Bucket([]byte(db.dbName))
+	b := db.bucket(tx)
 	if b == nil {
 		return CRecord{}, fmt.Errorf("bucket %q not found", db.dbName)
 	}
@@ -4283,7 +4303,7 @@ func (db *DB) AddChunker(name string, c any) error {
 	db.chunkers[name] = c
 	db.settings.ChunkingStrategies[name] = "" // empty cmd marks chunker strategy
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4321,7 +4341,7 @@ func (db *DB) RemoveStrategy(name string) error {
 	delete(db.settings.ChunkingStrategies, name)
 	delete(db.chunkers, name)
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4357,7 +4377,7 @@ func (db *DB) CheckFile(fpath string) (FileStatus, error) {
 	status.Path = fpath
 
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4378,7 +4398,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 	var frecords []FRecord
 
 	err := db.bolt.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
@@ -4389,7 +4409,7 @@ func (db *DB) StaleFiles() ([]FileStatus, error) {
 			frec, fErr := UnmarshalFHeader(data)
 			if fErr == nil {
 				// Parse fileid from key
-				fileid, _ := readUvarint(key[1:])
+				fileid, _ := KeyID(key[1:]) // R794
 				frec.FileID = fileid
 				frecords = append(frecords, frec)
 			}
@@ -4534,7 +4554,7 @@ func (db *DB) allocChunkID(th TxnHolder) (uint64, error) {
 
 func (db *DB) saveSettings() error {
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(db.dbName))
+		b := db.bucket(tx)
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}

@@ -1159,8 +1159,8 @@
 - **R778:** A T record a write rewrites drops its dead postings in the same pass, keeps the surviving postings' order with new postings after them in chunkid order, and is deleted when no live posting remains; D records are not removed by this
 - **R779:** `Purge() (PurgeStats, error)` takes the dead set as it stands when it starts, scans the T records, rewrites each one holding one of those chunkids without it (deleting a record left empty), then deletes those D records; it commits in batches, an id that dies while it runs stays in the dead set, and with an empty dead set it writes nothing; `PurgeStats` reports the records rewritten, the postings dropped and the dead ids cleared
 - **R780:** `TRecord` struct: `Trigram uint32, Postings []Posting`; `Posting` is `{ChunkID uint64, Count int}`
-- **R781:** `Create` writes DB format version `"6"` to the `version` I record
-- **R782:** `Open` refuses a database whose `version` I record is not `"6"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **~~R781:~~** (Retired T140 — see R797) `Create` writes DB format version `"6"` to the `version` I record
+- **~~R782:~~** (Retired T141 — see R798) `Open` refuses a database whose `version` I record is not `"6"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
 - **R783:** A new chunk (no H record for its hash) gets a chunkid, an H record, a C record and a posting with its count in the T record of each of its trigrams; a dedup hit adds the fileid to the existing C record and touches no T record
 - **R784:** Every posting a write operation adds (AddFile, Reindex, AppendChunks, StorePrepared, ReindexPrepared, AppendPrepared) is gathered across the whole operation and applied once per affected T record at its end, in the same transaction
 - **R785:** The coalesced posting changes are applied before RemoveCallback or ReindexCallback fires, so the callback sees the final T records; RemovedChunkCallback still fires as each chunk is orphaned, before its C record is deleted
@@ -1169,3 +1169,15 @@
 - **R788:** `RemoveFiles(paths []string, fn RemoveFilesCallback) error` removes a batch of files in one write transaction; their orphaned chunks join the dead set and no T record is rewritten
 - **R789:** `StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a fresh add in one write transaction (allocating the fileid, writing N and F records, deduping each chunk by H record, updating C and T records and corpus counters) and preserves the `ErrAlreadyIndexed` duplicate guard
 - **R790:** `AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error` applies the prepared append in one write transaction (drop-and-replace cleanup, chunk dedup, T updates, corpus counters, F-record update) as `AppendChunks` does
+
+## Feature: ordered id keys
+**Source:** specs/migrations/complete/007-ordered-id-keys.md
+
+- **R791:** `AppendKeyID(b []byte, v uint64) []byte` appends v in SQLite4's order-preserving varint: one byte for 0-240, two for 241-2287 (first byte 241 + (v-240)/256), three for 2288-67823 (first byte 249), and otherwise a first byte of 247 + n followed by v's n big-endian bytes, n the fewest of 3 to 8 that hold it
+- **R792:** `KeyID(b []byte) (v uint64, n int)` decodes one order-preserving varint from the front of b and returns its value and length; it returns n == 0 for empty or short input and n < 0 for a non-minimal encoding, and never panics
+- **R793:** For any two values a < b, `AppendKeyID(nil, a)` sorts bytewise before `AppendKeyID(nil, b)`, and `KeyID` returns exactly the value and length `AppendKeyID` wrote
+- **R794:** C, F and D keys are the prefix byte followed by the chunkid or fileid as an order-preserving varint, with nothing after it
+- **R795:** Every id in a record value (H's chunkid, posting deltas and counts, C's fileid list, F's chunk list) stays a LEB128 uvarint
+- **R796:** Every write sets the bucket's `FillPercent` to 0.9 on the handle it writes through, including writes made inside a transaction the caller opened
+- **R797:** `Create` writes DB format version `"7"` to the `version` I record
+- **R798:** `Open` refuses a database whose `version` I record is not `"7"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version

@@ -4,8 +4,13 @@ package microfts2
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+
+	"go.etcd.io/bbolt"
 )
 
 func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
@@ -309,8 +314,135 @@ func TestKeyConstruction(t *testing.T) {
 	if dk[0] != prefixD {
 		t.Errorf("D key prefix: got %c, want %c", dk[0], prefixD)
 	}
-	if id, n := readUvarint(dk[1:]); id != 300 || n != len(dk)-1 {
+	if id, n := KeyID(dk[1:]); id != 300 || n != len(dk)-1 { // R794
 		t.Errorf("D key chunkid: got %d (%d bytes), want 300", id, n)
 	}
 
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R791, R793
+func TestKeyIDOrder(t *testing.T) {
+	vals := make([]uint64, 0, 70100)
+	for v := uint64(0); v <= 70000; v++ {
+		vals = append(vals, v)
+	}
+	for _, b := range []uint64{1 << 24, 1 << 32, 1 << 40, 1 << 48, 1 << 56} {
+		vals = append(vals, b-2, b-1, b, b+1)
+	}
+	vals = append(vals, ^uint64(0)-1, ^uint64(0))
+	wantLen := map[uint64]int{240: 1, 241: 2, 2287: 2, 2288: 3, 67823: 3, 67824: 4,
+		1<<24 - 1: 4, 1 << 24: 5, 1<<56 - 1: 8, 1 << 56: 9, ^uint64(0): 9}
+	var prev []byte
+	for i, v := range vals {
+		enc := AppendKeyID(nil, v)
+		if n, ok := wantLen[v]; ok && len(enc) != n {
+			t.Fatalf("AppendKeyID(%d) is %d bytes, want %d", v, len(enc), n)
+		}
+		got, n := KeyID(enc)
+		if got != v || n != len(enc) {
+			t.Fatalf("KeyID(AppendKeyID(%d)) = %d, %d; want %d, %d", v, got, n, v, len(enc))
+		}
+		if i > 0 && bytes.Compare(prev, enc) >= 0 {
+			t.Fatalf("AppendKeyID(%d) = %x does not sort after AppendKeyID(%d) = %x", v, enc, vals[i-1], prev)
+		}
+		prev = enc
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R792
+func TestKeyIDRefusesBadInput(t *testing.T) {
+	short := [][]byte{nil, {}}
+	for _, v := range []uint64{241, 2288, 67824, 1 << 24, 1 << 56} {
+		enc := AppendKeyID(nil, v)
+		short = append(short, enc[:len(enc)-1])
+	}
+	for _, b := range short {
+		if _, n := KeyID(b); n != 0 {
+			t.Errorf("KeyID(%x) n = %d, want 0 (short)", b, n)
+		}
+	}
+	for _, b := range [][]byte{{250, 0, 0, 1}, {251, 0, 0, 0, 0}, {251, 0, 1, 0, 0}} {
+		if _, n := KeyID(b); n >= 0 {
+			t.Errorf("KeyID(%x) n = %d, want < 0 (non-minimal)", b, n)
+		}
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R794
+func TestCFDKeysSortByID(t *testing.T) {
+	dir := t.TempDir()
+	db := newLineDB(t, dir, "db")
+	var paths []string
+	for i := 0; i < 300; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("f%03d.txt", i))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("unique line number %d here\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.AddFile(p, "line"); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	if err := db.RemoveFile(paths[7]); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[byte]int{}
+	err := db.DB().View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("fts")).Cursor()
+		for _, pfx := range []byte{prefixC, prefixF, prefixD} {
+			var last uint64
+			for k, _ := c.Seek([]byte{pfx}); k != nil && k[0] == pfx; k, _ = c.Next() {
+				id, n := KeyID(k[1:])
+				if n != len(k)-1 {
+					t.Fatalf("%c key %x does not hold one ordered id", pfx, k)
+				}
+				if counts[pfx] > 0 && id <= last {
+					t.Fatalf("%c keys out of order: %d after %d", pfx, id, last)
+				}
+				last = id
+				counts[pfx]++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[prefixC] != 299 || counts[prefixF] != 299 || counts[prefixD] != 1 {
+		t.Fatalf("C/F/D counts = %d/%d/%d, want 299/299/1", counts[prefixC], counts[prefixF], counts[prefixD])
+	}
+	for _, i := range []int{0, 127, 128, 200, 299} {
+		res, err := db.Search(fmt.Sprintf(`"unique line number %d here"`, i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Results) != 1 || res.Results[0].Path != paths[i] {
+			t.Fatalf("search for file %d found %+v", i, res.Results)
+		}
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R796
+func TestWritesFillAppendedPages(t *testing.T) {
+	db := newLineDB(t, t.TempDir(), "db")
+	val := bytes.Repeat([]byte{7}, 100)
+	for i := uint64(1); i <= 5000; i++ {
+		err := db.DB().Update(func(tx *bbolt.Tx) error {
+			return db.bucket(tx).Put(makeCKey(i), val)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := db.DB().View(func(tx *bbolt.Tx) error {
+		st := tx.Bucket([]byte("fts")).Stats()
+		fill := float64(st.LeafInuse) / float64(st.LeafPageN*db.DB().Info().PageSize)
+		if fill < 0.8 {
+			t.Fatalf("leaf fill %.2f over %d pages, want >= 0.8", fill, st.LeafPageN)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

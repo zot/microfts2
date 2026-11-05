@@ -201,6 +201,7 @@ type Posting struct {
 // --- Encoding helpers ---
 
 // R220: integers are varints
+// R795: these LEB128 helpers are for values only; ids in keys use AppendKeyID
 func putUvarint(buf []byte, v uint64) int { return binary.PutUvarint(buf, v) }
 func readUvarint(buf []byte) (uint64, int) {
 	v, n := binary.Uvarint(buf)
@@ -591,19 +592,12 @@ const (
 	prefixD byte = 'D' // dead chunkid (R774); no W prefix since format "6" (R773)
 )
 
-func makeCKey(chunkid uint64) []byte {
-	buf := make([]byte, 1+binary.MaxVarintLen64)
-	buf[0] = prefixC
-	n := putUvarint(buf[1:], chunkid)
-	return buf[:1+n]
-}
+// makeCKey, makeFKey and makeDKey hold their id in the order-preserving
+// varint, so a new, larger id appends at the tree's right edge.
+// CRC: crc-DB.md | R794
+func makeCKey(chunkid uint64) []byte { return AppendKeyID([]byte{prefixC}, chunkid) }
 
-func makeFKey(fileid uint64) []byte {
-	buf := make([]byte, 1+binary.MaxVarintLen64)
-	buf[0] = prefixF
-	n := putUvarint(buf[1:], fileid)
-	return buf[:1+n]
-}
+func makeFKey(fileid uint64) []byte { return AppendKeyID([]byte{prefixF}, fileid) }
 
 func makeHKey(hash [32]byte) []byte {
 	key := make([]byte, 1+32)
@@ -624,9 +618,68 @@ func makeTKey(trigram uint32) []byte {
 }
 
 // makeDKey names a dead chunkid's D record (R774).
-func makeDKey(chunkid uint64) []byte {
-	buf := make([]byte, 1+binary.MaxVarintLen64)
-	buf[0] = prefixD
-	n := putUvarint(buf[1:], chunkid)
-	return buf[:1+n]
+// CRC: crc-DB.md | R794
+func makeDKey(chunkid uint64) []byte { return AppendKeyID([]byte{prefixD}, chunkid) }
+
+// AppendKeyID appends v in SQLite4's order-preserving varint, the encoding
+// of every id in a key: byte order is numeric order, and the first byte
+// gives the length (1 byte to 240, 2 to 2287, 3 to 67823, then 247+n and v's
+// n big-endian bytes, 3 <= n <= 8). Ids inside values stay LEB128 (R795).
+// CRC: crc-DB.md | R791, R793
+func AppendKeyID(b []byte, v uint64) []byte {
+	switch {
+	case v <= 240:
+		return append(b, byte(v))
+	case v <= 2287:
+		x := v - 240
+		return append(b, byte(241+x/256), byte(x%256))
+	case v <= 67823:
+		x := v - 2288
+		return append(b, 249, byte(x/256), byte(x))
+	}
+	n := 3
+	for n < 8 && v>>(8*uint(n)) != 0 {
+		n++
+	}
+	b = append(b, byte(247+n))
+	for i := n - 1; i >= 0; i-- {
+		b = append(b, byte(v>>(8*uint(i))))
+	}
+	return b
+}
+
+// KeyID decodes one order-preserving varint from the front of b, returning
+// its value and length. n == 0 means b is empty or too short, n < 0 that the
+// encoding is not the shortest for its value; it never panics.
+// CRC: crc-DB.md | R792, R793
+func KeyID(b []byte) (v uint64, n int) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	switch a0 := b[0]; {
+	case a0 <= 240:
+		return uint64(a0), 1
+	case a0 <= 248:
+		if len(b) < 2 {
+			return 0, 0
+		}
+		return 240 + 256*uint64(a0-241) + uint64(b[1]), 2
+	case a0 == 249:
+		if len(b) < 3 {
+			return 0, 0
+		}
+		return 2288 + 256*uint64(b[1]) + uint64(b[2]), 3
+	default:
+		nb := int(a0) - 247
+		if len(b) < 1+nb {
+			return 0, 0
+		}
+		for _, c := range b[1 : 1+nb] {
+			v = v<<8 | uint64(c)
+		}
+		if v <= 67823 || (nb > 3 && v>>(8*uint(nb-1)) == 0) {
+			return 0, -1
+		}
+		return v, 1 + nb
+	}
 }
