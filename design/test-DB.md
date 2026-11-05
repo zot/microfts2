@@ -17,14 +17,14 @@
 ## Test: search works immediately after add
 **Purpose:** index maintained incrementally
 **Input:** add a file, search without any extra steps
-**Expected:** search succeeds (T/W/C records written during add)
+**Expected:** search succeeds (T and C records written during add)
 **Refs:** crc-DB.md, seq-search.md
 
 ## Test: remove file
 **Purpose:** file deletion cleans records
 **Input:** add file, remove file, search for its content
-**Expected:** no results returned; C/H/T/W records cleaned for orphaned chunks
-**Refs:** crc-DB.md, R254
+**Expected:** no results returned; C/H records deleted and D records written for orphaned chunks
+**Refs:** crc-DB.md, R774
 
 ## Test: reindex with different strategy
 **Purpose:** strategy migration
@@ -211,14 +211,14 @@
 ## Test: chunk dedup removal cleans orphaned records
 **Purpose:** removing one file with shared chunks leaves the other intact
 **Input:** add two files sharing a chunk, remove one
-**Expected:** C record has one fileid remaining, search still finds the other file. Then remove the second file — C/H/T/W records deleted for orphaned chunk
+**Expected:** C record has one fileid remaining, search still finds the other file. Then remove the second file — C/H records deleted and a D record written for the orphaned chunk
 **Refs:** crc-DB.md, R254, R231
 
 ## Test: CRecord marshal/unmarshal roundtrip
 **Purpose:** record struct encode/decode
-**Input:** create a CRecord with known trigrams, tokens, attrs, fileids, marshal, unmarshal
+**Input:** create a CRecord with known distinctTokens, tokenTotal, attrs, fileids, marshal, unmarshal
 **Expected:** all fields match after roundtrip
-**Refs:** crc-DB.md, R244, R735
+**Refs:** crc-DB.md, R772, R771, R735
 **Code:** records_test.go
 
 ## Test: FRecord marshal/unmarshal roundtrip
@@ -236,10 +236,10 @@
 **Code:** records_test.go
 
 ## Test: empty CRecord roundtrip
-**Purpose:** a CRecord with no trigrams, tokens, attrs or fileids survives encode/decode
-**Input:** marshal and unmarshal a CRecord with empty slices
-**Expected:** all four slices empty after roundtrip
-**Refs:** crc-DB.md, R244, R735
+**Purpose:** a CRecord with zero token counts and no attrs or fileids survives encode/decode
+**Input:** marshal and unmarshal a zero CRecord
+**Expected:** zero counts and empty slices after roundtrip
+**Refs:** crc-DB.md, R772, R735
 **Code:** records_test.go
 
 ## Test: CRecord fileid inc/dec
@@ -453,7 +453,8 @@
 **Alarm:** 7
 **Fire alarm:** reverse the R673 order in reindexPrepared — drop the old fileid's occurrences before storing the new chunks — so an unchanged line's chunk loses its last reference and orphans before the re-add, forcing a fresh chunkid; the chunkid-stability assertion goes red
 **Inject:** db.go:reindexPrepared
-**Pulled:** 2026-10-25 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6); first pulled 2026-09-17
+@alarm-hash: c6d37c83ee379fe6
+**Pulled:** 2026-11-05 — rang — old occurrences dropped before the new chunks are stored in reindexPrepared (after #219): TestReindexPreservesUnchangedChunkIDs red, "line 1 chunkid changed: was 1, now 4"; restored clean *Earlier —* 2026-10-25 — rang (line 1 chunkid 1→4, line 3 chunkid 3→6); first pulled 2026-09-17
 
 ## Test: PrepareAppend plus AppendPrepared equals AppendChunks
 **Purpose:** the two-phase append produces the same index as the fused AppendChunks (R685, R687, R689)
@@ -471,8 +472,8 @@
 **Alarm:** 8
 **Fire alarm:** defeat the last-locator comparison in appendPrepared (guard it with `if false`, build-safe) — the stale append is applied against the moved tail; the errors.Is(ErrAppendTailMoved) assertion goes red (nil error)
 **Inject:** db.go:appendPrepared
-@alarm-hash: 5bb486cc944a8beb
-**Pulled:** 2026-11-04 — rang — last-locator comparison guarded with `if false` in appendPrepared, after #218 removed the token-bag bookkeeping around it: TestAppendPreparedRefusesMovedTail red, "expected ErrAppendTailMoved, got <nil>"; restored clean *Earlier —* 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
+@alarm-hash: 013224d670663dfe
+**Pulled:** 2026-11-05 — rang — last-locator comparison guarded with `if false` in appendPrepared (after #219): TestAppendPreparedRefusesMovedTail red, "expected ErrAppendTailMoved, got <nil>"; restored clean *Earlier —* 2026-11-04 — rang — last-locator comparison guarded with `if false` in appendPrepared, after #218 removed the token-bag bookkeeping around it: TestAppendPreparedRefusesMovedTail red, "expected ErrAppendTailMoved, got <nil>"; restored clean *Earlier —* 2026-10-25 — rang (expected ErrAppendTailMoved, got <nil>); re-pulled after appendPrepared lost its empty-append early return
 
 ## Test: PrepareAppend opens no write transaction
 **Purpose:** append compute is transaction-free (R685)
@@ -494,7 +495,8 @@
 **Alarm:** 10
 **Fire alarm:** remove the consumed check in storePrepared — without it the second store hits ErrAlreadyIndexed (masking the guard), so the test asserts errors.Is(err, errPreparedConsumed) specifically and goes red on ErrAlreadyIndexed
 **Inject:** db.go:storePrepared
-**Pulled:** 2026-10-25 — rang (got "file already indexed", want errPreparedConsumed); first pulled 2026-09-17, when the test was strengthened to the specific sentinel
+@alarm-hash: 5113243ac224b732
+**Pulled:** 2026-11-05 — rang — consumed check removed in storePrepared: TestPreparedFileSingleUse red, "second StorePrepared: got file already indexed, want errPreparedConsumed"; restored clean *Earlier —* 2026-10-25 — rang (got "file already indexed", want errPreparedConsumed); first pulled 2026-09-17, when the test was strengthened to the specific sentinel
 
 ## Test: SplitFile hash equals sha256 of chunk content
 **Purpose:** the split owns the authoritative content hash — SplitChunk.Hash is SHA-256 over Chunk.Content, the same value the store dedups by (R690, R693)
@@ -571,7 +573,8 @@
 **Alarm:** 17
 **Fire alarm:** skip Phase-1 admission for disk chunks (admit every tally entry), restoring the post-cut restriction; red is zero results
 **Inject:** db.go:DB.SearchFuzzy
-**Pulled:** 2026-10-24 — rang: got []
+@alarm-hash: 0c07d8f654964055
+**Pulled:** 2026-11-05 — rang — every tally entry admitted in SearchFuzzy phase 1 (after #219 moved the tally onto the posting reader): TestSearchFuzzyOnlyBeforeCut red, "expected exactly the in.txt match, got []"; restored clean *Earlier —* 2026-10-24 — rang: got []
 
 ## Test: fuzzy WithExcept applies before the top-k cut
 **Purpose:** excepting the files holding more than k better matches leaves the remaining match reachable
@@ -582,7 +585,8 @@
 **Alarm:** 18
 **Fire alarm:** same injection as the WithOnly test; red is zero results
 **Inject:** db.go:DB.SearchFuzzy
-**Pulled:** 2026-10-24 — rang: got []
+@alarm-hash: 0c07d8f654964055
+**Pulled:** 2026-11-05 — rang — the same injection: TestSearchFuzzyExceptBeforeCut red, "expected exactly the in.txt match, got []"; restored clean *Earlier —* 2026-10-24 — rang: got []
 
 ## Test: fuzzy WithExcept keeps a shared chunk's other file
 **Purpose:** a chunk listed in an excepted file is still admitted when it also belongs to a file outside the set, so the restriction before the cut agrees with Phase 2
@@ -604,7 +608,8 @@
 **Alarm:** 20
 **Fire alarm:** drop the overlay winners in Phase 2 (resolve disk winners only), the behavior before this change; red is no tmp://s/doc result
 **Inject:** db.go:DB.SearchFuzzy
-**Pulled:** 2026-10-24 — rang: disk.txt only
+@alarm-hash: 0c07d8f654964055
+**Pulled:** 2026-11-05 — rang — overlay winners dropped in SearchFuzzy phase 2: TestSearchFuzzyReturnsTmpHits red, no tmp://s/doc result; restored clean *Earlier —* 2026-10-24 — rang: disk.txt only
 
 ## Test: fuzzy WithOnly admits overlay chunks before the cut
 **Purpose:** overlay chunks pass the same Phase-1 restriction as disk chunks, from their in-memory fileids
@@ -637,7 +642,8 @@
 **Alarm:** 23
 **Fire alarm:** drop the loose guard on verify in Search or in SearchMulti, or restore verify in SearchFuzzy; red is the loose case returning no lines, or fuzzy returning nothing
 **Inject:** db.go:DB.Search, db.go:DB.SearchFuzzy, db.go:DB.SearchMulti
-**Pulled:** 2026-10-24 — rang at all three sites (SearchMulti found by probing past the list: no test reached it)
+@alarm-hash: d64b3c8994d8fbde
+**Pulled:** 2026-11-05 — rang — loose guard on verify dropped in Search: TestWithVerifyExactSearchOnly red, "loose + verify: want both lines (verify ignored), got []"; restored clean *Earlier —* 2026-10-24 — rang at all three sites (SearchMulti found by probing past the list: no test reached it)
 
 ## Test: chunker version stamped on index, kept on append
 **Purpose:** the F record records the strategy's chunker version when a file is chunked, and an append leaves it alone
@@ -672,8 +678,8 @@
 **Alarm:** 26
 **Fire alarm:** remove the chunkerStale check from appendPrepared; red is a nil error and an extra chunk
 **Inject:** db.go:DB.appendPrepared
-@alarm-hash: 5bb486cc944a8beb
-**Pulled:** 2026-11-04 — rang — chunkerStale check disabled in appendPrepared: TestChunkerVersionAppendRefused red, "err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
+@alarm-hash: 013224d670663dfe
+**Pulled:** 2026-11-05 — rang — chunkerStale check removed from appendPrepared: TestChunkerVersionAppendRefused red, "err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-11-04 — rang — chunkerStale check disabled in appendPrepared: TestChunkerVersionAppendRefused red, "err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendChunks err = nil, want ErrChunkerVersionStale; re-pulled after the empty-append early return was removed, rang again
 
 ## Test: an append with no chunks is refused onto old-rule chunks
 **Purpose:** the version check is not skipped when the append yields no chunks — ark's chat chunker indexes nothing from a tool-call-only tail, and that append must still refuse on a version-stale file
@@ -684,8 +690,8 @@
 **Alarm:** 27
 **Fire alarm:** restore the early return in appendPrepared for an append with no chunks and no replace; red is a nil error
 **Inject:** db.go:DB.appendPrepared
-@alarm-hash: 5bb486cc944a8beb
-**Pulled:** 2026-11-04 — rang — early return for an append with no chunks and no replace: TestChunkerVersionEmptyAppendRefused red, "AppendPrepared with no chunks: err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
+@alarm-hash: 013224d670663dfe
+**Pulled:** 2026-11-05 — rang — early return restored for an append with no chunks and no replace: TestChunkerVersionEmptyAppendRefused red, nil error; restored clean *Earlier —* 2026-11-04 — rang — early return for an append with no chunks and no replace: TestChunkerVersionEmptyAppendRefused red, "AppendPrepared with no chunks: err = <nil>, want ErrChunkerVersionStale"; restored clean *Earlier —* 2026-10-25 — rang: AppendPrepared with no chunks err = nil, want ErrChunkerVersionStale
 
 ## Test: an append with no chunks records the file's new state
 **Purpose:** an append-aware chunker that indexes nothing from the new bytes still moves the F record's length, hash and modtime forward, so the file does not read stale by content and the next scan does not repeat the append from the old length
@@ -696,8 +702,8 @@
 **Alarm:** 28
 **Fire alarm:** skip the F record metadata update when the append has no chunks; red is the old FileLength and CheckFile stale
 **Inject:** db.go:DB.appendPrepared
-@alarm-hash: 5bb486cc944a8beb
-**Pulled:** 2026-11-04 — rang — F record metadata update skipped when the append has no chunks: TestAppendNoChunksRecordsFileState red, "F record not moved forward: length 11 (want 21)"; restored clean *Earlier —* 2026-10-25 — rang: F record not moved forward, length 11 want 21
+@alarm-hash: 013224d670663dfe
+**Pulled:** 2026-11-05 — rang — F record metadata update skipped for an append with no chunks: TestAppendNoChunksRecordsFileState red, "length 11 (want 21)"; restored clean *Earlier —* 2026-11-04 — rang — F record metadata update skipped when the append has no chunks: TestAppendNoChunksRecordsFileState red, "F record not moved forward: length 11 (want 21)"; restored clean *Earlier —* 2026-10-25 — rang: F record not moved forward, length 11 want 21
 
 ## Test: Open refuses another format version
 **Purpose:** a database in an older layout is refused rather than mis-read
@@ -708,8 +714,8 @@
 **Alarm:** 29
 **Fire alarm:** delete the version check in Open; red is Open succeeding
 **Inject:** db.go:Open
-@alarm-hash: 058b5f074fc39827
-**Pulled:** 2026-11-04 — rang — version check in Open disabled: TestOpenRefusesOtherFormat red, "Open accepted format version 4" (the message read 3 until the test text was corrected the same day); restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted format version 3 *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted the older format *Earlier —* 2026-10-25 — rang: Open accepted format version 2
+@alarm-hash: bd57c86c552aa771
+**Pulled:** 2026-11-05 — rang — version check in Open disabled (format "6"): TestOpenRefusesOtherFormat red, "Open accepted format version 4"; restored clean *Earlier —* 2026-11-04 — rang — version check in Open disabled: TestOpenRefusesOtherFormat red, "Open accepted format version 4" (the message read 3 until the test text was corrected the same day); restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted format version 3 *Earlier —* 2026-11-04 — rang (re-pulled for format 4, the test now writing "3"): Open accepted the older format *Earlier —* 2026-10-25 — rang: Open accepted format version 2
 
 ## Test: Open's format refusal is typed
 **Purpose:** R751: a caller can recognize the refusal with `errors.As` and read the stored and expected versions from it
@@ -720,8 +726,8 @@
 **Alarm:** 38
 **Fire alarm:** go back to the untyped error the check returned before, `fmt.Errorf("open db %q: format version %q, want %q", ...)`; red names the error as not a `*FormatVersionError`
 **Inject:** db.go:Open
-@alarm-hash: 058b5f074fc39827
-**Pulled:** 2026-11-04 — rang — refusal returned as the old untyped fmt.Errorf: TestOpenRefusesOtherFormat red, "Open error is not a `*FormatVersionError`"; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
+@alarm-hash: bd57c86c552aa771
+**Pulled:** 2026-11-05 — rang — refusal returned as the old untyped fmt.Errorf: TestOpenRefusesOtherFormat red, "Open error is not a `*FormatVersionError`"; restored clean *Earlier —* 2026-11-04 — rang — refusal returned as the old untyped fmt.Errorf: TestOpenRefusesOtherFormat red, "Open error is not a `*FormatVersionError`"; restored clean *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-04 — rang (re-pulled for format 4): the error was not a `*FormatVersionError` (format version "3", want "4") *Earlier —* 2026-11-03 — rang: `Open error is not a *FormatVersionError: *errors.errorString open db "fts": format version "2", want "3"`; restore diff empty
 
 ## Test: missing outranks chunker-version stale
 **Purpose:** a deleted file reports missing even when its chunker version is behind, so RefreshStale skips it instead of reindexing a file that is gone
@@ -735,72 +741,68 @@
 @alarm-hash: 34a78cc1f82ca562
 **Pulled:** 2026-11-04 — rang (re-pulled for the one-name record, 2026-11-04): a deleted file under a bumped chunker read stale, want missing *Earlier —* 2026-10-25 — rang: deleted file under a bumped chunker reported stale, want missing
 
-## Test: posting rewrite filters bytes and keeps order
-**Purpose:** removal filters the stored varint bytes without disturbing the survivors' order, additions land after the survivors, and a record left empty reads as deleted
-**Input:** stored postings 5, 300, 7, 70000 (one-, two- and three-byte varints); remove {300}, add [9]; separately remove every posting with nothing added
-**Expected:** 5, 7, 70000, 9; the all-removed case yields an empty value
-**Refs:** crc-DB.md, seq-prepare-store.md, R731, R732
+## Test: posting rewrite drops dead postings and keeps order
+**Purpose:** a rewrite drops the dead postings, keeps the survivors' order and counts, puts the new postings after them, and a record left with no live posting encodes empty (R778)
+**Input:** stored postings (5,1) (7,2) (300,1) (70000,4), dead {300}, add (70001,3); separately every stored chunk dead and nothing added
+**Expected:** (5,1) (7,2) (70000,4) (70001,3); the all-dead case encodes to an empty value
+**Refs:** crc-DB.md, seq-prepare-store.md, R778
 **Code:** db_test.go
 **Alarm:** 31
-**Fire alarm:** append the additions before copying the survivors; red is 9 listed first
-**Inject:** db.go:rewritePostings
-**Pulled:** 2026-10-25 — rang: rewritePostings = [9 5 7 70000], want [5 7 70000 9]
+**Fire alarm:** keep dead postings (skip the dead-set check in rewritePostings); red is (300,1) still listed
+**Inject:** postings.go:rewritePostings
+@alarm-hash: 92522156557ca907
+**Pulled:** 2026-11-05 — rang — dead-set check skipped in rewritePostings: TestRewritePostingsFiltersAndAppends red, (300,1) still listed and the all-dead case 9 bytes, not empty; restored clean *Earlier —* 2026-10-25 — rang: rewritePostings = [9 5 7 70000], want [5 7 70000 9]
 
 ## Test: reindex rewrites each posting record once
-**Purpose:** a reindex that replaces every chunk rewrites each affected T/W record once, though many orphans and many new chunks share its grams — the removals are coalesced and fused with the additions
+**Purpose:** a reindex that replaces every chunk rewrites each affected T record once, though many new chunks share its trigrams; the orphans' dead postings leave the records it rewrites in the same pass
 **Input:** a file of twelve lines, each containing "common" with distinct text after it; AddFile; rewrite every line on disk, still containing "common"; Reindex while the posting-write hook counts writes per key
 **Expected:** no key written more than once; a search for an old line's text finds nothing, a new line's text finds its chunk, "common" finds all twelve new chunks
-**Refs:** crc-DB.md, seq-prepare-store.md, R729, R730, R731
+**Refs:** crc-DB.md, seq-prepare-store.md, R784, R778
 **Code:** db_test.go
 **Alarm:** 32
-**Fire alarm:** apply the posting edits from inside cascadeOrphan, once per orphan (the per-chunk rewrite ark profiled); red is a key written more than once
-**Inject:** db.go:DB.cascadeOrphan
-**Pulled:** 2026-10-25 — rang: T records written 2 times, want once
+**Fire alarm:** apply the posting edits inside addFileInTxn's chunk loop, once per new chunk, instead of once at the end; red is a key written more than once
+**Inject:** db.go:DB.addFileInTxn
+@alarm-hash: 389251aeaddbe79c
+**Pulled:** 2026-11-05 — rang — posting edits applied per new chunk in addFileInTxn: TestReindexRewritesEachPostingOnce red, posting records written 13 times, want once; restored clean *Earlier —* 2026-10-25 — rang: T records written 2 times, want once
 
-## Test: remove rewrites each posting record once
-**Purpose:** removing a file whose chunks share grams rewrites each T/W record once, and a record still holding another file's chunk keeps it
-**Input:** two files, one of twelve "common" lines and one with a single "common" line; RemoveFile the first while the hook counts writes per key
-**Expected:** no key written more than once; "common" still finds the second file's chunk
-**Refs:** crc-DB.md, R729, R730
+## Test: a removal writes no posting
+**Purpose:** a removal edits no T record; its orphans are dead (D records), no live posting names them, the trigram filter's document frequency no longer counts them, and a file outside the removal keeps its chunks (R774, R775)
+**Input:** a file of twelve "common" lines and a keeper with one; RemoveFileWithCallback on the first while the hook counts posting writes
+**Expected:** no posting write; twelve orphans, each with a D record and no live posting; the DF of "com" is 1; "common" finds only the keeper
+**Refs:** crc-DB.md, R774, R775
 **Code:** db_test.go
 **Alarm:** 33
-**Fire alarm:** apply the posting edits inside dropFileChunkOccurrences' loop, after each chunk; red is a key written more than once
-**Inject:** db.go:DB.dropFileChunkOccurrences
-**Pulled:** 2026-10-25 — rang: T records written 10 and 12 times, want once
+**Fire alarm:** skip the D record write in cascadeOrphan; red is an orphan with no D record and a live posting, and a DF of 13
+**Inject:** db.go:DB.cascadeOrphan
+@alarm-hash: 209f2c9b6726c294
+**Pulled:** 2026-11-05 — rang — D record write skipped in cascadeOrphan: TestRemoveWritesNoPosting red, orphans with no D record and a live posting; restored clean
 
 ## Test: append drop-and-replace rewrites each posting record once
-**Purpose:** an append that replaces the last chunk applies the dropped chunk's removals and the new chunk's additions in one rewrite per record
+**Purpose:** an append that replaces the last chunk rewrites each affected record once: the new chunk's postings added, the dropped chunk's dead postings dropped where a record is rewritten
 **Input:** tailReplaceChunker; AddFile with "shared alpha"; AppendChunks with "shared beta" while the hook counts writes per key
 **Expected:** no key written more than once; "alpha" finds nothing, "beta" finds the new chunk
-**Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R729, R731
+**Refs:** crc-DB.md, seq-prepare-store.md, seq-append.md, R784, R778
 **Code:** db_test.go
 **Alarm:** 34
-**Fire alarm:** apply the posting edits after the drop and again after the new chunks; red is the "sha"/"har" keys written twice
+**Fire alarm:** apply the posting edits twice in appendPrepared (since format "6" the drop adds no edits, so the old split-apply injection cannot ring); red is the new chunk's keys written twice
 **Inject:** db.go:DB.appendPrepared
-@alarm-hash: 5bb486cc944a8beb
-**Pulled:** 2026-11-04 — rang — posting edits applied after the drop and again after the new chunks: TestAppendReplaceRewritesEachPostingOnce red, posting records written 2 times, want once; restored clean *Earlier —* 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
+@alarm-hash: 013224d670663dfe
+**Pulled:** 2026-11-05 — rang — posting edits applied twice in appendPrepared: TestAppendReplaceRewritesEachPostingOnce red, posting records written 2 times, want once; restored clean *Earlier —* 2026-11-04 — rang — posting edits applied after the drop and again after the new chunks: TestAppendReplaceRewritesEachPostingOnce red, posting records written 2 times, want once; restored clean *Earlier —* 2026-10-25 — rang: "sha", "har", "are" written 2 times, want once
 
 ## Test: reindex callback sees final postings
-**Purpose:** the coalesced edits are applied before ReindexCallback fires, so a callback reading T records inside the txn sees orphans gone and new chunks present
-**Input:** AddFile "alpha\n"; rewrite to "omega\n"; ReindexWithCallback whose callback reads the T record for "alp" and "ome" from tx
-**Expected:** the orphan is absent from "alp" (record deleted); the new chunkid is present in "ome"
-**Refs:** crc-DB.md, seq-prepare-store.md, R733
+**Purpose:** the coalesced edits are applied before ReindexCallback fires, so a callback reading T records inside the txn sees no live posting for the orphans and the new chunks present
+**Input:** AddFile "alpha\n"; rewrite to "omega\n"; ReindexWithCallback whose callback checks, from tx, for a live posting of each orphan and each new chunk
+**Expected:** no orphan has a live posting (it is dead); every new chunkid has one
+**Refs:** crc-DB.md, seq-prepare-store.md, R785
 **Code:** db_test.go
 **Alarm:** 35
-**Fire alarm:** fire rcb before applying the posting edits in reindexPrepared; red is the orphan still listed under "alp"
+**Fire alarm:** fire rcb before applying the posting edits in reindexPrepared; red is a new chunk not listed
 **Inject:** db.go:DB.reindexPrepared
-**Pulled:** 2026-10-25 — rang: callback saw orphan 1 still listed, new chunk 2 not listed
+@alarm-hash: c6d37c83ee379fe6
+**Pulled:** 2026-11-05 — rang — ReindexCallback fired before the posting edits: TestReindexCallbackSeesFinalPostings red, `callback: new chunk 2 not listed`; restored clean *Earlier —* 2026-10-25 — rang: callback saw orphan 1 still listed, new chunk 2 not listed
 
 ## Test: remove with out-of-order chunkids clears every posting
-**Purpose:** a removal set queued in descending chunkid order (a file whose chunks dedup-hit an earlier file's in reverse) still filters every orphan out of every T/W record — the set is sorted before the binary search
-**Input:** first.txt of six "common" lines; target.txt with the same lines reversed; RemoveFile first.txt; RemoveFileWithCallback target.txt
-**Expected:** six orphans, not ascending; no T/W record lists any of them
-**Refs:** crc-DB.md, R732
-**Code:** db_test.go
-**Alarm:** 36
-**Fire alarm:** drop slices.Sort(e.del) in applyPostings; red is orphans still listed (found by probing past the list after simplification: the suite stayed green)
-**Inject:** db.go:DB.applyPostings
-**Pulled:** 2026-10-25 — rang: orphans 6, 5, 4 still listed in a T/W record
+Retired 2026-11-04 with format "6": a removal no longer builds a sorted set of chunkids to filter out of each record; it writes D records, and a rewrite drops dead postings by set membership, so the order of the orphans cannot matter. Its alarm (36) has no code left to inject into.
 
 ## Test: file summaries match the full records
 **Purpose:** FileSummaries reports for every file the same chunk count, length, strategy and mod time as FileInfoByID, while decoding only the header and the count.
@@ -826,17 +828,17 @@
 @alarm-hash: a0769a2f7bc816f7
 **Pulled:** 2026-11-03 — rang: `quote is a character: SearchTerms(["\"hello world\""]) hit map[bare.txt:true quoted.txt:true], want [quoted.txt]`; restore clean
 
-## Test: a batch remove rewrites each posting record once
-**Purpose:** RemoveFiles shares one set of posting edits across the batch, so a record touched by several files is rewritten once; a chunk shared only by files in the batch is orphaned exactly once; a file outside the batch keeps its chunks (R754, R756)
-**Input:** three files of "common" lines, two also sharing one identical line; a keeper file with one "common" line; RemoveFiles on the three while the hook counts writes per key
-**Expected:** no key written more than once; the callback's fileIDs are the three; the shared line's chunk is in the orphans once; "common" finds only the keeper
-**Refs:** crc-DB.md, R754, R756
+## Test: a batch remove writes no posting
+**Purpose:** RemoveFiles edits no T record; a chunk shared only by files in the batch is orphaned exactly once; a file outside the batch keeps its chunks (R788, R756)
+**Input:** three files of "common" lines, two also sharing one identical line; a keeper file with one "common" line; RemoveFiles on the three while the hook counts posting writes
+**Expected:** no posting write; the callback's fileIDs are the three; the shared line's chunk is in the orphans once; "common" finds only the keeper
+**Refs:** crc-DB.md, R788, R756
 **Code:** db_test.go
 **Alarm:** 40
-**Fire alarm:** apply the posting edits once per file inside RemoveFiles' loop instead of once after it; red is a key written more than once
+**Fire alarm:** rewrite a T record per file inside RemoveFiles' loop, as eager removal did before format "6" (simulated by rewriting "com"); red is posting writes observed
 **Inject:** db.go:DB.RemoveFiles
-@alarm-hash: 0ad8caa63d370270
-**Pulled:** 2026-11-04 — rang: posting records "Tmon", "Tomm" and others written 3 times, want once
+@alarm-hash: 37c847c3d8626f8b
+**Pulled:** 2026-11-05 — rang — a T record rewritten per file in RemoveFiles: TestRemoveFilesWritesNoPosting red, `batch removal wrote posting records: map[Tcom:3]`; restored clean *Earlier —* 2026-11-04 — rang: posting records "Tmon", "Tomm" and others written 3 times, want once
 
 ## Test: a batch remove skips a path that is not indexed
 **Purpose:** one path already removed (by the watcher, say) must not abort the batch (R755)
@@ -847,8 +849,8 @@
 **Alarm:** 41
 **Fire alarm:** return the lookup error instead of skipping; red is RemoveFiles failing and both files still searchable
 **Inject:** db.go:DB.RemoveFiles
-@alarm-hash: 0ad8caa63d370270
-**Pulled:** 2026-11-04 — rang: RemoveFiles failed with "file not found: …/never-indexed.txt"
+@alarm-hash: 37c847c3d8626f8b
+**Pulled:** 2026-11-05 — rang — lookup error returned instead of skipped in RemoveFiles: TestRemoveFilesSkipsUnindexed red, "RemoveFiles: file not found"; restored clean *Earlier —* 2026-11-04 — rang: RemoveFiles failed with "file not found: …/never-indexed.txt"
 
 ## Test: a failed batch callback rolls back the whole batch
 **Purpose:** the callback's error aborts every removal in the batch; a nil callback is allowed; after a successful batch the path caches forget every removed path (R757, R758)
@@ -859,8 +861,8 @@
 **Alarm:** 42
 **Fire alarm:** skip the post-commit cache invalidation for the batch; red is FileIDPaths still listing the removed paths. (First written without loading the caches, it stayed green under this injection: a nil cache cannot go stale.)
 **Inject:** db.go:DB.RemoveFiles
-@alarm-hash: 0ad8caa63d370270
-**Pulled:** 2026-11-04 — rang: path cache still lists a.txt and b.txt after the batch; CheckFile answered "read F record 1: not found", not ErrNotIndexed
+@alarm-hash: 37c847c3d8626f8b
+**Pulled:** 2026-11-05 — rang — post-commit cache invalidation skipped in RemoveFiles: TestRemoveFilesCallbackRollsBack red, "path cache still lists a.txt and b.txt after the batch"; restored clean *Earlier —* 2026-11-04 — rang: path cache still lists a.txt and b.txt after the batch; CheckFile answered "read F record 1: not found", not ErrNotIndexed
 
 ## Test: the F record ends after its chunks
 **Purpose:** the F record value ends after its chunk list (R765), and a value with bytes past it, which is what a format "4" record's token bag looks like read as format "5", is refused rather than decoded with the tail ignored
@@ -873,3 +875,87 @@
 **Inject:** records.go:UnmarshalFValue
 @alarm-hash: ab613b40fc444b81
 **Pulled:** 2026-11-04 — rang — trailing-bytes check disabled in unmarshalFValue: TestFRecordEndsAfterItsChunks red, "a record with a token bag after its chunks decoded without error"; restored clean
+
+## Test: T record round trip
+**Purpose:** postings with counts of 1 (no count byte written) and above 1, over ids of several varint widths, decode to what was encoded (R770, R780)
+**Input:** TRecord postings (1,1) (42,3) (1000,1) (999999,200); then three postings of count 1
+**Expected:** the postings decode equal; the three count-1 postings take three bytes
+**Refs:** crc-DB.md, R770, R780
+**Code:** records_test.go
+**Alarm:** 44
+**Fire alarm:** always write the count (drop the count == 1 branch in appendPostings); red is the three count-1 postings taking six bytes
+**Inject:** records.go:appendPostings
+@alarm-hash: e5caab4b9d8a2b8d
+**Pulled:** 2026-11-05 — rang — count always written in appendPostings: TestTRecordRoundtrip red, three count-1 postings took 6 bytes, want 3; restored clean
+
+## Test: a rewrite drops dead postings
+**Purpose:** an add that rewrites a T record drops the dead postings in it and leaves the D record, since other records may still hold the id (R778)
+**Input:** add "common alpha", remove it, add "common beta"; read the "com" record and the dead set
+**Expected:** "com" stores only the new chunk; the removed chunk still has its D record
+**Refs:** crc-DB.md, R778
+**Code:** postings_test.go
+**Alarm:** 45
+**Fire alarm:** load an empty dead set in applyPostings instead of the D records; red is the dead chunk still stored under "com"
+**Inject:** postings.go:DB.applyPostings
+@alarm-hash: 5e53646f65cd4f12
+**Pulled:** 2026-11-05 — rang — empty dead set in applyPostings: TestRewriteDropsDeadPostings red, the rewritten "com" record still stores dead chunk 1; restored clean
+
+## Test: Purge clears the dead set
+**Purpose:** Purge drops every dead posting, deletes records left with none, clears the dead set it started with and reports it; a second Purge writes nothing (R779)
+**Input:** a file of two lines (one with a trigram no other file has) and a keeper; remove the file; Purge; Purge again while the hook counts writes
+**Expected:** stats name 2 dead ids and some postings and lists; no dead chunk is stored in any posting; the unique trigram's record is gone; the dead set is empty; "common" finds the keeper; the second Purge reports nothing and writes nothing
+**Refs:** crc-DB.md, R779
+**Code:** postings_test.go
+**Alarm:** 46
+**Fire alarm:** delete the wrong keys at the end of Purge (so the D records stay); red is a non-empty dead set after Purge and a second Purge that reports dead ids
+**Inject:** postings.go:DB.Purge
+@alarm-hash: ea18bf18576a0b15
+**Pulled:** 2026-11-05 — rang (second attempt; the first injection did not build) — Purge deletes the wrong D keys: TestPurge red, dead set after Purge map[1 2] and a second Purge reporting Dead 2; restored clean
+
+## Test: scorers get their counts from the postings
+**Purpose:** a chunk's count of a trigram reaches the scorers from its posting, in Search and in ScoreFile (R776, R777)
+**Input:** one chunk "aaaaaa xx" ("aaa" four times, two distinct tokens); Search "aaa" with density; ScoreFile "aaa" with ScoreDensityFunc
+**Expected:** both score 2 (4 / 2)
+**Refs:** crc-DB.md, R776, R777
+**Code:** postings_test.go
+**Alarm:** 47
+**Fire alarm:** make postingReader.count return 1 for any posting it finds; red is a score of 0.5 in both
+**Inject:** postings.go:postingReader.count
+@alarm-hash: ac988f9fb3423c5f
+**Pulled:** 2026-11-05 — rang — postingReader.count returns 1: TestCountsComeFromPostings red, density 0.5 in Search and ScoreFile, want 2; restored clean
+
+## Test: an orphan takes its token total out of the counter
+**Purpose:** totalTokens rises by a new chunk's token total and falls by it when the chunk is orphaned (R774)
+**Input:** add "aa aa aa bb"; read totalTokens; remove the file; read it again
+**Expected:** 4, then 0
+**Refs:** crc-DB.md, R774
+**Code:** postings_test.go
+**Alarm:** 48
+**Fire alarm:** subtract the distinct-token count instead of the token total in cascadeOrphan; red is 2 left after the removal
+**Inject:** db.go:DB.cascadeOrphan
+@alarm-hash: 209f2c9b6726c294
+**Pulled:** 2026-11-05 — rang — distinct-token count subtracted in cascadeOrphan: TestOrphanSubtractsTokenTotal red, totalTokens 2 after remove, want 0; restored clean
+
+## Test: loose search counts every trigram of a term
+**Purpose:** loose search's term scorer checks every trigram of a term, the ones the trigram filter dropped included, so their counts come from the postings too (R776, R340)
+**Input:** "zqxy" in one file and "qxy" in three more; loose search "zqxy" with FilterBestN(1), which keeps the rare "zqx" and drops "qxy"
+**Expected:** exactly the "zqxy" file
+**Refs:** crc-DB.md, R776, R340
+**Code:** postings_test.go
+**Alarm:** 49
+**Fire alarm:** count only the selected trigrams in loose search too (countTris = active in searchCollect); red is no result
+**Inject:** db.go:searchConfig.searchCollect
+@alarm-hash: de83c74a945ece32
+**Pulled:** 2026-11-05 — rang — loose search counts only the selected trigrams: TestLooseCountsEveryTermTrigram red, no result; restored clean
+
+## Test: Purge works across batches
+**Purpose:** Purge rewrites T records a batch at a time, and with more records than one batch holds every one still loses its dead postings (R779). Found by injecting past the alarm list: stopping after the first batch left the suite green
+**Input:** one line holding every three-letter word over a to p (4,864 T records); remove the file; Purge
+**Expected:** the fixture has more T records than one batch; after Purge no T record is left
+**Refs:** crc-DB.md, R779
+**Code:** postings_test.go
+**Alarm:** 50
+**Fire alarm:** stop after the first batch (set the next key to nil in Purge's cursor loop); red is T records left after the purge
+**Inject:** postings.go:DB.Purge
+@alarm-hash: ea18bf18576a0b15
+**Pulled:** 2026-11-05 — rang — Purge stops after its first batch: TestPurgeAcrossBatches red, 2864 T records left after the purge, want 0; restored clean. Before this test the same injection left the suite green

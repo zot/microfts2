@@ -9,22 +9,23 @@ We add a file to the database with a chosen chunking strategy:
   - for external command strategies, RunChunkerFunc wraps the command as a Chunker
 - for each chunk: compute the dedup hash (SHA-256 over Content, then the marshaled Attrs when present — see "Chunk identity includes Attrs"), extract trigrams on Content, tokenize Content, copy Attrs
   - look up H record by hash — if chunkid exists, increment this fileid's count in the existing C record's fileids list (insert with count=1 if absent)
-  - if new chunk: allocate chunkid, create H record, create C record (hash + trigrams + tokens + attrs + [fileid, count=1]), append chunkid to T records for each trigram, append chunkid to W records for each token
+  - if new chunk: allocate chunkid, create H record, create C record (hash + contentLen + distinctTokens + tokenTotal + attrs + [fileid, count=1]), append a posting (chunkid and the trigram's count in the chunk) to the T record of each of its trigrams
 - update F record: append (chunkid, location, locator) entry
-- batch T/W record updates: accumulate all chunkids per trigram/token across the file, then one read-modify-write per affected T/W record (see "Posting updates are coalesced per write" below)
+- batch T record updates: accumulate all postings per trigram across the file, then one read-modify-write per affected T record (see "Posting updates are coalesced per write" below)
 
 When removing a file:
 - read F record to get the file's chunk list
 - for each (chunkid, location, locator) entry: read C record, decrement this fileid's count in the fileids list (or remove the fileid entry entirely, since removing a whole file drops all its occurrences at once)
-  - if C record has no remaining fileids: delete C record, delete H record, and queue the chunkid's removal from each T record (by trigram) and each W record (by token hash)
-- apply the queued T/W removals: one read-modify-write per affected T/W record, however many orphaned chunks it lists
+  - if C record has no remaining fileids: delete C record, delete H record, subtract its tokenTotal from the `totalTokens` counter, and write its D record (the chunk is dead). No posting is edited: the C record no longer says which T records hold the chunk, and the file may be gone, so its postings are left to be dropped later (see "Dead postings" below)
 - delete F record, delete N records (key chain)
 
-The same orphan-cascade logic is used by append-merge's drop-and-replace path (see `AppendAwareChunker` below): a chunk dropped from a single file decrements that fileid's count, with the same C/T/W/H cleanup if it was the last reference.
+The same orphan-cascade logic is used by append-merge's drop-and-replace path (see `AppendAwareChunker` below): a chunk dropped from a single file decrements that fileid's count, with the same C/H/D cleanup if it was the last reference.
 
 When reindexing a file (re-chunking it after an edit), preserve the chunkids of unchanged content. Re-chunk the new content, then delete only the old file's F and N records — the path metadata, not its chunks. Add the new chunks next: the old chunks' H records still exist, so a chunk whose content (hash) is unchanged is a dedup hit that keeps its chunkid, while genuinely new content allocates a fresh chunkid. Finally drop the old fileid's occurrences from the old chunk list. Chunks whose content survived were just re-added under the new fileid, so they live on; chunks whose content is gone lose their last reference and orphan-cascade as when removing a file. The net effect is a content diff, so chunkid-keyed external state (an embedding keyed by chunkid, say) survives an edit that leaves a chunk untouched.
 
-Posting updates are coalesced per write. Every change one write operation makes to the T and W records — adding a file, removing one, reindexing one, appending to one, and the prepared forms of each — is gathered across the whole operation and applied once per affected record at the end of it, inside the same transaction. That covers removals as well as additions: a reindex that replaces fifty chunks sharing a common trigram rewrites that trigram's record once, not fifty times. Where one operation both adds and removes chunks — a reindex, or an append that drops and replaces its last chunk — a record touched by both is rewritten in one pass: the removed chunkids are dropped from what is stored, then the new chunkids are appended after the survivors, so the stored order of the postings that remain is unchanged. Removal works on the stored bytes directly, copying the surviving postings across rather than decoding the whole list into chunkids and re-encoding it, and a record left with no postings is deleted. The coalesced changes are applied before the remove or reindex callback fires, so the callback sees the T and W records in their final state. (The removed-chunk callback still fires as each chunk is orphaned, before its C record is deleted.)
+Posting updates are coalesced per write. Every posting one write operation adds — adding a file, reindexing one, appending to one, and the prepared forms of each — is gathered across the whole operation and applied once per affected T record at the end of it, inside the same transaction: a reindex that adds fifty chunks sharing a common trigram rewrites that trigram's record once, not fifty times. A record being rewritten drops its dead postings in the same pass (chunkids in the dead set, including any this operation just orphaned), so the stored order of the postings that remain is unchanged, the new postings follow them in chunkid order, and a record left with no live postings is deleted. The coalesced changes are applied before the remove or reindex callback fires, so the callback sees the T records in their final state. (The removed-chunk callback still fires as each chunk is orphaned, before its C record is deleted.)
+
+Dead postings. A chunk whose last occurrence goes is dead: its chunkid is in the dead set (D records) until no posting names it. Every reader of a T record skips dead postings, so document frequencies and search results are exactly what they would be had the postings been removed at once. Dead postings leave a T record when a write rewrites it, as above, and through `Purge`, which scans the T records and rewrites each one holding a posting in the dead set it started with, deletes records left empty, then deletes those D records, committing in batches; a chunk that dies while it runs stays in the set for the next purge. Chunkids are never reused (they come from the `nextChunkID` counter), so a dead posting can never name a live chunk.
 
 When searching for a literal string:
 - trim leading and trailing whitespace from the query before trigram extraction
@@ -32,11 +33,11 @@ When searching for a literal string:
 - extract trigrams per term (not from the whole query as one byte sequence) — this avoids cross-boundary trigrams between unrelated words (e.g. "daneel olivaw" must not produce trigrams "l o", " ol")
 - the candidate set is the intersection of all terms' trigram candidate sets — a chunk must match all terms
 - select query trigrams via TrigramFilter (default: FilterAll — use all trigrams); filter is applied to the combined trigram set
-  - look up each query trigram's document frequency from T record value length
+  - look up each query trigram's document frequency: its T record's live postings
   - call filter function to select subset
-- for each selected query trigram, read T record to get candidate chunkid lists
+- for each selected query trigram, decode its T record once (live postings only) for the candidate chunkids and their counts
 - intersect candidate chunkid sets across all selected query trigrams
-- for each surviving chunkid, read C record to get per-trigram counts and fileids
+- for each surviving chunkid, read the C record for its attrs, fileids and distinctTokens, and take its counts of the selected trigrams from the decoded postings
 - score each candidate using the selected scoring function (coverage or density)
 - resolve chunkid → (filepath, range) via C record fileids → F record chunk list
 - sort by score descending, return top-k
@@ -215,7 +216,7 @@ func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error
 ```
 
 - One write transaction for the whole batch; the posting edits of every file
-  are collected together and each affected T/W record is rewritten once
+  are collected together and each affected T record is rewritten once
 - A path that is not indexed is skipped, not an error: a caller's batch can
   race another remover (ark's watcher), and one already-removed path must not
   abort the rest. `fileIDs` lists only the files actually removed
@@ -283,7 +284,7 @@ func (db *DB) PrepareContent(fpath, strategy string, content []byte, opts ...Ind
   computing; do not call `AddChunker` or add a strategy while a compute is in flight.
 - Returns an opaque `*PreparedFile`. The caller cannot inspect or forge it; it carries the
   collected per-chunk data plus the file's mod time, content hash, and byte length. The
-  H/T/W/C/F record layout stays private to microfts2.
+  H/T/C/D/F record layout stays private to microfts2.
 - `WithChunkCallback` fires during compute, in chunk order — that is when chunk text
   exists. (`WithIndexedChunkCallback` fires during store; see below.)
 
@@ -298,7 +299,7 @@ func (db *DB) ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, err
 ```
 
 - `StorePrepared` performs a fresh add: allocates the fileid, writes the N and F records,
-  dedups each chunk by H record, and updates the C/T/W records and corpus counters. The
+  dedups each chunk by H record, and updates the C and T records and corpus counters. The
   `ErrAlreadyIndexed` duplicate guard is preserved.
 - `ReindexPrepared` performs a content-diff reindex (see "When reindexing a file"): the
   same store, preceded by deleting the old path metadata and followed by dropping the old
@@ -311,7 +312,7 @@ func (db *DB) ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, err
   during store, inside the write transaction, with the same semantics as on the fused
   methods.
 
-The fileid lifecycle and the H/T/W/C/F invariants stay owned by microfts2 in the store
+The fileid lifecycle and the H/T/C/D/F invariants stay owned by microfts2 in the store
 phase; the prepared handle never carries those records, only derived per-chunk data.
 
 ## The fused methods are thin wrappers

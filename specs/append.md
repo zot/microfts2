@@ -18,7 +18,7 @@ Chunks `content` using the named strategy, adds the resulting chunks and trigram
 
 Updates the F record: new ContentHash, ModTime, FileLength, appended chunk entries. Does NOT touch existing chunks or trigrams — they remain valid.
 
-For each new chunk: hash content, check H record for dedup. New chunks get C records, T/W record updates. Existing chunks (dedup hit) just add fileid to C record. F record gets new (chunkid, location) entries appended.
+For each new chunk: hash content, check H record for dedup. New chunks get C records and T postings. Existing chunks (dedup hit) just add fileid to C record. F record gets new (chunkid, location) entries appended.
 
 ## Chunker offset support
 
@@ -97,7 +97,7 @@ Advancing the recorded length loses no bytes. Non-empty bytes reach the store wi
 When `replacedLast` is true, `AppendChunks`:
 1. Drops the last entry from the F record's chunk list.
 2. Reads the dropped chunk's C record, decrements this fileid's count (or removes the fileid entry if count reaches 0).
-3. If the C record's fileids list is now empty, deletes the C record and the H record, and queues the chunkid's removal from each T record (by trigram) and W record (by token). Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper. The queued removals are applied together with the new chunks' T/W additions, one rewrite per affected record (see "Posting updates are coalesced per write" in indexing.md).
+3. If the C record's fileids list is now empty, deletes the C record and the H record and writes the chunk's D record. Same cascade as `RemoveFile`'s per-chunk path — this logic is consolidated into a shared internal helper. No posting is edited for it; a T record the new chunks' postings rewrite drops it in the same pass (see "Posting updates are coalesced per write" and "Dead postings" in indexing.md).
 
 A chunker may, in principle, replace more than just the last chunk. The current spec scope is single-last-chunk replacement; a future extension could allow replacing the last K chunks if a use case appears.
 
@@ -136,7 +136,7 @@ func (db *DB) AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOpt
 - Applies the prepared append inside the write transaction: re-reads the F record, and —
   when the handle replaces the last chunk — verifies the committed last locator still
   equals the one compute assumed, refusing with `ErrAppendTailMoved` if the tail has moved
-  since compute. Then performs the drop-and-replace cleanup, chunk dedup, T/W updates,
+  since compute. Then performs the drop-and-replace cleanup, chunk dedup, T updates,
   corpus counters, and F-record update, exactly as `AppendChunks` does.
 - The tail-locator check guards only the `replacedLast` case: a pure append (no
   last-chunk replacement) has no tail chunk to invalidate and relies on the caller

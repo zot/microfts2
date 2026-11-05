@@ -163,12 +163,13 @@ func (o *overlay) populateFileChunksLocked(ofile *overlayFile, collected []colle
 func (o *overlay) indexedChunkLocked(chunkID uint64, cc collectedChunk) IndexedChunk {
 	oc := o.chunks[chunkID]
 	crec := CRecord{
-		ChunkID:    oc.chunkID,
-		Hash:       oc.hash,
-		ContentLen: oc.contentLen,
-		Attrs:      oc.attrs,
-		FileIDs:    oc.fileIDs,
-		Trigrams:   oc.trigrams,
+		ChunkID:        oc.chunkID,
+		Hash:           oc.hash,
+		ContentLen:     oc.contentLen,
+		DistinctTokens: len(oc.tokens), // R772: the overlay keeps its lists in memory
+		TokenTotal:     tokenTotal(oc.tokens),
+		Attrs:          oc.attrs,
+		FileIDs:        oc.fileIDs,
 	}
 	return IndexedChunk{Chunk: cc.Chunk, CRecord: crec}
 }
@@ -475,12 +476,13 @@ func (o *overlay) resolveLocked(candidateIDs map[uint64]bool, active []uint32, s
 		}
 
 		crec := CRecord{
-			ChunkID:    oc.chunkID,
-			Hash:       oc.hash,
-			ContentLen: oc.contentLen,
-			Attrs:      oc.attrs,
-			FileIDs:    oc.fileIDs,
-			Trigrams:   oc.trigrams,
+			ChunkID:        oc.chunkID,
+			Hash:           oc.hash,
+			ContentLen:     oc.contentLen,
+			DistinctTokens: len(oc.tokens), // R772: the overlay keeps its lists in memory
+			TokenTotal:     tokenTotal(oc.tokens),
+			Attrs:          oc.attrs,
+			FileIDs:        oc.fileIDs,
 		}
 		if !cfg.applyChunkFilters(crec) {
 			continue
@@ -538,12 +540,13 @@ func (o *overlay) searchOverlayAll(_ ScoreFunc, cfg searchConfig) []SearchResult
 	var results []SearchResult
 	for _, oc := range o.chunks {
 		crec := CRecord{
-			ChunkID:    oc.chunkID,
-			Hash:       oc.hash,
-			ContentLen: oc.contentLen,
-			Attrs:      oc.attrs,
-			FileIDs:    oc.fileIDs,
-			Trigrams:   oc.trigrams,
+			ChunkID:        oc.chunkID,
+			Hash:           oc.hash,
+			ContentLen:     oc.contentLen,
+			DistinctTokens: len(oc.tokens), // R772: the overlay keeps its lists in memory
+			TokenTotal:     tokenTotal(oc.tokens),
+			Attrs:          oc.attrs,
+			FileIDs:        oc.fileIDs,
 		}
 		if !cfg.applyChunkFilters(crec) {
 			continue
@@ -733,4 +736,13 @@ func (o *overlay) empty() bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return len(o.files) == 0
+}
+
+// tokenTotal sums token counts.
+func tokenTotal(ts []TokenEntry) int {
+	n := 0
+	for _, t := range ts {
+		n += t.Count
+	}
+	return n
 }

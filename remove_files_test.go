@@ -9,11 +9,11 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// TestRemoveFilesRewritesEachPostingOnce: one set of posting edits for the
-// whole batch, so a record several files touch is rewritten once; a chunk
+// TestRemoveFilesWritesNoPosting: a batch removal edits no T record; a chunk
 // shared only by files in the batch is orphaned once; a file outside the batch
-// keeps its chunks. R754, R756
-func TestRemoveFilesRewritesEachPostingOnce(t *testing.T) {
+// keeps its chunks.
+// Test: test-DB.md | CRC: crc-DB.md | R756, R774, R788
+func TestRemoveFilesWritesNoPosting(t *testing.T) {
 	db, dir := testDB(t)
 	a := writeTestFile(t, dir, "a.txt", commonLines("a", 6)+"shared batch line\n")
 	b := writeTestFile(t, dir, "b.txt", commonLines("b", 6)+"shared batch line\n")
@@ -34,7 +34,9 @@ func TestRemoveFilesRewritesEachPostingOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEachPostingWrittenOnce(t, writes)
+	if len(writes) != 0 {
+		t.Errorf("batch removal wrote posting records: %v", writes)
+	}
 	if len(gotIDs) != 3 {
 		t.Errorf("fileIDs: got %v, want three", gotIDs)
 	}

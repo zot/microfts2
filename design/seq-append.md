@@ -1,5 +1,5 @@
 # Sequence: Append Chunks
-**Requirements:** R146, R147, R150-153, R156-168, R223-226, R236, R237, R253, R261, R262, R471, R482, R601-609, R623-625, R726-731
+**Requirements:** R146, R147, R150-153, R156-168, R223-226, R236, R237, R253, R261, R262, R471, R482, R601-609, R623-625, R726-731, R774, R778, R784
 
 Entry flow: `AppendChunks` now runs as `PrepareAppend` (compute, no txn — the caller
 supplies the last locator) then `AppendPrepared` (this store, one Update txn) — see
@@ -67,7 +67,7 @@ DB                                          Trigrams       Chunker
  |        if count==0: remove fileid entry     |              |
  |        if fileids list empty: cascade       |              |
  |          delete C, delete H,                |              |
- |          queue T/W removals [R730]          |              |
+ |          write D record [R774]              |              |
  |                                             |              |
  |    for each new chunk:                      |              |
  |      check H[hash] for dedup:               |              |
@@ -75,13 +75,12 @@ DB                                          Trigrams       Chunker
  |          (insert with count=1 if absent)    |              |
  |        if new: allocate chunkid,            |              |
  |          create H, C records                |              |
- |          accumulate for T/W batch           |              |
+ |          accumulate for T batch             |              |
  |      collect (chunkid, location, locator)   |              |
- |      merge tokens into file bag             |              |
  |                                             |              |
  |    apply posting edits: one rewrite per     |              |
- |      T/W record — drop queued removals,     |              |
- |      append new chunkids [R729, R731]       |              |
+ |      T record — drop dead postings,         |              |
+ |      append new postings [R784, R778]       |              |
  |                                             |              |
  |    update F record:                         |              |
  |      append chunk entries (with locator)    |              |

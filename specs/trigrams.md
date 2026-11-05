@@ -15,4 +15,4 @@
     - cross-boundary trigrams preserved — effectively encode character bigrams for CJK search
   - 8 bits / byte, 24 bits per trigram
   - 16M possible trigrams (2^24 = 16,777,216)
-  - trigram counts (C records): sparse individual index records, one per non-zero trigram
+  - trigram counts (T postings): each posting carries its chunk's count of the trigram

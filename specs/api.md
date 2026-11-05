@@ -15,6 +15,7 @@ func (db *DB) AddFileWithContent(fpath, strategy string) (uint64, []byte, error)
 func (db *DB) RemoveFile(fpath string) error
 func (db *DB) RemoveFileWithCallback(fpath string, fn RemoveCallback) error
 func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error
+func (db *DB) Purge() (PurgeStats, error) // drop dead postings from every T record; clear the dead set it started with
 func (db *DB) Reindex(fpath, strategy string) (uint64, error)
 func (db *DB) ReindexWithCallback(fpath, strategy string, fn ReindexCallback, opts ...IndexOption) (uint64, error)
 func (db *DB) ReindexWithContent(fpath, strategy string) (uint64, []byte, error)
@@ -64,7 +65,7 @@ Options:
   lets a second opener fail fast instead of hanging while another holds
   the DB.
 
-Format version: `Create` writes the DB format version `"5"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
+Format version: `Create` writes the DB format version `"6"` into the `I` record `version`, and `Open` refuses a database whose format version is anything else, with an error naming the stored version. The record layouts are not self-describing, so reading an older layout as the current one would mis-parse silently. An older database is brought forward by a separate migration program, never by `Open`. The refusal is a `*FormatVersionError` carrying the stored and expected versions (`Stored`, `Want`), so a caller can tell this case from other open failures with `errors.As` and say what to do about it; its message is unchanged.
 
 (bbolt has no named-DB limit and grows the file automatically, so the former `MaxDBs` and `MapSize` options were removed.)
 
@@ -94,8 +95,8 @@ type CRecord struct {
     ChunkID  uint64
     Hash     [32]byte
     ContentLen int                   // byte length of the chunk's content
-    Trigrams []TrigramEntry          // {Trigram uint32, Count int}
-    Tokens   []TokenEntry            // {Token string, Count int}
+    DistinctTokens int               // distinct tokens in the chunk: the length scoring normalizes by
+    TokenTotal int                   // summed token counts: what the totalTokens counter adds and subtracts
     Attrs    []Pair                  // opaque per-chunk metadata from chunker (timestamp, role, etc.)
     FileIDs  []FileIDCount           // {FileID, Count uint64}: per-file occurrence refcount
     db       *DB                     // unexported: transaction context
@@ -128,22 +129,24 @@ type FRecord struct {
     Chunks      []FileChunkEntry     // {ChunkID uint64, Location string, Locator []byte}
 }
 
-// TRecord is the trigram inverted index entry.
+// TRecord is the trigram inverted index entry: the trigram's postings in
+// ascending chunk-id order, each with that chunk's count of the trigram.
 type TRecord struct {
     Trigram  uint32
-    ChunkIDs []uint64
+    Postings []Posting
 }
 
-// WRecord is the token inverted index entry.
-type WRecord struct {
-    TokenHash uint32
-    ChunkIDs  []uint64
+// PurgeStats is what Purge did.
+type PurgeStats struct {
+    Lists    int // T records rewritten (deleted ones included)
+    Postings int // dead postings dropped
+    Dead     int // dead-set entries cleared
 }
 
 // Supporting types
 type Pair          struct { Key []byte; Value []byte }
 type TrigramEntry  struct { Trigram uint32; Count int }
-type TokenEntry    struct { Token string; Count int }
+type Posting       struct { ChunkID uint64; Count int }
 type FileChunkEntry struct { ChunkID uint64; Location string; Locator []byte }
 type FileIDCount   struct { FileID uint64; Count uint64 }
 ```
@@ -171,7 +174,7 @@ Built-in score functions: `ScoreOverlap` (matching trigram count), `ScoreBM25(id
 
 ## Chunk filtering
 
-`ChunkFilter` receives the `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for per-trigram counts), so filtering adds a conditional check on data already in memory.
+`ChunkFilter` receives the `CRecord` for a candidate chunk. Called during candidate evaluation — after T record intersection, before scoring. The C record is already loaded on the hot path (needed for its file ids and length), so filtering adds a conditional check on data already in memory.
 
 The CRecord carries unexported `db` and `bkt` fields — the chunk is inherently tied to the bucket (and its transaction) that read it. `Tx()` and `DB()` accessors expose the context for power-user filters. `FileRecord(fileid)` is a convenience method for the common case.
 

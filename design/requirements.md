@@ -65,16 +65,16 @@
 
 - **R223:** Chunks are deduplicated by content hash (SHA-256) — same content = same chunkid across files
 - **R224:** `H` records: `H[hash:32] → chunkid:varint` — content hash to chunkid lookup
-- **R225:** During AddFile, each chunk's content is hashed; if H record exists, the chunk is a dedup hit (add fileid to existing C record, skip T/W updates)
-- **R226:** If H record does not exist, allocate new chunkid, create H record, create C record, update T and W records
+- **~~R225:~~** (Retired T126 — see R783) During AddFile, each chunk's content is hashed; if H record exists, the chunk is a dedup hit (add fileid to existing C record, skip T/W updates)
+- **~~R226:~~** (Retired T127 — see R783) If H record does not exist, allocate new chunkid, create H record, create C record, update T and W records
 
 ## Feature: C Records (Per-Chunk)
 **Source:** specs/storage.md
 
 - **R16:** ~~removed: old per-trigram C records replaced by per-chunk C records~~
-- **R227:** `C` records: `C[chunkid:varint] → hash:32 + packed trigrams + packed tokens + packed attrs + packed fileids`
-- **R228:** C record trigrams: `[n-trigrams:varint] [[trigram:3] [count:varint]]...` — per-chunk trigram counts
-- **R229:** C record tokens: `[n-tokens:varint] [[count:varint] [token:str]]...` — per-chunk token counts
+- **~~R227:~~** (Retired T105 — see R771) `C` records: `C[chunkid:varint] → hash:32 + packed trigrams + packed tokens + packed attrs + packed fileids`
+- **~~R228:~~** (Retired T106 — see R771) C record trigrams: `[n-trigrams:varint] [[trigram:3] [count:varint]]...` — per-chunk trigram counts
+- **~~R229:~~** (Retired T107 — see R771) C record tokens: `[n-tokens:varint] [[count:varint] [token:str]]...` — per-chunk token counts
 - **R230:** C record attrs: `[n-attrs:varint] [[key:bytes] [value:bytes]]...` — optional key-value pairs from chunker Attrs (e.g. timestamp, role); opaque to microfts2
 - **R231:** C record fileids: `[n-fileids:varint] [fileid:varint]...` — list of files containing this chunk
 - **R232:** C record is self-describing — all data needed for search, scoring, filtering, and removal in one read
@@ -105,15 +105,15 @@
 **Source:** specs/storage.md
 
 - **R21:** ~~removed: forward index entries replaced by T records~~
-- **R238:** `T` records: `T[trigram:3] → [chunkid:varint]...` — packed list of chunkids per trigram
-- **R239:** Corpus trigram document frequency derived from T record value length — no separate count records needed
+- **~~R238:~~** (Retired T104 — see R770) `T` records: `T[trigram:3] → [chunkid:varint]...` — packed list of chunkids per trigram
+- **~~R239:~~** (Retired T119 — see R775) Corpus trigram document frequency derived from T record value length — no separate count records needed
 - **R240:** One T record per distinct trigram; entry count proportional to vocabulary, not trigram-chunk pairs
 
 ## Feature: W Records (Token Inverted Index)
 **Source:** specs/storage.md
 
-- **R241:** `W` records: `W[token-hash:4] → [chunkid:varint]...` — packed list of chunkids per token hash
-- **R242:** Token IDF derived from W record value length — same structure as T records
+- **~~R241:~~** (Retired T112 — see R773) `W` records: `W[token-hash:4] → [chunkid:varint]...` — packed list of chunkids per token hash
+- **~~R242:~~** (Retired T113 — see R773) Token IDF derived from W record value length — same structure as T records
 - **R243:** Provides exact token-level inverse document frequency for BM25 scoring
 
 ## Feature: Record Structs
@@ -121,7 +121,7 @@
 
 - **R95:** ~~removed: FileInfo struct replaced by FRecord~~
 - **R102:** ~~removed: R record reverse index replaced by C record fileid list~~
-- **R244:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []FileIDCount` — `FileIDCount` is `{FileID uint64, Count uint64}`, the refcounted per-fileid occurrence count (R595)
+- **~~R244:~~** (Retired T111 — see R772) `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, Trigrams []TrigramEntry, Tokens []TokenEntry, Attrs []Pair, FileIDs []FileIDCount` — `FileIDCount` is `{FileID uint64, Count uint64}`, the refcounted per-fileid occurrence count (R595)
 - **~~R245:~~** (Retired T87 — see R759) `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Names []string, Chunks []FileChunkEntry, Tokens []TokenEntry`
 - **R246:** `TRecord` struct: `Trigram uint32, ChunkIDs []uint64`
 - **R247:** `WRecord` struct: `TokenHash uint32, ChunkIDs []uint64`
@@ -158,30 +158,30 @@
 ## Feature: Adding Files
 **Source:** specs/indexing.md
 
-- **R29:** Adding a file: check for existing N records (dedup guard), allocate fileid, create N/F records, call chunker (yields Range+Content per chunk), for each chunk: hash content, check H record for dedup, create/update C records, batch T/W record updates
-- **R253:** Batch T/W updates: accumulate all chunkids per trigram/token across the file's chunks, then one read-modify-write per affected T/W record
+- **~~R29:~~** (Retired T129 — see R783) Adding a file: check for existing N records (dedup guard), allocate fileid, create N/F records, call chunker (yields Range+Content per chunk), for each chunk: hash content, check H record for dedup, create/update C records, batch T/W record updates
+- **~~R253:~~** (Retired T130 — see R784) Batch T/W updates: accumulate all chunkids per trigram/token across the file's chunks, then one read-modify-write per affected T/W record
 - **R110:** (inferred) AddFile computes trigram counts per chunk (map[uint32]int) from chunk Content, not raw file bytes
 
 ## Feature: Removing Files
 **Source:** specs/indexing.md
 
-- **R254:** Removing a file: read F record to get chunk list, for each chunkid remove fileid from C record, if C has no remaining fileids delete C/H records and remove chunkid from T/W records, delete F and N records
+- **~~R254:~~** (Retired T114 — see R774) Removing a file: read F record to get chunk list, for each chunkid remove fileid from C record, if C has no remaining fileids delete C/H records and remove chunkid from T/W records, delete F and N records
 
 ## Feature: Coalesced Posting Updates
 **Source:** specs/indexing.md
 
-- **R729:** Every T/W record change made by one write operation (AddFile, RemoveFile, Reindex, AppendChunks, and the prepared forms StorePrepared, ReindexPrepared, AppendPrepared) is gathered across the whole operation and applied once per affected record at the end of it, inside the same transaction
-- **R730:** Removals are coalesced like additions: orphan cascade queues the chunkid's removal from each of its T and W records instead of rewriting them, so a record listing N orphaned chunks is rewritten once, not N times
-- **R731:** A record touched by both additions and removals in one operation (reindex; append drop-and-replace) is rewritten in one pass: the removed chunkids are dropped from the stored postings, then the new chunkids are appended after the survivors, whose stored order is unchanged
-- **R732:** Removal filters the stored varint bytes directly, copying surviving postings across without decoding the list into chunkids; a record left with no postings is deleted
-- **R733:** The coalesced changes are applied before RemoveCallback or ReindexCallback fires, so the callback sees final T/W state; RemovedChunkCallback still fires as each chunk is orphaned, before its C record is deleted
+- **~~R729:~~** (Retired T131 — see R784) Every T/W record change made by one write operation (AddFile, RemoveFile, Reindex, AppendChunks, and the prepared forms StorePrepared, ReindexPrepared, AppendPrepared) is gathered across the whole operation and applied once per affected record at the end of it, inside the same transaction
+- **~~R730:~~** (Retired T116 — see R774) Removals are coalesced like additions: orphan cascade queues the chunkid's removal from each of its T and W records instead of rewriting them, so a record listing N orphaned chunks is rewritten once, not N times
+- **~~R731:~~** (Retired T122 — see R778) A record touched by both additions and removals in one operation (reindex; append drop-and-replace) is rewritten in one pass: the removed chunkids are dropped from the stored postings, then the new chunkids are appended after the survivors, whose stored order is unchanged
+- **~~R732:~~** (Retired T123 — see R778) Removal filters the stored varint bytes directly, copying surviving postings across without decoding the list into chunkids; a record left with no postings is deleted
+- **~~R733:~~** (Retired T134 — see R785) The coalesced changes are applied before RemoveCallback or ReindexCallback fires, so the callback sees final T/W state; RemovedChunkCallback still fires as each chunk is orphaned, before its C record is deleted
 
 ## Feature: Searching
 **Source:** specs/search.md
 
 - **R30:** ~~removed: no separate index DB existence check — index is always maintained~~
 - **R31:** Literal search: trim whitespace, parse query into terms via parseQueryTerms, extract trigrams per term (not whole query), intersect per-term candidate sets, select via TrigramFilter (default: FilterAll)
-- **R32:** Literal search: for each selected query trigram, read T record to get candidate chunkid lists; intersect candidate sets across all selected trigrams; for each surviving chunkid, read C record to get per-trigram counts and fileids; resolve chunkid → (filepath, range) via C record fileids → F record chunk list
+- **~~R32:~~** (Retired T121 — see R776) Literal search: for each selected query trigram, read T record to get candidate chunkid lists; intersect candidate sets across all selected trigrams; for each surviving chunkid, read C record to get per-trigram counts and fileids; resolve chunkid → (filepath, range) via C record fileids → F record chunk list
 - **R33:** Results scored using the selected scoring function (coverage or density), sorted by score descending
 - **R34:** CLI output: one result per line, `filepath:range`
 - **R35:** Library returns struct slices with file path, range string, score
@@ -250,10 +250,10 @@
 
 - **R75:** ~~removed: A record replaced by dynamic TrigramFilter~~
 - **R76:** ~~removed: BuildIndex replaced by dynamic TrigramFilter~~
-- **R77:** `AddFile`/`Reindex` create/update C, T, and W records for all of the file's chunks and trigrams
-- **R78:** `RemoveFile` reads the F record chunk list to find chunkids, removes fileid from C records, and cleans up T/W/H records for orphaned chunks
-- **R79:** `AddFile` always maintains the index incrementally (T/W/C records updated in the same transaction)
-- **R80:** `RemoveFile` uses C record fileid lists to determine orphaned chunks; orphaned chunks have their T/W/H entries deleted
+- **~~R77:~~** (Retired T128 — see R783) `AddFile`/`Reindex` create/update C, T, and W records for all of the file's chunks and trigrams
+- **~~R78:~~** (Retired T117 — see R774) `RemoveFile` reads the F record chunk list to find chunkids, removes fileid from C records, and cleans up T/W/H records for orphaned chunks
+- **~~R79:~~** (Retired T132 — see R784) `AddFile` always maintains the index incrementally (T/W/C records updated in the same transaction)
+- **~~R80:~~** (Retired T118 — see R774) `RemoveFile` uses C record fileid lists to determine orphaned chunks; orphaned chunks have their T/W/H entries deleted
 - **R81:** Index is always maintained incrementally — no separate "index exists" check needed
 
 ## Feature: Regex Search
@@ -335,7 +335,7 @@
 
 - **R135:** `TrigramCount` struct: `Trigram uint32, Count int` — pairs a trigram code with its corpus document frequency
 - **R136:** `TrigramFilter` type: `func(trigrams []TrigramCount, totalChunks int) []TrigramCount` — caller-supplied function deciding which query trigrams to search with
-- **R137:** `WithTrigramFilter(fn TrigramFilter)` search option: look up each query trigram's document frequency from T record value length, call the filter, use the returned subset
+- **~~R137:~~** (Retired T135 — see R786) `WithTrigramFilter(fn TrigramFilter)` search option: look up each query trigram's document frequency from T record value length, call the filter, use the returned subset
 - **R138:** ~~removed: no backward compat needed — default is FilterAll~~
 - **R139:** `WithTrigramFilter` applies to both `Search` and `ScoreFile`
 - **R140:** `FilterAll` stock filter: returns all trigrams unmodified (disables filtering)
@@ -364,7 +364,7 @@
 - **R153:** New chunk numbering continues from the file's existing chunk count in the F record
 - **R154:** ~~removed: forward index replaced by T records~~
 - **R155:** ~~removed: R record replaced by C record fileid list~~
-- **R156:** For each new chunk: hash content, check H for dedup, create/update C records, batch T/W updates
+- **~~R156:~~** (Retired T133 — see R784) For each new chunk: hash content, check H for dedup, create/update C records, batch T/W updates
 - **~~R157:~~** (Retired T96 — see R769) F record updated: appended chunk entries (chunkid + location), merged token bag, new ContentHash, ModTime, FileLength
 - **R158:** `AppendOption` functional option type: `func(*appendConfig)`
 - **R159:** `WithContentHash(hash string)` option: full-file SHA-256, caller pre-computed
@@ -506,7 +506,7 @@
 - **R275:** I record counter `totalTokens`: sum of all chunk token counts, maintained atomically during AddFile/RemoveFile/AppendChunks
 - **R276:** I record counter `totalChunks`: total number of unique chunks, maintained atomically during AddFile/RemoveFile/AppendChunks
 - **R277:** `avgdl = totalTokens / totalChunks` — average chunk token count across corpus
-- **R278:** (inferred) IDF per trigram: `df(t)` derived from T record value length; `N` from totalChunks I record counter
+- **~~R278:~~** (Retired T120 — see R775) (inferred) IDF per trigram: `df(t)` derived from T record value length; `N` from totalChunks I record counter
 
 ## Feature: Proximity Reranking
 **Source:** specs/search.md
@@ -722,7 +722,7 @@
 
 - **R418:** `SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchResults, error)` — fast typo-tolerant search method on DB
 - **R419:** Phase 1: extract trigrams from query, read T record posting lists, count how many posting lists each chunkID appears in — select top-k by count
-- **R420:** Phase 2: read C records for top-k candidates only, re-score using ScoreCoverage (actual trigram counts), re-sort by accurate score
+- **~~R420:~~** (Retired T136 — see R787) Phase 2: read C records for top-k candidates only, re-score using ScoreCoverage (actual trigram counts), re-sort by accurate score
 - **R421:** `k` parameter required — no unbounded fuzzy search
 - **R422:** Returns `*SearchResults` (same type as Search) for API compatibility
 - **R423:** Post-filter options apply to top-k: WithChunkFilter, WithRegexFilter, WithExceptRegex, WithProximityRerank
@@ -805,10 +805,10 @@
 ## Feature: Chunk Content Length
 **Source:** specs/storage.md
 
-- **R495:** C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
+- **~~R495:~~** (Retired T108 — see R771) C record contentLen: `[contentLen:varint]` — byte length of the chunk's content, stored after hash, before trigrams. Known at index time from chunker output. Enables corpus-wide chunk size statistics without re-reading files from disk
 - **R496:** `CRecord.ContentLen int` field — populated at index time from `len(chunk.Content)`, persisted in C record wire format
-- **R497:** (inferred) `CRecord.MarshalValue` writes contentLen varint after hash, before n-trigrams
-- **R498:** (inferred) `UnmarshalCValue` reads contentLen varint after hash, before n-trigrams
+- **~~R497:~~** (Retired T109 — see R771) (inferred) `CRecord.MarshalValue` writes contentLen varint after hash, before n-trigrams
+- **~~R498:~~** (Retired T110 — see R771) (inferred) `UnmarshalCValue` reads contentLen varint after hash, before n-trigrams
 - **R499:** (inferred) Overlay chunk structs store contentLen for parity with index C records
 - **R500:** `ChunkContentLens(fileid uint64) ([]int, error)` — public method on DB. Reads the F record's chunk list, then reads each C record's ContentLen. Returns lengths in chunk-list order. Single View transaction
 - **R501:** (inferred) Overlay-aware: if fileid belongs to tmp:// overlay, reads contentLen from overlay chunks instead of the index
@@ -881,7 +881,7 @@
 - **R552:** If `fn` is nil, behavior is identical to `RemoveFile` — no callback overhead
 - **R553:** When no chunks are orphaned (all shared), `fn` is called with an empty slice
 - **R554:** Cache invalidation (pathCache, pathToID) occurs after successful transaction commit, same as `RemoveFile`
-- **R754:** `RemoveFiles(paths []string, fn RemoveFilesCallback) error` removes a batch of files in one write transaction, collecting every file's posting edits together so each affected T/W record is rewritten once
+- **~~R754:~~** (Retired T137 — see R788) `RemoveFiles(paths []string, fn RemoveFilesCallback) error` removes a batch of files in one write transaction, collecting every file's posting edits together so each affected T/W record is rewritten once
 - **R755:** A path given to `RemoveFiles` that is not indexed is skipped, not an error; the callback's `fileIDs` lists only the files actually removed
 - **R756:** `RemoveFilesCallback` (`func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs []uint64) error`) is called once per batch, inside the transaction, with every chunk the batch left with no file, including a chunk shared only by files in the batch
 - **R757:** If the `RemoveFiles` callback returns an error, the whole batch rolls back; a nil callback is allowed
@@ -918,7 +918,7 @@
 - **R595:** C record fileids list shape becomes `[n-fileids: varint] [[fileid: varint] [count: varint]]...` — paralleling the trigram and token shape
 - **R596:** Add-occurrence: increment count for the fileid in the chunk's C record (insert a new entry with count=1 if the fileid is absent)
 - **R597:** Drop-occurrence: decrement count for the fileid; remove the fileid entry when count reaches 0
-- **R598:** When the C record's fileids list is empty after a drop, cascade orphan cleanup: delete C, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token), delete H record
+- **~~R598:~~** (Retired T115 — see R774) When the C record's fileids list is empty after a drop, cascade orphan cleanup: delete C, remove chunkid from each T record (by trigram), remove chunkid from each W record (by token), delete H record
 - **R599:** Removing a whole file via `RemoveFile` drops all of that fileid's occurrences at once (single decrement-to-zero per chunkid in that file's chunk list)
 - **R600:** New chunks (first occurrence) write their C record with `[fileid, count=1]`
 
@@ -1040,7 +1040,7 @@
 - **R677:** `PrepareContent(fpath, strategy string, content []byte, opts ...IndexOption) (*PreparedFile, error)` produces the same `*PreparedFile` from caller-supplied bytes instead of reading from disk, opening no bbolt transaction.
 - **R678:** `PrepareFile` and `PrepareContent` are safe to call from any goroutine as long as the DB's chunking configuration (registered strategies, chunker registry, trigram/case-fold settings) is not mutated concurrently.
 - **R679:** `*PreparedFile` is opaque — it exposes no fields a caller can inspect or forge — and is consumed by a single store call; the store releases the chunk content the handle holds, so reuse requires re-preparing.
-- **R680:** `StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a fresh add in one write transaction — allocating the fileid, writing N and F records, deduping each chunk by H record, and updating C/T/W records and corpus counters — and preserves the `ErrAlreadyIndexed` duplicate guard.
+- **~~R680:~~** (Retired T138 — see R789) `StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a fresh add in one write transaction — allocating the fileid, writing N and F records, deduping each chunk by H record, and updating C/T/W records and corpus counters — and preserves the `ErrAlreadyIndexed` duplicate guard.
 - **R681:** `ReindexPrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a content-diff reindex in one write transaction: it stores the prepared chunks and drops the old fileid's occurrences so unchanged content keeps its chunkid.
 - **R682:** `ReindexPrepared` derives the old-chunk removal set inside the write transaction from the committed F record; the caller does not supply it, because chunk refcounts are shared across files and the orphan cascade must be consistent with committed state.
 - **R683:** In the two-phase API, `WithChunkCallback` fires during compute (off the write transaction) while `WithIndexedChunkCallback`, `WithRemovedChunkCallback`, and the `ReindexCallback` fire during store (inside the write transaction).
@@ -1051,7 +1051,7 @@
 
 - **R685:** `PrepareAppend(path string, lastLocator, content []byte, strategy string, opts ...AppendOption) (*PreparedAppend, error)` chunks `content` against the caller-supplied `lastLocator` and returns an opaque `*PreparedAppend` holding each new chunk's dedup hash, trigram counts, and tokens; it opens no bbolt transaction and reads no committed state.
 - **R686:** `*PreparedAppend` records whether the append replaces the last existing chunk (`replacedLast`) and the `lastLocator` compute assumed, so the store phase can validate the file tail.
-- **R687:** `AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error` applies the prepared append in one write transaction — drop-and-replace cleanup, chunk dedup, T/W updates, corpus counters, and F-record update — as `AppendChunks` does.
+- **~~R687:~~** (Retired T139 — see R790) `AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error` applies the prepared append in one write transaction — drop-and-replace cleanup, chunk dedup, T/W updates, corpus counters, and F-record update — as `AppendChunks` does.
 - **R688:** When the prepared append replaces the last chunk, `AppendPrepared` verifies the committed last locator equals the one compute assumed and refuses with `ErrAppendTailMoved` if it has changed; a pure append (no last-chunk replacement) performs no tail check.
 - **R689:** `AppendChunks` remains unchanged for existing callers and is implemented as `PrepareAppend` — reading the current tail from the F record — followed by `AppendPrepared` in a single call.
 
@@ -1141,6 +1141,31 @@
 
 - **R765:** The F record value is `[modTime:8] [contentHash:32] [fileLength:varint] [strategy:str] [chunkerVersion:varint] [name:str] [chunkcount:varint] [[chunkid:varint] [location:bytes] [locator:bytes]]...` and ends after the chunk list; `UnmarshalFHeader` decodes ModTime, ContentHash, FileLength, Strategy, ChunkerVersion and Name
 - **R766:** `FRecord` struct: `FileID uint64, ModTime int64, ContentHash [32]byte, FileLength int64, Strategy string, ChunkerVersion uint32, Name string, Chunks []FileChunkEntry`
-- **R767:** `Create` writes DB format version `"5"` to the `version` I record
-- **R768:** `Open` refuses a database whose `version` I record is not `"5"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **~~R767:~~** (Retired T124 — see R781) `Create` writes DB format version `"5"` to the `version` I record
+- **~~R768:~~** (Retired T125 — see R782) `Open` refuses a database whose `version` I record is not `"5"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
 - **R769:** An append updates the F record's chunk entries (chunkid, location, locator), ContentHash, ModTime and FileLength, and keeps no file-level token counts
+
+## Feature: postings carry the counts; chunks carry no lists
+**Source:** specs/migrations/complete/006-postings-carry-counts.md
+
+- **R770:** `T` records: `T[trigram:3] → [[(delta << 1) | hasCount : uvarint] [count : uvarint, only when hasCount]]...`, postings in ascending chunkid order; `delta` is the chunkid minus the previous posting's (the first's previous is 0); a posting without a count has count 1; the count is how many times the trigram occurs in that chunk
+- **R771:** `C` records: `C[chunkid:varint] → [hash:32] [contentLen:varint] [distinctTokens:varint] [tokenTotal:varint] [n-attrs:varint] [[key:bytes] [value:bytes]]... [n-fileids:varint] [[fileid:varint] [count:varint]]...`, with no trigram list and no token list; `distinctTokens` is the number of distinct tokens in the chunk and `tokenTotal` their summed counts
+- **R772:** `CRecord` struct: `ChunkID uint64, Hash [32]byte, ContentLen int, DistinctTokens int, TokenTotal int, Attrs []Pair, FileIDs []FileIDCount`
+- **R773:** There are no `W` records: no write creates or edits one
+- **R774:** Orphaning a chunk (its last occurrence removed, by RemoveFile, RemoveFiles, a reindex or an append's drop-and-replace) deletes its C and H records, subtracts its `tokenTotal` from the `totalTokens` counter, writes `D[chunkid:varint] → empty`, and edits no T record
+- **R775:** Every reader of a T record skips postings whose chunkid has a D record; a trigram's document frequency is its number of live postings, for the trigram filter and for BM25's IDF alike
+- **R776:** Literal search decodes each selected query trigram's T record once per query, intersects the live chunkids per term and across terms (union when loose), reads each candidate's C record for its attrs, fileids and `distinctTokens`, and takes the candidate's counts of the selected trigrams from the decoded postings
+- **R777:** `ScoreFile` takes each of the file's chunks' counts of the selected trigrams from those trigrams' postings, restricted to the file's chunkids
+- **R778:** A T record a write rewrites drops its dead postings in the same pass, keeps the surviving postings' order with new postings after them in chunkid order, and is deleted when no live posting remains; D records are not removed by this
+- **R779:** `Purge() (PurgeStats, error)` takes the dead set as it stands when it starts, scans the T records, rewrites each one holding one of those chunkids without it (deleting a record left empty), then deletes those D records; it commits in batches, an id that dies while it runs stays in the dead set, and with an empty dead set it writes nothing; `PurgeStats` reports the records rewritten, the postings dropped and the dead ids cleared
+- **R780:** `TRecord` struct: `Trigram uint32, Postings []Posting`; `Posting` is `{ChunkID uint64, Count int}`
+- **R781:** `Create` writes DB format version `"6"` to the `version` I record
+- **R782:** `Open` refuses a database whose `version` I record is not `"6"`, closing the bbolt handle and returning a `*FormatVersionError` naming the stored version
+- **R783:** A new chunk (no H record for its hash) gets a chunkid, an H record, a C record and a posting with its count in the T record of each of its trigrams; a dedup hit adds the fileid to the existing C record and touches no T record
+- **R784:** Every posting a write operation adds (AddFile, Reindex, AppendChunks, StorePrepared, ReindexPrepared, AppendPrepared) is gathered across the whole operation and applied once per affected T record at its end, in the same transaction
+- **R785:** The coalesced posting changes are applied before RemoveCallback or ReindexCallback fires, so the callback sees the final T records; RemovedChunkCallback still fires as each chunk is orphaned, before its C record is deleted
+- **R786:** `WithTrigramFilter(fn)` looks up each query trigram's document frequency (its live postings), calls the filter, and searches with the returned subset
+- **R787:** Fuzzy search phase 2 re-scores the top-k candidates with ScoreCoverage, taking their trigram counts from the query trigrams' postings, and re-sorts by that score
+- **R788:** `RemoveFiles(paths []string, fn RemoveFilesCallback) error` removes a batch of files in one write transaction; their orphaned chunks join the dead set and no T record is rewritten
+- **R789:** `StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error)` performs a fresh add in one write transaction (allocating the fileid, writing N and F records, deduping each chunk by H record, updating C and T records and corpus counters) and preserves the `ErrAlreadyIndexed` duplicate guard
+- **R790:** `AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error` applies the prepared append in one write transaction (drop-and-replace cleanup, chunk dedup, T updates, corpus counters, F-record update) as `AppendChunks` does

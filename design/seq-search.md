@@ -1,5 +1,5 @@
 # Sequence: Search
-**Requirements:** R31-35, R82, R84, R85, R87-89, R99, R103-108, R124-127, R132, R134-137, R140-144, R178-191, R196, R207-212, R238, R239, R244, R255-260, R674, R675, R710
+**Requirements:** R31-35, R82, R84, R85, R87-89, R99, R103-108, R124-127, R132, R134-137, R140-144, R178-191, R196, R207-212, R238, R239, R244, R255-260, R674, R675, R710, R775, R776, R786
 
 Participants: DB, Trigrams
 
@@ -26,20 +26,22 @@ DB                                        Trigrams
  |                                          |
  |  select query trigrams via filter:       |
  |    for each query trigram:               |
- |      read T[tri] value length -> DF      |
+ |      decode T[tri]: live postings -> DF  |
  |    get total chunk count from DB         |
  |    call filter([]TrigramCount, total)    |
  |    (default: FilterAll — use all)        |
  |  if none: return empty results           |
  |                                          |
  |  for each term's selected trigrams:      |
- |    read T[tri] -> chunkid list           |
+ |    reuse decoded T[tri] (live postings)  |
  |    intersect within term                 |
  |  intersect candidate sets across terms   |
  |                                          |
  |  for each surviving chunkid:             |
  |    read C record -> CRecord              |
- |    (trigrams, tokens, attrs, fileids)    |
+ |    (attrs, fileids, distinctTokens);     |
+ |    counts for the selected trigrams      |
+ |    come from their postings [R776]       |
  |                                          |
  |    apply ChunkFilters (AND):             |
  |      if any filter returns false: skip   |

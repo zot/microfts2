@@ -1,5 +1,5 @@
 # Sequence: Score File
-**Requirements:** R96, R97, R98, R103, R133, R135, R136, R137, R139, R143, R144, R238, R239, R244, R255, R256, R260
+**Requirements:** R96-98, R103, R133, R135-137, R139, R143, R144, R238, R239, R244, R255, R256, R260, R775, R777
 
 Participants: DB, Trigrams
 
@@ -15,7 +15,7 @@ DB                                        Trigrams
  |                                          |
  |  select query trigrams via filter:       |
  |    for each query trigram:               |
- |      read T[tri] value length -> DF      |
+ |      decode T[tri]: live postings -> DF  |
  |    get total chunk count from DB         |
  |    call filter([]TrigramCount, total)    |
  |    (default: FilterAll — use all)        |

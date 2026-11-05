@@ -55,17 +55,19 @@ type FileIDCount struct {
 // CRecord is the per-chunk record. Self-describing: everything needed
 // for search, scoring, filtering, and removal.
 // Carries unexported db/bkt — the chunk is tied to the bucket that read it.
-// CRC: crc-DB.md | R244, R496
+// CRC: crc-DB.md | R772, R496
 type CRecord struct {
 	ChunkID    uint64
 	Hash       [32]byte
 	ContentLen int
-	Trigrams   []TrigramEntry
-	Tokens     []TokenEntry
-	Attrs      []Pair
-	FileIDs    []FileIDCount // R595: refcounted per-fileid occurrence count
-	db         *DB
-	bkt        *bbolt.Bucket
+	// R772: no trigram or token list since format "6"; the per-trigram counts
+	// live in the T postings
+	DistinctTokens int // distinct tokens in the chunk: the length scoring normalizes by
+	TokenTotal     int // summed token counts: what totalTokens adds and subtracts
+	Attrs          []Pair
+	FileIDs        []FileIDCount // R595: refcounted per-fileid occurrence count
+	db             *DB
+	bkt            *bbolt.Bucket
 }
 
 // FileIDCountFor returns the occurrence count for the given fileid, or 0 if absent.
@@ -180,18 +182,20 @@ type FRecord struct {
 	Chunks         []FileChunkEntry // R766: the record ends here; no token bag since format "5"
 }
 
-// TRecord is the trigram inverted index entry.
-// CRC: crc-DB.md | R246
+// TRecord is the trigram inverted index entry: the trigram's postings, each a
+// chunk with its count of the trigram.
+// CRC: crc-DB.md | R246, R780
 type TRecord struct {
 	Trigram  uint32
-	ChunkIDs []uint64
+	Postings []Posting
 }
 
-// WRecord is the token inverted index entry.
-// CRC: crc-DB.md | R247
-type WRecord struct {
-	TokenHash uint32
-	ChunkIDs  []uint64
+// Posting is one chunk in a T record, with how many times the trigram occurs
+// in it.
+// CRC: crc-DB.md | R780
+type Posting struct {
+	ChunkID uint64
+	Count   int
 }
 
 // --- Encoding helpers ---
@@ -238,18 +242,12 @@ func readBytes(buf []byte) ([]byte, int) {
 // --- CRecord marshal/unmarshal ---
 
 // MarshalValue encodes the CRecord value (everything except the key prefix and chunkid).
-// Layout: hash + contentLen + trigrams + tokens + attrs + [fileid, count] pairs.
-// CRC: crc-DB.md | R221, R495, R497, R595, R735
+// Layout: hash + contentLen + distinctTokens + tokenTotal + attrs + [fileid, count] pairs.
+// CRC: crc-DB.md | R221, R595, R735, R771
 func (c *CRecord) MarshalValue() []byte {
-	size := 32                    // hash
-	size += binary.MaxVarintLen64 // contentLen (R495)
-	size += binary.MaxVarintLen64 // n-trigrams
-	size += len(c.Trigrams) * (3 + binary.MaxVarintLen64)
-	size += binary.MaxVarintLen64 // n-tokens
-	for _, t := range c.Tokens {
-		size += binary.MaxVarintLen64 + binary.MaxVarintLen64 + len(t.Token)
-	}
-	size += binary.MaxVarintLen64 // n-attrs
+	size := 32                        // hash
+	size += 3 * binary.MaxVarintLen64 // contentLen, distinctTokens, tokenTotal
+	size += binary.MaxVarintLen64     // n-attrs
 	for _, p := range c.Attrs {
 		size += binary.MaxVarintLen64 + len(p.Key) + binary.MaxVarintLen64 + len(p.Value)
 	}
@@ -263,21 +261,8 @@ func (c *CRecord) MarshalValue() []byte {
 	off += 32
 
 	off += putUvarint(buf[off:], uint64(c.ContentLen))
-
-	off += putUvarint(buf[off:], uint64(len(c.Trigrams)))
-	for _, te := range c.Trigrams {
-		buf[off] = byte(te.Trigram >> 16)
-		buf[off+1] = byte(te.Trigram >> 8)
-		buf[off+2] = byte(te.Trigram)
-		off += 3
-		off += putUvarint(buf[off:], uint64(te.Count))
-	}
-
-	off += putUvarint(buf[off:], uint64(len(c.Tokens)))
-	for _, te := range c.Tokens {
-		off += putUvarint(buf[off:], uint64(te.Count))
-		off += putString(buf[off:], te.Token)
-	}
+	off += putUvarint(buf[off:], uint64(c.DistinctTokens))
+	off += putUvarint(buf[off:], uint64(c.TokenTotal))
 
 	off += putUvarint(buf[off:], uint64(len(c.Attrs)))
 	for _, p := range c.Attrs {
@@ -296,8 +281,8 @@ func (c *CRecord) MarshalValue() []byte {
 }
 
 // UnmarshalCValue decodes a CRecord value. ChunkID must be set separately (from key).
-// Layout: hash + contentLen + trigrams + tokens + attrs + fileids.
-// CRC: crc-DB.md | R221, R498, R735
+// Layout: hash + contentLen + distinctTokens + tokenTotal + attrs + fileids.
+// CRC: crc-DB.md | R221, R735, R771
 func UnmarshalCValue(data []byte) (CRecord, error) {
 	var c CRecord
 	if len(data) < 32 {
@@ -309,7 +294,7 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 	copy(c.Hash[:], data[off:off+32])
 	off += 32
 
-	// ContentLen (R495)
+	// ContentLen (R771)
 	cl, n := readUvarint(data[off:])
 	if n <= 0 {
 		return c, fmt.Errorf("CRecord: bad contentLen")
@@ -317,48 +302,19 @@ func UnmarshalCValue(data []byte) (CRecord, error) {
 	c.ContentLen = int(cl)
 	off += n
 
-	// Trigrams
-	nTri, n := readUvarint(data[off:])
+	// R771: the token counts, then attrs; no trigram or token list
+	dt, n := readUvarint(data[off:])
 	if n <= 0 {
-		return c, fmt.Errorf("CRecord: bad n-trigrams")
+		return c, fmt.Errorf("CRecord: bad distinctTokens")
 	}
+	c.DistinctTokens = int(dt)
 	off += n
-	c.Trigrams = make([]TrigramEntry, nTri)
-	for i := range c.Trigrams {
-		if off+3 > len(data) {
-			return c, fmt.Errorf("CRecord: trigram truncated")
-		}
-		c.Trigrams[i].Trigram = uint32(data[off])<<16 | uint32(data[off+1])<<8 | uint32(data[off+2])
-		off += 3
-		cnt, n := readUvarint(data[off:])
-		if n <= 0 {
-			return c, fmt.Errorf("CRecord: bad trigram count")
-		}
-		c.Trigrams[i].Count = int(cnt)
-		off += n
-	}
-
-	// Tokens
-	nTok, n := readUvarint(data[off:])
+	tt, n := readUvarint(data[off:])
 	if n <= 0 {
-		return c, fmt.Errorf("CRecord: bad n-tokens")
+		return c, fmt.Errorf("CRecord: bad tokenTotal")
 	}
+	c.TokenTotal = int(tt)
 	off += n
-	c.Tokens = make([]TokenEntry, nTok)
-	for i := range c.Tokens {
-		cnt, n := readUvarint(data[off:])
-		if n <= 0 {
-			return c, fmt.Errorf("CRecord: bad token count")
-		}
-		c.Tokens[i].Count = int(cnt)
-		off += n
-		s, n := readString(data[off:])
-		if n == 0 && nTok > 0 {
-			return c, fmt.Errorf("CRecord: bad token string")
-		}
-		c.Tokens[i].Token = s
-		off += n
-	}
 
 	// Attrs
 	nAttr, n := readUvarint(data[off:])
@@ -568,69 +524,58 @@ func UnmarshalFHeader(data []byte) (FRecord, error) {
 	return f, err
 }
 
-// --- Shared chunkid list encoding ---
-
-// marshalChunkIDs encodes a packed list of varint chunkids.
-func marshalChunkIDs(ids []uint64) []byte {
-	buf := make([]byte, len(ids)*binary.MaxVarintLen64)
-	off := 0
-	for _, cid := range ids {
-		off += putUvarint(buf[off:], cid)
-	}
-	return buf[:off]
-}
-
 // --- TRecord marshal/unmarshal ---
 
-// MarshalValue encodes the TRecord value (packed chunkid list).
-// CRC: crc-DB.md | R735
+// MarshalValue encodes the TRecord value: postings in ascending chunkid order,
+// each `(delta << 1) | hasCount` as a uvarint, then the count only when it is
+// not 1. The first delta is against 0.
+// CRC: crc-DB.md | R735, R770, R780
 func (t *TRecord) MarshalValue() []byte {
-	return marshalChunkIDs(t.ChunkIDs)
+	return appendPostings(nil, 0, t.Postings)
 }
 
-// countTValue counts the number of chunkids in a T record value without allocating.
-func countTValue(data []byte) int {
-	n := 0
-	off := 0
-	for off < len(data) {
-		_, size := readUvarint(data[off:])
-		if size <= 0 {
-			break
+// appendPostings encodes ps after buf, delta-coded against prev (the chunkid of
+// the posting buf already ends with, or 0). ps must be ascending and above prev.
+// CRC: crc-DB.md | R770
+func appendPostings(buf []byte, prev uint64, ps []Posting) []byte {
+	for _, p := range ps {
+		delta := p.ChunkID - prev
+		prev = p.ChunkID
+		if p.Count == 1 {
+			buf = binary.AppendUvarint(buf, delta<<1)
+		} else {
+			buf = binary.AppendUvarint(buf, delta<<1|1)
+			buf = binary.AppendUvarint(buf, uint64(p.Count))
 		}
-		off += size
-		n++
 	}
-	return n
+	return buf
 }
 
-// UnmarshalTValue decodes a TRecord value. Trigram must be set separately (from key).
-// CRC: crc-DB.md | R735
-func UnmarshalTValue(data []byte) ([]uint64, error) {
-	var ids []uint64
-	off := 0
-	for off < len(data) {
+// UnmarshalTValue decodes a TRecord value into its postings. Trigram must be set
+// separately (from the key).
+// CRC: crc-DB.md | R735, R770
+func UnmarshalTValue(data []byte) ([]Posting, error) {
+	var ps []Posting
+	var prev uint64
+	for off := 0; off < len(data); {
 		v, n := readUvarint(data[off:])
 		if n <= 0 {
-			return nil, fmt.Errorf("TRecord: bad chunkid at offset %d", off)
+			return nil, fmt.Errorf("TRecord: bad posting at offset %d", off)
 		}
-		ids = append(ids, v)
 		off += n
+		prev += v >> 1
+		p := Posting{ChunkID: prev, Count: 1}
+		if v&1 == 1 {
+			c, n := readUvarint(data[off:])
+			if n <= 0 {
+				return nil, fmt.Errorf("TRecord: bad count at offset %d", off)
+			}
+			off += n
+			p.Count = int(c)
+		}
+		ps = append(ps, p)
 	}
-	return ids, nil
-}
-
-// --- WRecord marshal/unmarshal ---
-
-// MarshalValue encodes the WRecord value (packed chunkid list, same as TRecord).
-// CRC: crc-DB.md | R735
-func (w *WRecord) MarshalValue() []byte {
-	return marshalChunkIDs(w.ChunkIDs)
-}
-
-// UnmarshalWValue decodes a WRecord value. Same format as TRecord.
-// CRC: crc-DB.md | R735
-func UnmarshalWValue(data []byte) ([]uint64, error) {
-	return UnmarshalTValue(data) // identical format
+	return ps, nil
 }
 
 // --- Key construction ---
@@ -643,7 +588,7 @@ const (
 	prefixI byte = 'I' // config (data-in-key)
 	prefixN byte = 'N' // filename key chain
 	prefixT byte = 'T' // trigram inverted index
-	prefixW byte = 'W' // token inverted index
+	prefixD byte = 'D' // dead chunkid (R774); no W prefix since format "6" (R773)
 )
 
 func makeCKey(chunkid uint64) []byte {
@@ -678,6 +623,10 @@ func makeTKey(trigram uint32) []byte {
 	return []byte{prefixT, byte(trigram >> 16), byte(trigram >> 8), byte(trigram)}
 }
 
-func makeWKey(tokenHash uint32) []byte {
-	return []byte{prefixW, byte(tokenHash >> 24), byte(tokenHash >> 16), byte(tokenHash >> 8), byte(tokenHash)}
+// makeDKey names a dead chunkid's D record (R774).
+func makeDKey(chunkid uint64) []byte {
+	buf := make([]byte, 1+binary.MaxVarintLen64)
+	buf[0] = prefixD
+	n := putUvarint(buf[1:], chunkid)
+	return buf[:1+n]
 }

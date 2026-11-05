@@ -4,6 +4,7 @@ package microfts2
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 )
 
@@ -11,16 +12,10 @@ func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 
 func TestCRecordRoundtrip(t *testing.T) {
 	orig := CRecord{
-		ChunkID:    42,
-		ContentLen: 1234,
-		Trigrams: []TrigramEntry{
-			{Trigram: 0x616263, Count: 3}, // "abc"
-			{Trigram: 0x626364, Count: 1}, // "bcd"
-		},
-		Tokens: []TokenEntry{
-			{Token: "hello", Count: 5},
-			{Token: "world", Count: 2},
-		},
+		ChunkID:        42,
+		ContentLen:     1234,
+		DistinctTokens: 2,
+		TokenTotal:     7,
 		Attrs: []Pair{
 			{Key: []byte("timestamp"), Value: []byte("1709900000")},
 			{Key: []byte("role"), Value: []byte("user")},
@@ -45,21 +40,8 @@ func TestCRecordRoundtrip(t *testing.T) {
 	if got.ContentLen != orig.ContentLen {
 		t.Errorf("ContentLen: got %d, want %d", got.ContentLen, orig.ContentLen)
 	}
-	if len(got.Trigrams) != len(orig.Trigrams) {
-		t.Fatalf("Trigrams len: got %d, want %d", len(got.Trigrams), len(orig.Trigrams))
-	}
-	for i := range orig.Trigrams {
-		if got.Trigrams[i] != orig.Trigrams[i] {
-			t.Errorf("Trigram[%d]: got %+v, want %+v", i, got.Trigrams[i], orig.Trigrams[i])
-		}
-	}
-	if len(got.Tokens) != len(orig.Tokens) {
-		t.Fatalf("Tokens len: got %d, want %d", len(got.Tokens), len(orig.Tokens))
-	}
-	for i := range orig.Tokens {
-		if got.Tokens[i] != orig.Tokens[i] {
-			t.Errorf("Token[%d]: got %+v, want %+v", i, got.Tokens[i], orig.Tokens[i])
-		}
+	if got.DistinctTokens != orig.DistinctTokens || got.TokenTotal != orig.TokenTotal {
+		t.Errorf("token counts: got %d/%d, want %d/%d", got.DistinctTokens, got.TokenTotal, orig.DistinctTokens, orig.TokenTotal)
 	}
 	if len(got.Attrs) != len(orig.Attrs) {
 		t.Fatalf("Attrs len: got %d, want %d", len(got.Attrs), len(orig.Attrs))
@@ -86,9 +68,9 @@ func TestCRecordEmptyRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Trigrams) != 0 || len(got.Tokens) != 0 || len(got.Attrs) != 0 || len(got.FileIDs) != 0 {
-		t.Errorf("expected empty slices/maps, got tri=%d tok=%d attr=%d fid=%d",
-			len(got.Trigrams), len(got.Tokens), len(got.Attrs), len(got.FileIDs))
+	if got.DistinctTokens != 0 || got.TokenTotal != 0 || len(got.Attrs) != 0 || len(got.FileIDs) != 0 {
+		t.Errorf("expected zero counts and empty slices, got tok=%d/%d attr=%d fid=%d",
+			got.DistinctTokens, got.TokenTotal, len(got.Attrs), len(got.FileIDs))
 	}
 }
 
@@ -257,23 +239,26 @@ func TestFRecordEndsAfterItsChunks(t *testing.T) {
 	}
 }
 
+// TestTRecordRoundtrip: postings with counts of 1 (no count written) and above
+// 1, ids spanning several varint widths, decode to what was encoded; a count
+// of 1 costs no byte. R770, R780
+// Test: test-DB.md | CRC: crc-DB.md | R770, R780
 func TestTRecordRoundtrip(t *testing.T) {
 	orig := TRecord{
 		Trigram:  0x616263,
-		ChunkIDs: []uint64{1, 42, 1000, 999999},
+		Postings: []Posting{{1, 1}, {42, 3}, {1000, 1}, {999999, 200}},
 	}
 	data := orig.MarshalValue()
 	got, err := UnmarshalTValue(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(orig.ChunkIDs) {
-		t.Fatalf("ChunkIDs len: got %d, want %d", len(got), len(orig.ChunkIDs))
+	if !slices.Equal(got, orig.Postings) {
+		t.Errorf("postings: got %v, want %v", got, orig.Postings)
 	}
-	for i := range orig.ChunkIDs {
-		if got[i] != orig.ChunkIDs[i] {
-			t.Errorf("ChunkID[%d]: got %d, want %d", i, got[i], orig.ChunkIDs[i])
-		}
+	ones := TRecord{Postings: []Posting{{1, 1}, {2, 1}, {3, 1}}}
+	if n := len(ones.MarshalValue()); n != 3 {
+		t.Errorf("three postings with count 1 took %d bytes, want 3", n)
 	}
 }
 
@@ -319,13 +304,13 @@ func TestKeyConstruction(t *testing.T) {
 		t.Errorf("T key len: got %d, want 4", len(tk))
 	}
 
-	// W key
-	wk := makeWKey(0x12345678)
-	if wk[0] != prefixW {
-		t.Errorf("W key prefix: got %c, want %c", wk[0], prefixW)
+	// D key (R774)
+	dk := makeDKey(300)
+	if dk[0] != prefixD {
+		t.Errorf("D key prefix: got %c, want %c", dk[0], prefixD)
 	}
-	if len(wk) != 5 {
-		t.Errorf("W key len: got %d, want 5", len(wk))
+	if id, n := readUvarint(dk[1:]); id != 300 || n != len(dk)-1 {
+		t.Errorf("D key chunkid: got %d (%d bytes), want 300", id, n)
 	}
 
 }

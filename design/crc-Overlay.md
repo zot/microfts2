@@ -11,7 +11,7 @@ In-memory overlay holding tmp:// documents alongside the index. Mirrors the inde
 - filesByID: map[uint64]*overlayFile — keyed by fileid
 - chunks: map[uint64]*overlayChunk — keyed by chunkid, equivalent to C records
 - trigrams: map[uint32]map[uint64]struct{} — trigram → chunkid set, equivalent to T records
-- tokens: map[uint32]map[uint64]struct{} — token hash → chunkid set, equivalent to W records
+- tokens: map[uint32]map[uint64]struct{} — token hash → chunkid set, in memory only (the stored index has no W records since format "6")
 - hashes: map[[32]byte]uint64 — content hash → chunkid, equivalent to H records
 - totalChunks: int — overlay chunk count
 - totalTokens: int — sum of overlay chunk token counts

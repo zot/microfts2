@@ -17,7 +17,7 @@ The overlay holds the same data that the index holds for disk-backed files, but 
 - Per-chunk data: hash, trigram counts, token counts, attrs, fileids — equivalent to C records
 - Per-file data: chunk list with locations — equivalent to F records
 - Trigram inverted index: trigram → chunkid set — equivalent to T records
-- Token inverted index: token hash → chunkid set — equivalent to W records
+- Token inverted index: token hash → chunkid set, in memory only (the stored index has no token postings since format "6")
 - Content hash → chunkid lookup — equivalent to H records
 - Chunk deduplication within the overlay using the same SHA-256 mechanism
 

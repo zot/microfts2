@@ -44,22 +44,22 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 |--------|------------------------|---------------------------------------|------------------------------------------------------------------|
 | I      | name: str              | empty (value encoded in key)          | Config settings, data-in-key pattern                             |
 | H      | hash: 32               | chunkid: varint                       | Content hash → chunkid lookup                                    |
-| C      | chunkid: varint        | hash + contentLen + trigrams + tokens + fileids | Per-chunk: all analysis data                           |
+| C      | chunkid: varint        | hash + contentLen + token counts + attrs + fileids | Per-chunk: identity, length, metadata, files        |
 | F      | fileid: varint         | metadata + name + chunks              | Per-file: staleness info, ordered chunk list                     |
 | N      | chain-byte + name: str | (varies by chain-byte)                | Filename → fileid mapping via key chains                         |
-| T      | trigram: 3             | chunkid: varint...                    | Trigram inverted index                                           |
-| W      | token-hash: 4          | chunkid: varint...                    | Token inverted index for IDF                                     |
+| T      | trigram: 3             | postings: chunkid delta + count...    | Trigram inverted index, with each chunk's count                  |
+| D      | chunkid: varint        | empty                                 | Dead set: chunks removed but still in some posting list          |
 
 ### Record details
 
 - `I` [name: str] = [value: str] -> empty
-  Config record using data-in-key pattern. Each setting is independently readable and writable — no JSON parse/serialize cycle. The `version` setting holds the DB format version, currently `"5"` (the F record's file-level token bag was dropped; `"4"` made its name list one name; `"3"` added `chunkerVersion`); `Open` refuses any other value.
+  Config record using data-in-key pattern. Each setting is independently readable and writable — no JSON parse/serialize cycle. The `version` setting holds the DB format version, currently `"6"` (postings carry the counts and C records no lists; `"5"` dropped the F record's file-level token bag; `"4"` made its name list one name; `"3"` added `chunkerVersion`); `Open` refuses any other value.
 
 - `H` [hash: 32] -> [chunkid: varint]
   Content hash to chunkid lookup. Used during AddFile to detect duplicate chunks.
 
-- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [n-trigrams: varint] [[trigram: 3] [count: varint]]... [n-tokens: varint] [[count: varint] [token: str]]... [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [[fileid: varint] [count: varint]]...
-  Per-chunk record. Contains everything known about the chunk: content hash, byte length of the chunk content, packed trigram+count pairs, packed token+count pairs, optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk with per-file occurrence counts. Self-describing — all data needed for search, scoring, filtering, and removal. The `[fileid, count]` pair shape parallels the trigram/token shape: count is the number of times this chunk occurs in that file. Add-occurrence increments the count (or inserts with count=1 if absent); drop-occurrence decrements (count=0 removes the fileid entry; empty fileids list cascades the orphan cleanup). Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
+- `C` [chunkid: varint] -> [hash: 32] [contentLen: varint] [distinctTokens: varint] [tokenTotal: varint] [n-attrs: varint] [[key: bytes] [value: bytes]]... [n-fileids: varint] [[fileid: varint] [count: varint]]...
+  Per-chunk record: content hash, byte length of the chunk content, the number of distinct tokens in the chunk (the chunk length scoring normalizes by) and their summed count (what the `totalTokens` corpus counter adds and subtracts), optional attributes (opaque key-value pairs from chunker Attrs), and the list of files containing this chunk with per-file occurrence counts. It carries no trigram or token list: a chunk's per-trigram counts live in the T postings (format `"6"`), which is all any scorer reads. The `[fileid, count]` count is the number of times this chunk occurs in that file. Add-occurrence increments the count (or inserts with count=1 if absent); drop-occurrence decrements (count=0 removes the fileid entry; empty fileids list cascades the orphan cleanup). Date filtering reads the `timestamp` attr directly from C during candidate evaluation — zero extra reads. Content length enables corpus-wide chunk size statistics without re-reading files from disk. `ChunkContentLens(fileid)` returns the content lengths for all of a file's chunks in chunk-list order, by reading the F record's chunk list and each C record's contentLen field.
 
 - `F` [fileid: varint] -> [modTime: 8] [contentHash: 32] [fileLength: varint] [strategy: str] [chunkerVersion: varint] [name: str] [chunkcount: varint] [[chunkid: varint] [location: bytes] [locator: bytes]]...
   Per-file record. Stores file metadata (mod time as Unix nanos, SHA-256 content hash, file length, chunking strategy name, and the version of that strategy's chunker when the file was chunked — see the VersionedChunker section of `chunking.md`), and the file's one name. A copy of a file is a record of its own; deduplication is per chunk, the C record listing every fileid that holds the chunk. Ordered chunk list with two per-occurrence opaque labels: `location` (the chunker's Range — used for CLI/human display) and `locator` (the chunker's Locator — used for fast random-access retrieval and append-merge resume). Both are length-prefixed byte strings so they can be empty. The record ends after the chunk list: it once carried a file-level token bag, written and kept current but never read, and dropped in format `"5"` (it was 94.7% of every F record's bytes in ark's index).
@@ -68,30 +68,31 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 - `N` [255] [name: str] -> [[full-name: str] [fileid: varint]]... — final chain key; value has full filename + fileid
   The key's name is the filename key (see filename-case.md): the path folded to upper case when the database was created with `CaseInsensitiveFilenames`, otherwise the path itself. The value's full name is always the path as given.
 
-- `T` [trigram: 3] -> [chunkid: varint]...
-  Trigram inverted index. Value is a packed list of chunkids. Document frequency is free: value length / chunkid size. One entry per distinct trigram rather than one per trigram-chunk pair — the primary source of mmap reduction.
+- `T` [trigram: 3] -> [[(delta << 1) | hasCount: uvarint] [count: uvarint, only when hasCount]]...
+  Trigram inverted index. Value is the trigram's postings in ascending chunkid order: each chunkid delta-coded against the previous one (the first against 0), its low bit saying whether a count follows; a posting with no count has count 1 (most do). The count is how many times the trigram occurs in that chunk. A trigram's document frequency is its number of live postings: postings whose chunkid is in the dead set are skipped by every reader. One entry per distinct trigram rather than one per trigram-chunk pair — the primary source of mmap reduction.
 
-- `W` [token-hash: 4] -> [chunkid: varint]...
-  Token inverted index. Same structure as T records but keyed by token hash. Provides exact token-level IDF for BM25 scoring. Document frequency from value length, same as T records.
+- `D` [chunkid: varint] -> empty
+  The dead set. When a chunk's last occurrence goes, its C and H records are deleted and its D record written; no posting is edited. Its chunkid stays in the T postings until a write rewrites each list, dropping dead postings as it goes, or until `Purge` rewrites them all and clears the D records it started with. Chunkids come from a counter and are never reused, so a dead posting can only name a chunk that no longer exists.
+
+There are no W records (token postings) since format `"6"`: they were written on every add and removal and never read.
 
 ### Data at three levels
 
 | Level  | Source                                         | Use                                   |
 |--------|------------------------------------------------|---------------------------------------|
-| Chunk  | C record: per-trigram counts, per-token counts | Per-chunk TF, density scoring, verify |
-| Chunk  | C record: contentLen                           | Chunk size statistics without disk I/O |
+| Chunk  | T postings: the chunk's count of each trigram  | Per-chunk TF, density and BM25 scoring |
+| Chunk  | C record: contentLen, distinctTokens           | Chunk size statistics without disk I/O, scoring length |
 | Chunk  | C record: attrs (e.g. timestamp, role)         | Date filtering, metadata-aware search |
-| Corpus | T record: chunkid list length = trigram DF     | Trigram IDF                           |
-| Corpus | W record: chunkid list length = token DF       | Token IDF for BM25                    |
+| Corpus | T record: live postings = trigram DF           | Trigram IDF, BM25                     |
 
 ### Estimated entry counts (ark scale: 74K chunks, 2K files, 500K distinct trigrams)
 
 | Record type | Estimated entries |
 |-------------|-------------------|
-| T (trigram → chunkids) | ~500K |
+| T (trigram → postings) | ~500K |
 | C (per-chunk data) | ≤74K (fewer with dedup) |
 | H (hash → chunkid) | ≤74K |
-| W (token → chunkids) | ~50K (est.) |
+| D (dead chunkids) | until the next purge |
 | F (per-file data) | ~2K |
 | N (name lookup) | ~2K |
 | I (config) | ~10 |
@@ -105,10 +106,10 @@ The T records contain entries for ALL trigrams present in the content. This make
 
 Trigram selection for queries is handled dynamically via `TrigramFilter` functions supplied at search time. This allows callers to adapt filtering strategy per query rather than relying on a static global cutoff.
 
-The index is maintained incrementally on add/remove. If the database is lost, files must be re-added from disk.
+The index is maintained incrementally on add/remove: additions append postings, removals add to the dead set, and dead postings leave a list when it is next rewritten or purged. If the database is lost, files must be re-added from disk.
 
 # Chunk dedup and Attrs on retrieval
 
-A chunk's dedup identity is a SHA-256 hash over its `Content`. Chunks with identical content dedup to a single chunkid (shared across files via the H record); chunks with differing content receive distinct chunkids. The trigram and token indexes are built from the chunk's content verbatim — microfts2's index is **full-text**, so whatever a chunk literally contains is searchable. microfts2 indexes content as given; it does not strip or rewrite it. (A caller that wants certain spans excluded from its own *embeddings* — e.g. ark's inline `@tag: value` lines, which skew embedding vectors but not full-text search — does that stripping on its own side; the trigram index keeps the text intact.)
+A chunk's dedup identity is a SHA-256 hash over its `Content`. Chunks with identical content dedup to a single chunkid (shared across files via the H record); chunks with differing content receive distinct chunkids. The trigram index is built from the chunk's content verbatim — microfts2's index is **full-text**, so whatever a chunk literally contains is searchable. microfts2 indexes content as given; it does not strip or rewrite it. (A caller that wants certain spans excluded from its own *embeddings* — e.g. ark's inline `@tag: value` lines, which skew embedding vectors but not full-text search — does that stripping on its own side; the trigram index keeps the text intact.)
 
 A chunk may carry `Attrs` — opaque per-chunk key/value metadata a chunker emits (e.g. a PDF chunker's page rectangles, a chat-jsonl chunker's role/timestamp). `Attrs` are stored in the C record at index time. On retrieval, microfts2 re-reads `Content` from the file (so retrieval reflects the file's current bytes) but reads `Attrs` from the stored C record — on every path: `GetChunks` (streaming and `RandomAccessChunker` fast path), `ChunkCache`, and `tmp://`. So native chunker `Attrs` are surfaced consistently, never dropped on the streaming or `tmp://` paths.

@@ -1246,8 +1246,8 @@ func TestDBVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "5" { // R767
-		t.Fatalf("Version() = %q, want %q", v, "5")
+	if v != "6" { // R781
+		t.Fatalf("Version() = %q, want %q", v, "6")
 	}
 }
 
@@ -4441,16 +4441,35 @@ func assertEachPostingWrittenOnce(t *testing.T, writes map[string]int) {
 	}
 }
 
-// postingsList reports whether any T or W record lists chunkid.
+// postingsList reports whether a live posting in any T record names chunkid:
+// one stored there whose chunk is not in the dead set.
 func postingsList(b *bbolt.Bucket, chunkid uint64) bool {
+	if isDeadInBucket(b, chunkid) {
+		return false
+	}
+	return storedPosting(b, chunkid)
+}
+
+// isDeadInBucket reports whether chunkid has a D record. A cursor, not Get:
+// a D record's value is empty, which Get cannot tell from absence.
+func isDeadInBucket(b *bbolt.Bucket, chunkid uint64) bool {
+	k, _ := b.Cursor().Seek(makeDKey(chunkid))
+	return k != nil && bytes.Equal(k, makeDKey(chunkid))
+}
+
+// storedPosting reports whether any T record stores a posting for chunkid,
+// dead or alive.
+func storedPosting(b *bbolt.Bucket, chunkid uint64) bool {
 	found := false
 	b.ForEach(func(k, v []byte) error {
-		if len(k) == 0 || (k[0] != prefixT && k[0] != prefixW) {
+		if len(k) == 0 || k[0] != prefixT {
 			return nil
 		}
-		ids, _ := UnmarshalTValue(v)
-		if slices.Contains(ids, chunkid) {
-			found = true
+		ps, _ := UnmarshalTValue(v)
+		for _, p := range ps {
+			if p.ChunkID == chunkid {
+				found = true
+			}
 		}
 		return nil
 	})
@@ -4465,19 +4484,23 @@ func commonLines(prefix string, n int) string {
 	return sb.String()
 }
 
-// TestRewritePostingsFiltersAndAppends: survivors keep their order, additions
-// follow them, an all-removed record is empty. R731, R732
+// TestRewritePostingsFiltersAndAppends: a rewrite drops dead postings, keeps
+// the survivors' order and counts, puts the new postings after them, and an
+// all-dead record encodes empty.
+// Test: test-DB.md | CRC: crc-DB.md | R778
 func TestRewritePostingsFiltersAndAppends(t *testing.T) {
-	stored := marshalChunkIDs([]uint64{5, 300, 7, 70000})
-	got, err := UnmarshalTValue(rewritePostings(stored, []uint64{300}, []uint64{9}))
+	stored := []Posting{{5, 1}, {7, 2}, {300, 1}, {70000, 4}}
+	dead := map[uint64]struct{}{300: {}}
+	got, err := UnmarshalTValue(rewritePostings(stored, dead, []Posting{{70001, 3}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []uint64{5, 7, 70000, 9}; !slices.Equal(got, want) {
+	if want := []Posting{{5, 1}, {7, 2}, {70000, 4}, {70001, 3}}; !slices.Equal(got, want) {
 		t.Errorf("rewritePostings = %v, want %v", got, want)
 	}
-	if v := rewritePostings(stored, []uint64{5, 7, 300, 70000}, nil); len(v) != 0 {
-		t.Errorf("all removed: got %d bytes, want empty", len(v))
+	all := map[uint64]struct{}{5: {}, 7: {}, 300: {}, 70000: {}}
+	if v := rewritePostings(stored, all, nil); len(v) != 0 {
+		t.Errorf("all dead: got %d bytes, want empty", len(v))
 	}
 }
 
@@ -4521,8 +4544,12 @@ func TestReindexRewritesEachPostingOnce(t *testing.T) {
 }
 
 // TestRemoveRewritesEachPostingOnce: removing a file whose chunks share grams
-// rewrites each record once and keeps another file's posting. R729, R730
-func TestRemoveRewritesEachPostingOnce(t *testing.T) {
+// TestRemoveWritesNoPosting: a removal edits no T record; its orphans are dead
+// (D records), no live posting names them, the trigram filter's document
+// frequency no longer counts them, and a file outside the removal keeps its
+// chunks.
+// Test: test-DB.md | CRC: crc-DB.md | R774, R775
+func TestRemoveWritesNoPosting(t *testing.T) {
 	db, dir := testDB(t)
 	fp := writeTestFile(t, dir, "doc.txt", commonLines("old", 12))
 	other := writeTestFile(t, dir, "other.txt", "common keeper\n")
@@ -4532,10 +4559,35 @@ func TestRemoveRewritesEachPostingOnce(t *testing.T) {
 		}
 	}
 	writes := countPostingWrites(db)
-	if err := db.RemoveFile(fp); err != nil {
+	var orphans []uint64
+	if err := db.RemoveFileWithCallback(fp, func(_ *bbolt.Tx, o []uint64) error {
+		orphans = append(orphans, o...)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	assertEachPostingWrittenOnce(t, writes)
+	if len(writes) != 0 {
+		t.Errorf("removal wrote posting records: %v", writes)
+	}
+	if len(orphans) != 12 {
+		t.Fatalf("orphans: got %d, want 12", len(orphans))
+	}
+	db.bolt.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(db.dbName))
+		for _, id := range orphans {
+			if !isDeadInBucket(b, id) {
+				t.Errorf("orphan %d has no D record", id)
+			}
+			if postingsList(b, id) {
+				t.Errorf("orphan %d still has a live posting", id)
+			}
+		}
+		return nil
+	})
+	counts, err := db.QueryTrigramCounts("com")
+	if err != nil || len(counts) != 1 || counts[0].Count != 1 {
+		t.Errorf("DF of \"com\": got %v (%v), want 1 (the keeper only)", counts, err)
+	}
 	sr, _ := db.Search("common")
 	if len(sr.Results) != 1 || sr.Results[0].Path != other {
 		t.Errorf("common: got %v, want only %s", sr.Results, other)

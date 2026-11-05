@@ -468,7 +468,7 @@ func ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc {
 	}
 }
 
-// CRC: crc-DB.md | R274, R277, R278
+// CRC: crc-DB.md | R274, R277, R775
 // BM25Func reads T records for per-trigram document frequencies and I record
 // counters for corpus statistics, then returns a BM25 ScoreFunc closure.
 func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error) {
@@ -508,11 +508,9 @@ func (db *DB) BM25Func(queryTrigrams []uint32) (ScoreFunc, error) {
 			overlayDFs = db.overlay.trigramDFs(queryTrigrams)
 		}
 		idfMap := make(map[uint32]float64, len(queryTrigrams))
+		pr := newPostingReader(th)
 		for i, tri := range queryTrigrams {
-			var df int
-			if tVal := b.Get(makeTKey(tri)); tVal != nil {
-				df = countTValue(tVal)
-			}
+			df := len(pr.live(tri)) // R775: live postings only
 			if overlayDFs != nil {
 				df += overlayDFs[i]
 			}
@@ -622,10 +620,10 @@ func (db *DB) encodeFilename(path string) []KeyPair { return EncodeFilename(db.F
 // CRC: crc-DB.md | R739, R740
 func (db *DB) finalKey(path string) []byte { return FinalKey(db.FilenameKey(path)) }
 
-// lookupTrigramCounts reads T records for query trigrams and returns document frequencies.
-// DF is derived from the number of varint-encoded chunkids in the T record value.
-func lookupTrigramCounts(th TxnHolder, queryTrigrams []uint32) []TrigramCount {
-	b := th.Bucket()
+// lookupTrigramCounts returns the query trigrams' document frequencies: each
+// one's live postings (R775).
+// CRC: crc-DB.md | R775, R786
+func lookupTrigramCounts(pr *postingReader, queryTrigrams []uint32) []TrigramCount {
 	seen := make(map[uint32]bool)
 	var result []TrigramCount
 	for _, t := range queryTrigrams {
@@ -633,21 +631,15 @@ func lookupTrigramCounts(th TxnHolder, queryTrigrams []uint32) []TrigramCount {
 			continue
 		}
 		seen[t] = true
-		key := makeTKey(t)
-		var count int
-		val := b.Get(key)
-		if val != nil {
-			count = countTValue(val)
-		}
-		result = append(result, TrigramCount{Trigram: t, Count: count})
+		result = append(result, TrigramCount{Trigram: t, Count: len(pr.live(t))})
 	}
 	return result
 }
 
 // R446: applyTrigramFilter uses the caller-supplied filter to select query trigrams.
 // totalChunks is pre-computed by the caller from the I counter + overlay.
-func applyTrigramFilter(th TxnHolder, queryTrigrams []uint32, totalChunks int, filter TrigramFilter) []uint32 {
-	counts := lookupTrigramCounts(th, queryTrigrams)
+func applyTrigramFilter(pr *postingReader, queryTrigrams []uint32, totalChunks int, filter TrigramFilter) []uint32 {
+	counts := lookupTrigramCounts(pr, queryTrigrams)
 	selected := filter(counts, totalChunks)
 	result := make([]uint32, len(selected))
 	for i, tc := range selected {
@@ -658,12 +650,12 @@ func applyTrigramFilter(th TxnHolder, queryTrigrams []uint32, totalChunks int, f
 
 // selectQueryTrigrams uses the caller-supplied filter (or FilterAll) to select query trigrams.
 // totalChunks is pre-computed by the caller from the I counter + overlay.
-func selectQueryTrigrams(th TxnHolder, queryTrigrams []uint32, totalChunks int, cfg searchConfig) []uint32 {
+func selectQueryTrigrams(pr *postingReader, queryTrigrams []uint32, totalChunks int, cfg searchConfig) []uint32 {
 	filter := cfg.trigramFilter
 	if filter == nil {
 		filter = FilterAll
 	}
-	return applyTrigramFilter(th, queryTrigrams, totalChunks, filter)
+	return applyTrigramFilter(pr, queryTrigrams, totalChunks, filter)
 }
 
 // countTokens counts space-separated tokens in data.
@@ -715,124 +707,6 @@ func tokenHash(token string) uint32 {
 		h *= 16777619
 	}
 	return h
-}
-
-// --- T/W record helpers ---
-
-// postingKey names one T record (by trigram) or W record (by token hash).
-type postingKey struct {
-	word bool
-	gram uint32
-}
-
-func (k postingKey) bytes() []byte {
-	if k.word {
-		return makeWKey(k.gram)
-	}
-	return makeTKey(k.gram)
-}
-
-// postingEdit is one record's pending change: chunkids to append, and chunkids
-// to remove from what is stored.
-type postingEdit struct {
-	add []uint64
-	del []uint64
-}
-
-// postingEdits gathers one write operation's T/W record changes, so
-// applyPostings rewrites each affected record once however many chunks touch it.
-// CRC: crc-DB.md | R729, R730
-type postingEdits map[postingKey]*postingEdit
-
-func (pe postingEdits) edit(k postingKey) *postingEdit {
-	e := pe[k]
-	if e == nil {
-		e = &postingEdit{}
-		pe[k] = e
-	}
-	return e
-}
-
-// addChunk queues a new chunk's chunkid onto each of its T and W records.
-func (pe postingEdits) addChunk(nc newChunkTW) {
-	for _, tri := range nc.trigrams {
-		pe.edit(postingKey{gram: tri}).queueAdd(nc.chunkid)
-	}
-	for _, te := range nc.tokens {
-		pe.edit(postingKey{word: true, gram: tokenHash(te.Token)}).queueAdd(nc.chunkid)
-	}
-}
-
-// dropChunk queues an orphaned chunk's removal from each of its T and W records.
-// CRC: crc-DB.md | R730
-func (pe postingEdits) dropChunk(chunkid uint64, crec CRecord) {
-	for _, te := range crec.Trigrams {
-		e := pe.edit(postingKey{gram: te.Trigram})
-		e.del = append(e.del, chunkid)
-	}
-	for _, te := range crec.Tokens {
-		e := pe.edit(postingKey{word: true, gram: tokenHash(te.Token)})
-		e.del = append(e.del, chunkid)
-	}
-}
-
-// queueAdd skips a repeat of the chunkid just queued: two of one chunk's tokens
-// can share a W-record hash, and a chunk's postings are queued consecutively.
-func (e *postingEdit) queueAdd(chunkid uint64) {
-	if n := len(e.add); n > 0 && e.add[n-1] == chunkid {
-		return
-	}
-	e.add = append(e.add, chunkid)
-}
-
-// applyPostings rewrites each record in pe once and deletes any it empties.
-// CRC: crc-DB.md | R729, R731, R732
-func (db *DB) applyPostings(th TxnHolder, pe postingEdits) error {
-	b := th.Bucket()
-	for k, e := range pe {
-		key := k.bytes()
-		slices.Sort(e.del)
-		val := rewritePostings(b.Get(key), e.del, e.add)
-		if db.onPostingWrite != nil {
-			db.onPostingWrite(key)
-		}
-		var err error
-		if len(val) == 0 {
-			err = b.Delete(key)
-		} else {
-			err = b.Put(key, val)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// rewritePostings copies the stored varint postings not in del (sorted) into a
-// fresh value, then appends add after the survivors. The stored list is never
-// decoded into chunkids; a malformed tail is dropped.
-// CRC: crc-DB.md | R731, R732
-func rewritePostings(stored []byte, del, add []uint64) []byte {
-	out := make([]byte, 0, len(stored)+len(add)*binary.MaxVarintLen64)
-	if len(del) == 0 {
-		out = append(out, stored...)
-	} else {
-		for off := 0; off < len(stored); {
-			id, n := readUvarint(stored[off:])
-			if n <= 0 {
-				break
-			}
-			if _, found := slices.BinarySearch(del, id); !found {
-				out = append(out, stored[off:off+n]...)
-			}
-			off += n
-		}
-	}
-	for _, id := range add {
-		out = binary.AppendUvarint(out, id)
-	}
-	return out
 }
 
 // readFRecord reads an F record by fileid. TxnHolder-compatible.
@@ -927,9 +801,7 @@ func updateCorpusCounters(th TxnHolder, newChunks []newChunkTW) error {
 	}
 	var totalNewTokens int64
 	for _, nc := range newChunks {
-		for _, te := range nc.tokens {
-			totalNewTokens += int64(te.Count)
-		}
+		totalNewTokens += int64(nc.tokenTotal)
 	}
 	if err := iAddCounter(th, "totalChunks", int64(len(newChunks))); err != nil {
 		return err
@@ -1101,7 +973,7 @@ func Open(path string, opts Options) (*DB, error) {
 		if err != nil {
 			return err
 		}
-		if v != formatVersion { // R768
+		if v != formatVersion { // R782
 			return &FormatVersionError{DBName: dbName, Stored: v, Want: formatVersion} // R751
 		}
 		s, err := loadSettings(bucketWrap{b})
@@ -1138,7 +1010,7 @@ func (db *DB) QueryTrigramCounts(query string) ([]TrigramCount, error) {
 		if b == nil {
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
-		result = lookupTrigramCounts(bucketWrap{b}, rawTrigrams)
+		result = lookupTrigramCounts(newPostingReader(bucketWrap{b}), rawTrigrams)
 		return nil
 	})
 	return result, err
@@ -1235,12 +1107,13 @@ func (db *DB) TmpContent(path string) (*bytes.Reader, error) {
 	return bytes.NewReader(f.content), nil
 }
 
-// formatVersion is the DB format this code reads and writes. Format "5"
-// dropped the F record's token bag; "4" made its name list one name; "3" added
-// its chunkerVersion. Open never migrates an older database (see
-// specs/migrations/complete/005-f-no-token-bag.md, 004-f-one-name.md and
-// complete/003-f-chunker-version.md). R767, R768
-const formatVersion = "5"
+// formatVersion is the DB format this code reads and writes. Format "6" put
+// the counts in the T postings and took the lists out of the C records (no W
+// records); "5" dropped the F record's token bag; "4" made its name list one
+// name; "3" added its chunkerVersion. Open never migrates an older database
+// (see specs/migrations/complete/006-postings-carry-counts.md, 005, 004, 003).
+// R781, R782
+const formatVersion = "6"
 
 // FormatVersionError is Open's refusal of a database written in another
 // format: the caller can tell it apart from other open failures with
@@ -1717,7 +1590,7 @@ func (db *DB) PrepareContent(fpath, strategy string, content []byte, opts ...Ind
 }
 
 // storePrepared is the shared store for StorePrepared and the fused add.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R679, R680
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R679, R789
 func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, error) {
 	if p.consumed {
 		return 0, errPreparedConsumed
@@ -1740,7 +1613,7 @@ func (db *DB) storePrepared(p *PreparedFile, ich IndexedChunkCallback) (uint64, 
 		if txnErr != nil {
 			return txnErr
 		}
-		return db.applyPostings(th, pe) // R729
+		return db.applyPostings(th, pe) // R784
 	})
 	if err != nil {
 		return 0, err
@@ -1791,7 +1664,7 @@ func (db *DB) respell(th TxnHolder, fpath string) (uint64, bool, error) {
 // StorePrepared stores a prepared file as a fresh add on the write actor: one
 // write transaction doing the ErrAlreadyIndexed guard, fileid allocation, and
 // the H/C/T/W/F record work. WithIndexedChunkCallback fires here.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R680, R683, R684
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#2 | R789, R683, R684
 func (db *DB) StorePrepared(p *PreparedFile, opts ...IndexOption) (uint64, error) {
 	var cfg indexConfig
 	for _, o := range opts {
@@ -1822,11 +1695,12 @@ func (db *DB) resolveChunker(strategy string) any {
 	return FuncChunker{Fn: RunChunkerFunc(cmd)}
 }
 
-// newChunkTW holds T/W batch data for a newly created chunk.
+// newChunkTW holds a newly created chunk's posting data: its trigram counts for
+// the T postings, and its token total for the totalTokens counter.
 type newChunkTW struct {
-	chunkid  uint64
-	trigrams []uint32
-	tokens   []TokenEntry
+	chunkid    uint64
+	triCounts  map[uint32]int
+	tokenTotal int
 }
 
 // dedupOrCreateChunk checks H record for dedup. On hit, increments this fileid's
@@ -1872,30 +1746,27 @@ func (db *DB) dedupOrCreateChunk(th TxnHolder, ch collectedChunk, fileid uint64)
 		return 0, nil, CRecord{}, err
 	}
 
-	triEntries := make([]TrigramEntry, 0, len(ch.triCounts))
-	triList := make([]uint32, 0, len(ch.triCounts))
-	for tri, cnt := range ch.triCounts {
-		triEntries = append(triEntries, TrigramEntry{Trigram: tri, Count: cnt})
-		triList = append(triList, tri)
+	tokenTotal := 0
+	for _, te := range ch.tokens {
+		tokenTotal += te.Count
 	}
-
 	crec := CRecord{
-		ChunkID:    chunkid,
-		Hash:       ch.hash,
-		ContentLen: len(ch.Content),
-		Trigrams:   triEntries,
-		Tokens:     ch.tokens,
-		Attrs:      ch.Attrs,
-		FileIDs:    []FileIDCount{{FileID: fileid, Count: 1}}, // R600
+		ChunkID:        chunkid,
+		Hash:           ch.hash,
+		ContentLen:     len(ch.Content),
+		DistinctTokens: len(ch.tokens), // R771
+		TokenTotal:     tokenTotal,
+		Attrs:          ch.Attrs,
+		FileIDs:        []FileIDCount{{FileID: fileid, Count: 1}}, // R600
 	}
 	if err := b.Put(makeCKey(chunkid), crec.MarshalValue()); err != nil {
 		return 0, nil, CRecord{}, err
 	}
 
-	return chunkid, &newChunkTW{chunkid: chunkid, trigrams: triList, tokens: ch.tokens}, crec, nil
+	return chunkid, &newChunkTW{chunkid: chunkid, triCounts: ch.triCounts, tokenTotal: tokenTotal}, crec, nil // R783
 }
 
-// Seq: seq-add.md | R213, R214, R223-R226, R233-R240, R253
+// Seq: seq-add.md | R213, R214, R223, R224, R783, R784
 func (db *DB) addFileInTxn(th TxnHolder, pe postingEdits, fpath, strategy string, chunks []collectedChunk, modTime int64, hash [32]byte, fileLength int64, ich IndexedChunkCallback) (uint64, []uint64, error) {
 	b := th.Bucket()
 	// Dedup guard: check for existing N records before allocating a fileid
@@ -2015,7 +1886,7 @@ type RemoveFilesCallback func(tx *bbolt.Tx, fileIDs []uint64, orphanedChunkIDs [
 // files in the batch is orphaned when the last of them drops it, which per-file
 // callbacks could not attribute. The caller bounds the batch: a transaction
 // holds its dirty pages until it commits.
-// CRC: crc-DB.md | R754, R755, R756, R757, R758
+// CRC: crc-DB.md | R788, R755, R756, R757, R758
 func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
 	var removed []string
 	err := db.bolt.Update(func(tx *bbolt.Tx) error {
@@ -2042,7 +1913,7 @@ func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
 			if err != nil {
 				return err
 			}
-			dropped, err := db.dropFileChunkOccurrences(th, pe, frec, fileid, nil)
+			dropped, err := db.dropFileChunkOccurrences(th, frec, fileid, nil)
 			if err != nil {
 				return err
 			}
@@ -2051,7 +1922,7 @@ func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
 			fileIDs = append(fileIDs, fileid)
 			removed = append(removed, fpath)
 		}
-		if err := db.applyPostings(th, pe); err != nil { // R754: once for the batch
+		if err := db.applyPostings(th, pe); err != nil { // R788: a removal adds nothing, so this writes nothing
 			return err
 		}
 		if fn != nil {
@@ -2071,12 +1942,13 @@ func (db *DB) RemoveFiles(paths []string, fn RemoveFilesCallback) error {
 	return err
 }
 
-// cascadeOrphan deletes the C/H records for an orphaned chunk and queues its
-// T/W posting removals into pe.
+// cascadeOrphan deletes the C/H records for an orphaned chunk and writes its D
+// record: the chunk is dead, and its postings stay until a rewrite or Purge
+// drops them. No posting is edited (R774).
 // Increments the removed counters. Caller has already ensured FileIDs is empty.
 // rcb (if non-nil) fires before deletion with the orphaned C record (bkt-attached).
-// CRC: crc-DB.md | R598, R609, R730
-func (db *DB) cascadeOrphan(th TxnHolder, pe postingEdits, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64, rcb RemovedChunkCallback) error {
+// CRC: crc-DB.md | R609, R774
+func (db *DB) cascadeOrphan(th TxnHolder, chunkid uint64, crec CRecord, removedChunks, removedTokens *int64, rcb RemovedChunkCallback) error {
 	b := th.Bucket()
 	if rcb != nil {
 		crec.attach(db, b)
@@ -2084,20 +1956,21 @@ func (db *DB) cascadeOrphan(th TxnHolder, pe postingEdits, chunkid uint64, crec 
 		rcb(crec)
 	}
 	*removedChunks++
-	for _, te := range crec.Tokens {
-		*removedTokens += int64(te.Count)
+	*removedTokens += int64(crec.TokenTotal)
+	if err := b.Delete(makeCKey(chunkid)); err != nil {
+		return err
 	}
-	b.Delete(makeCKey(chunkid))
-	b.Delete(makeHKey(crec.Hash))
-	pe.dropChunk(chunkid, crec) // R730
-	return nil
+	if err := b.Delete(makeHKey(crec.Hash)); err != nil {
+		return err
+	}
+	return b.Put(makeDKey(chunkid), []byte{}) // R774: the key is the record
 }
 
 // dropOccurrenceInline drops one occurrence of fileid from chunkid's C record,
 // on AppendChunks' drop-and-replace path. rcb (if non-nil) fires before
 // orphan deletion. // CRC: crc-DB.md | R608
 func (db *DB) dropOccurrenceInline(
-	th TxnHolder, pe postingEdits, chunkid, fileid uint64,
+	th TxnHolder, chunkid, fileid uint64,
 	removedChunks, removedTokens *int64,
 	rcb RemovedChunkCallback,
 ) error {
@@ -2117,7 +1990,7 @@ func (db *DB) dropOccurrenceInline(
 	if len(crec.FileIDs) > 0 {
 		return b.Put(cKey, crec.MarshalValue())
 	}
-	return db.cascadeOrphan(th, pe, chunkid, crec, removedChunks, removedTokens, rcb)
+	return db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // dropFromChunkRef applies mutate to the chunkid's C-record FileIDs slice and
@@ -2127,7 +2000,7 @@ func (db *DB) dropOccurrenceInline(
 // non-nil) fires before orphan deletion.
 // Returns true when the chunk was orphaned. // CRC: crc-DB.md | R608, R609
 func (db *DB) dropFromChunkRef(
-	th TxnHolder, pe postingEdits, chunkid, fileid uint64,
+	th TxnHolder, chunkid, fileid uint64,
 	mutate func([]FileIDCount, uint64) ([]FileIDCount, bool),
 	removedChunks, removedTokens *int64,
 	rcb RemovedChunkCallback,
@@ -2148,13 +2021,13 @@ func (db *DB) dropFromChunkRef(
 	if len(crec.FileIDs) > 0 {
 		return false, b.Put(cKey, crec.MarshalValue())
 	}
-	return true, db.cascadeOrphan(th, pe, chunkid, crec, removedChunks, removedTokens, rcb)
+	return true, db.cascadeOrphan(th, chunkid, crec, removedChunks, removedTokens, rcb)
 }
 
 // deleteFileMeta deletes a file's F record and N key chain only, leaving its
 // chunks alone. Shared by removeFileInTxn (final step) and reindexCore (frees
 // the path before addFileInTxn re-adds the new chunks under a fresh fileid).
-// CRC: crc-DB.md | R254, R673
+// CRC: crc-DB.md | R774, R673
 func (db *DB) deleteFileMeta(th TxnHolder, fileid uint64, fpath string) {
 	b := th.Bucket()
 	b.Delete(makeFKey(fileid))
@@ -2169,8 +2042,8 @@ func (db *DB) deleteFileMeta(th TxnHolder, fileid uint64, fpath string) {
 // counters, and returns the orphaned chunkids. Does not touch F/N records.
 // Shared by removeFileInTxn (whole-file removal) and reindexCore (dropping the
 // old fileid's occurrences after the new chunks were re-added).
-// CRC: crc-DB.md | R254, R673
-func (db *DB) dropFileChunkOccurrences(th TxnHolder, pe postingEdits, frec FRecord, fileid uint64, rcb RemovedChunkCallback) ([]uint64, error) {
+// CRC: crc-DB.md | R774, R673
+func (db *DB) dropFileChunkOccurrences(th TxnHolder, frec FRecord, fileid uint64, rcb RemovedChunkCallback) ([]uint64, error) {
 	var orphanedChunkIDs []uint64
 	var removedChunks int64
 	var removedTokens int64
@@ -2180,7 +2053,7 @@ func (db *DB) dropFileChunkOccurrences(th TxnHolder, pe postingEdits, frec FReco
 			continue
 		}
 		seen[fce.ChunkID] = true
-		orphaned, err := db.dropFromChunkRef(th, pe, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens, rcb)
+		orphaned, err := db.dropFromChunkRef(th, fce.ChunkID, fileid, removeFileID, &removedChunks, &removedTokens, rcb)
 		if err != nil {
 			return nil, err
 		}
@@ -2201,18 +2074,18 @@ func (db *DB) dropFileChunkOccurrences(th TxnHolder, pe postingEdits, frec FReco
 	return orphanedChunkIDs, nil
 }
 
-// R254: Remove via F record → C records → T/W cleanup for orphaned chunks
+// R774: Remove via F record → C records; orphaned chunks join the dead set
 func (db *DB) removeFileInTxn(th TxnHolder, fpath string, rcb RemovedChunkCallback) ([]uint64, error) {
 	fileid, frec, err := db.lookupFileByPath(th, fpath)
 	if err != nil {
 		return nil, err
 	}
 	pe := postingEdits{}
-	orphanedChunkIDs, err := db.dropFileChunkOccurrences(th, pe, frec, fileid, rcb)
+	orphanedChunkIDs, err := db.dropFileChunkOccurrences(th, frec, fileid, rcb)
 	if err != nil {
 		return nil, err
 	}
-	if err := db.applyPostings(th, pe); err != nil { // R729, R733: before RemoveCallback
+	if err := db.applyPostings(th, pe); err != nil { // R785: before RemoveCallback
 		return nil, err
 	}
 	db.deleteFileMeta(th, fileid, fpath)
@@ -2277,7 +2150,7 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 			return err
 		}
 		db.deleteFileMeta(th, oldFileID, p.fpath)
-		pe := postingEdits{} // the new chunks' additions and the orphans' removals, fused (R731)
+		pe := postingEdits{} // the new chunks' postings; the orphans' dead postings drop where these rewrite (R778)
 		var newChunkIDs []uint64
 		var txnErr error
 		// R745: re-adding under p.fpath stores the spelling given, so reindex respells
@@ -2285,12 +2158,12 @@ func (db *DB) reindexPrepared(p *PreparedFile, rcb ReindexCallback, ich IndexedC
 		if txnErr != nil {
 			return txnErr
 		}
-		// Seq: seq-prepare-store.md#3.5.1 | R730
-		orphans, err := db.dropFileChunkOccurrences(th, pe, oldFrec, oldFileID, rmcb)
+		// Seq: seq-prepare-store.md#3.5.1 | R774
+		orphans, err := db.dropFileChunkOccurrences(th, oldFrec, oldFileID, rmcb)
 		if err != nil {
 			return err
 		}
-		// Seq: seq-prepare-store.md#3.5.2 | R729, R733 — before ReindexCallback
+		// Seq: seq-prepare-store.md#3.5.2 | R784, R785 — before ReindexCallback
 		if err := db.applyPostings(th, pe); err != nil {
 			return err
 		}
@@ -2673,7 +2546,7 @@ func (db *DB) PrepareAppend(path string, lastLocator, content []byte, strategy s
 // AppendChunks. When the prepared append replaces the last chunk, it verifies
 // the committed tail still matches the assumed locator (ErrAppendTailMoved)
 // before the drop-and-replace.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R164, R604, R608, R687, R688
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R164, R604, R608, R790, R688
 func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig) error {
 	if p.consumed {
 		return errPreparedConsumed
@@ -2708,10 +2581,10 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 		// Drop-and-replace: rewrite the dropped chunk's C record with one fewer
 		// occurrence, or cascade orphan cleanup. // R604, R608
 		var droppedRemoved, droppedTokens int64
-		pe := postingEdits{} // the dropped chunk's removals and the new chunks' additions, fused (R731)
+		pe := postingEdits{} // the new chunks' postings; the dropped chunk, if orphaned, is dead (R778)
 		if p.replacedLast && len(frec.Chunks) > 0 {
 			last := frec.Chunks[len(frec.Chunks)-1]
-			if err := db.dropOccurrenceInline(th, pe, last.ChunkID, fileid, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
+			if err := db.dropOccurrenceInline(th, last.ChunkID, fileid, &droppedRemoved, &droppedTokens, cfg.removedChunkCallback); err != nil {
 				return err
 			}
 			frec.Chunks = frec.Chunks[:len(frec.Chunks)-1]
@@ -2737,7 +2610,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 			p.chunks[i].Content = nil // release content after C record write (and after callback fire)
 		}
 
-		// Seq: seq-prepare-store.md#5.4.2 | R729, R731
+		// Seq: seq-prepare-store.md#5.4.2 | R784, R778
 		if err := db.applyPostings(th, pe); err != nil {
 			return err
 		}
@@ -2780,7 +2653,7 @@ func (db *DB) appendPrepared(fileid uint64, p *PreparedAppend, cfg appendConfig)
 // AppendPrepared stores a prepared append on the write actor. Store-time options
 // apply here: WithContentHash, WithModTime, WithFileLength,
 // WithIndexedChunkCallback, WithRemovedChunkCallback.
-// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R687, R688
+// CRC: crc-DB.md | Seq: seq-prepare-store.md#5 | R790, R688
 func (db *DB) AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOption) error {
 	var cfg appendConfig
 	for _, o := range opts {
@@ -2793,7 +2666,7 @@ func (db *DB) AppendPrepared(fileid uint64, p *PreparedAppend, opts ...AppendOpt
 // content is only the appended bytes, not the full file. It reads the file's
 // current tail, then composes PrepareAppend + AppendPrepared in one call.
 // CRC: crc-DB.md | Seq: seq-append.md, seq-prepare-store.md#4, seq-prepare-store.md#5
-// R150, R151, R152, R153, R154, R155, R156, R157, R163, R164, R165, R166, R167, R168, R604, R605, R606, R608, R689
+// R150, R151, R152, R153, R154, R155, R784, R769, R163, R164, R165, R166, R167, R168, R604, R605, R606, R608, R689
 func (db *DB) AppendChunks(fileid uint64, content []byte, strategy string, opts ...AppendOption) error {
 	var cfg appendConfig
 	for _, o := range opts {
@@ -2884,8 +2757,10 @@ func (db *DB) totalChunks(th TxnHolder) int {
 
 // searchCollect selects trigrams, reads T records, combines per-term candidate sets
 // (intersect for AND, union for fuzzy OR), and loads C records. Returns candidates and active trigrams.
+// CRC: crc-DB.md | R776
 func (s *searchConfig) searchCollect(th TxnHolder, termTrigrams [][]uint32, queryTrigrams []uint32) ([]candidateChunk, []uint32) {
-	active := selectQueryTrigrams(th, queryTrigrams, s.totalChunks(th), *s)
+	pr := newPostingReader(th) // each trigram's postings decoded once for this search
+	active := selectQueryTrigrams(pr, queryTrigrams, s.totalChunks(th), *s)
 	if len(active) == 0 {
 		return nil, nil
 	}
@@ -2905,7 +2780,7 @@ func (s *searchConfig) searchCollect(th TxnHolder, termTrigrams [][]uint32, quer
 		if len(termActive) == 0 {
 			continue
 		}
-		termChunks := collectChunkIDs(th, termActive)
+		termChunks := collectChunkIDs(pr, termActive)
 		if candidateChunkIDs == nil {
 			candidateChunkIDs = termChunks
 		} else if s.loose {
@@ -2921,8 +2796,29 @@ func (s *searchConfig) searchCollect(th TxnHolder, termTrigrams [][]uint32, quer
 		}
 	}
 
-	cands := s.collectCandidates(th, candidateChunkIDs)
+	// The scorer reads the counts of the selected trigrams, except loose search's
+	// term scorer, which checks every trigram of every term (R340).
+	countTris := active
+	if s.loose {
+		countTris = uniqueTrigrams(termTrigrams)
+	}
+	cands := s.collectCandidates(th, pr, candidateChunkIDs, countTris)
 	return cands, active
+}
+
+// uniqueTrigrams is every trigram of every term, once each.
+func uniqueTrigrams(termTrigrams [][]uint32) []uint32 {
+	seen := map[uint32]bool{}
+	var out []uint32
+	for _, tris := range termTrigrams {
+		for _, t := range tris {
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // Search splits the query into terms by the query syntax and searches with
@@ -3018,7 +2914,7 @@ func nonEmptyTerms(terms []string) []string {
 	return out
 }
 
-// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R420, R421, R422, R423, R425, R427, R706, R709
+// CRC: crc-DB.md | Seq: seq-fuzzy-trigram.md | R418, R419, R787, R421, R422, R423, R425, R427, R706, R709
 // SearchFuzzy performs fast typo-tolerant search using two phases:
 // Phase 1: trigram OR-union tally from T record posting lists (select top-k)
 // Phase 2: C record re-score with ScoreCoverage for the top-k winners
@@ -3051,14 +2947,10 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 
 		// Phase 1: tally chunkID appearances across T record posting lists (R419)
 		tally := make(map[uint64]int)
+		pr := newPostingReader(th) // R775: dead postings skipped
 		for _, tri := range queryTrigrams {
-			val := b.Get(makeTKey(tri))
-			if val == nil {
-				continue
-			}
-			ids, _ := UnmarshalTValue(val)
-			for _, id := range ids {
-				tally[id]++
+			for _, p := range pr.live(tri) {
+				tally[p.ChunkID]++
 			}
 		}
 
@@ -3103,7 +2995,7 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 			entries = entries[:k]
 		}
 
-		// Phase 2: read C records for top-k, re-score with ScoreCoverage (R420);
+		// Phase 2: read C records for top-k, re-score with ScoreCoverage, counts from the postings (R787);
 		// overlay winners resolve from their in-memory records (R709)
 		topIDs := make(map[uint64]bool, len(entries))
 		tmpIDs := make(map[uint64]bool)
@@ -3114,7 +3006,7 @@ func (db *DB) SearchFuzzy(query string, k int, opts ...SearchOption) (*SearchRes
 				topIDs[e.chunkID] = true
 			}
 		}
-		cands := cfg.collectCandidates(th, topIDs)
+		cands := cfg.collectCandidates(th, pr, topIDs, queryTrigrams) // R787
 		results = cfg.scoreAndResolve(th, cands, queryTrigrams, scoreCoverage)
 		if len(tmpIDs) > 0 {
 			results = append(results, db.overlay.resolve(tmpIDs, queryTrigrams, scoreCoverage, cfg)...)
@@ -3245,43 +3137,25 @@ func (db *DB) SearchMultiTerms(terms []string, strategies map[string]ScoreFunc, 
 }
 
 // collectChunkIDs reads T records for each trigram and returns the intersection of chunkid sets.
-func collectChunkIDs(th TxnHolder, trigrams []uint32) map[uint64]bool {
-	b := th.Bucket()
+func collectChunkIDs(pr *postingReader, trigrams []uint32) map[uint64]bool {
 	if len(trigrams) == 0 {
 		return nil
 	}
-	// Read first trigram's T record
-	val := b.Get(makeTKey(trigrams[0]))
-	if val == nil {
-		return nil
-	}
-	data := make([]byte, len(val))
-	copy(data, val)
-	ids, _ := UnmarshalTValue(data)
-	result := make(map[uint64]bool, len(ids))
-	for _, id := range ids {
-		result[id] = true
-	}
-
-	// Intersect with remaining trigrams
+	result := pr.ids(trigrams[0])
 	for _, tri := range trigrams[1:] {
 		if len(result) == 0 {
 			return nil
 		}
-		val := b.Get(makeTKey(tri))
-		if val == nil {
-			return nil // trigram not in index → empty intersection
-		}
-		data := make([]byte, len(val))
-		copy(data, val)
-		ids, _ := UnmarshalTValue(data)
-		next := make(map[uint64]bool, len(ids))
-		for _, id := range ids {
-			if result[id] {
-				next[id] = true
+		next := make(map[uint64]bool, len(result))
+		for _, p := range pr.live(tri) {
+			if result[p.ChunkID] {
+				next[p.ChunkID] = true
 			}
 		}
 		result = next
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }
@@ -3310,8 +3184,9 @@ type candidateChunk struct {
 }
 
 // collectCandidates reads C records for candidate chunkids, applies chunk filters,
-// and returns pre-loaded candidates. CRC: crc-DB.md | R284
-func (s *searchConfig) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool) []candidateChunk {
+// and returns pre-loaded candidates, each with its counts of countTris taken
+// from the postings. CRC: crc-DB.md | R284, R776
+func (s *searchConfig) collectCandidates(th TxnHolder, pr *postingReader, chunkIDs map[uint64]bool, countTris []uint32) []candidateChunk {
 	b := th.Bucket()
 	var candidates []candidateChunk
 	for chunkid := range chunkIDs {
@@ -3332,16 +3207,11 @@ func (s *searchConfig) collectCandidates(th TxnHolder, chunkIDs map[uint64]bool)
 			continue
 		}
 
-		chunkCounts := make(map[uint32]int, len(crec.Trigrams))
-		for _, te := range crec.Trigrams {
-			chunkCounts[te.Trigram] = te.Count
-		}
-
 		candidates = append(candidates, candidateChunk{
 			chunkID:     chunkid,
 			crec:        crec,
-			chunkCounts: chunkCounts,
-			tokenCount:  len(crec.Tokens),
+			chunkCounts: pr.counts(chunkid, countTris),
+			tokenCount:  crec.DistinctTokens,
 		})
 	}
 	return candidates
@@ -3787,13 +3657,14 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 			return fmt.Errorf("bucket %q not found", db.dbName)
 		}
 		th := bucketWrap{b}
-		candidates := evalTrigramQueryNew(q, th, db.trigrams)
+		pr := newPostingReader(th)
+		candidates := evalTrigramQueryNew(q, pr, db.trigrams)
 		if candidates == nil {
 			// QAll: match everything — collect all chunkids from all T records
 			candidates = allChunkIDs(th)
 		}
 
-		cands := cfg.collectCandidates(th, candidates)
+		cands := cfg.collectCandidates(th, pr, candidates, nil)
 		results = cfg.scoreAndResolve(th, cands, nil, cfg.scoreFunc)
 		return nil
 	})
@@ -3827,7 +3698,7 @@ func (db *DB) SearchRegex(pattern string, opts ...SearchOption) (*SearchResults,
 
 // evalTrigramQueryNew recursively evaluates a codesearch trigram query using T records.
 // Returns a set of candidate chunkids, or nil for QAll.
-func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, tg *Trigrams) map[uint64]bool {
+func evalTrigramQueryNew(q *csindex.Query, pr *postingReader, tg *Trigrams) map[uint64]bool {
 	switch q.Op {
 	case csindex.QAll:
 		return nil
@@ -3840,7 +3711,7 @@ func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, tg *Trigrams) map[uint6
 			if !ok {
 				continue
 			}
-			set := readTRecordChunkIDs(th, encoded)
+			set := pr.ids(encoded)
 			if result == nil {
 				result = set
 			} else {
@@ -3848,7 +3719,7 @@ func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, tg *Trigrams) map[uint6
 			}
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQueryNew(sub, th, tg)
+			subSet := evalTrigramQueryNew(sub, pr, tg)
 			if subSet == nil {
 				continue
 			}
@@ -3866,12 +3737,12 @@ func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, tg *Trigrams) map[uint6
 			if !ok {
 				continue
 			}
-			for id := range readTRecordChunkIDs(th, encoded) {
+			for id := range pr.ids(encoded) {
 				result[id] = true
 			}
 		}
 		for _, sub := range q.Sub {
-			subSet := evalTrigramQueryNew(sub, th, tg)
+			subSet := evalTrigramQueryNew(sub, pr, tg)
 			if subSet == nil {
 				return nil // QAll in OR → everything
 			}
@@ -3882,23 +3753,6 @@ func evalTrigramQueryNew(q *csindex.Query, th TxnHolder, tg *Trigrams) map[uint6
 		return result
 	}
 	return make(map[uint64]bool)
-}
-
-// readTRecordChunkIDs reads a T record and returns chunkid set.
-func readTRecordChunkIDs(th TxnHolder, trigram uint32) map[uint64]bool {
-	b := th.Bucket()
-	val := b.Get(makeTKey(trigram))
-	if val == nil {
-		return make(map[uint64]bool)
-	}
-	data := make([]byte, len(val))
-	copy(data, val)
-	ids, _ := UnmarshalTValue(data)
-	result := make(map[uint64]bool, len(ids))
-	for _, id := range ids {
-		result[id] = true
-	}
-	return result
 }
 
 // allChunkIDs scans all C records and returns every chunkid.
@@ -4320,7 +4174,8 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 			return err
 		}
 
-		active := selectQueryTrigrams(th, queryTrigrams, db.totalChunks(th), cfg)
+		pr := newPostingReader(th)
+		active := selectQueryTrigrams(pr, queryTrigrams, db.totalChunks(th), cfg)
 		if len(active) == 0 {
 			return nil
 		}
@@ -4341,14 +4196,9 @@ func (db *DB) ScoreFile(query, fpath string, fn ScoreFunc, opts ...SearchOption)
 				continue
 			}
 
-			chunkCounts := make(map[uint32]int, len(crec.Trigrams))
-			for _, te := range crec.Trigrams {
-				chunkCounts[te.Trigram] = te.Count
-			}
-			tokenCount := len(crec.Tokens)
 			results = append(results, ScoredChunk{
 				Range: fce.Location,
-				Score: fn(active, chunkCounts, tokenCount),
+				Score: fn(active, pr.counts(fce.ChunkID, active), crec.DistinctTokens), // R777
 			})
 		}
 		return nil

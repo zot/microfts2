@@ -16,7 +16,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 ## Artifacts
 
 ### CRC Cards
-- [x] crc-DB.md → `db.go`, `records.go`
+- [x] crc-DB.md → `db.go`, `records.go`, `postings.go`
 - [x] crc-CharSet.md → `charset.go`
 - [x] crc-Bitset.md → `bitset.go`
 - [x] crc-Chunker.md → `chunker.go`
@@ -50,7 +50,7 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 ### Test Designs
 - [x] test-CharSet.md → `charset_test.go`
 - [x] test-Bitset.md → `bitset_test.go`
-- [x] test-DB.md → `db_test.go`, `records_test.go`, `search_terms_test.go`, `remove_files_test.go`
+- [x] test-DB.md → `db_test.go`, `records_test.go`, `search_terms_test.go`, `remove_files_test.go`, `postings_test.go`
 - [x] test-Chunker.md → `chunker_test.go`
 - [x] test-Overlay.md → `overlay_test.go`
 - [x] test-CLI.md → `cmd/microfts/main_test.go`
@@ -192,3 +192,39 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T101: R760 retired by R765 (2026-11-04 the F record drops its unread token bag (DB format 5))
 - T102: R761 retired by R767 (2026-11-04 the F record drops its unread token bag (DB format 5))
 - T103: R762 retired by R768 (2026-11-04 the F record drops its unread token bag (DB format 5))
+- T104: R238 retired by R770 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T105: R227 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T106: R228 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T107: R229 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T108: R495 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T109: R497 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T110: R498 retired by R771 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T111: R244 retired by R772 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T112: R241 retired by R773 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T113: R242 retired by R773 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T114: R254 retired by R774 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T115: R598 retired by R774 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T116: R730 retired by R774 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T117: R78 retired by R774 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T118: R80 retired by R774 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T119: R239 retired by R775 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T120: R278 retired by R775 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T121: R32 retired by R776 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T122: R731 retired by R778 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T123: R732 retired by R778 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T124: R767 retired by R781 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T125: R768 retired by R782 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T126: R225 retired by R783 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T127: R226 retired by R783 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T128: R77 retired by R783 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T129: R29 retired by R783 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T130: R253 retired by R784 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T131: R729 retired by R784 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T132: R79 retired by R784 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T133: R156 retired by R784 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T134: R733 retired by R785 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T135: R137 retired by R786 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T136: R420 retired by R787 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T137: R754 retired by R788 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T138: R680 retired by R789 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
+- T139: R687 retired by R790 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))

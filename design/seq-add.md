@@ -1,5 +1,5 @@
 # Sequence: Add File
-**Requirements:** R10-12, R20, R25, R26, R29, R77, R79, R81, R92, R110, R111, R116, R118, R120-122, R128-131, R146, R147, R213-215, R223-231, R233-238, R240, R241, R244, R249-251, R253, R261, R262, R469, R470, R472-478, R485, R735, R739, R759
+**Requirements:** R10-12, R20, R25, R26, R29, R77, R79, R81, R92, R110, R111, R116, R118, R120-122, R128-131, R146, R147, R213-215, R223-231, R233-238, R240, R241, R244, R249-251, R253, R261, R262, R469, R470, R472-478, R485, R735, R739, R759, R778, R783, R784
 
 Entry flow: `AddFile` now runs as `PrepareFile` (compute, no txn) then `StorePrepared`
 (this store) — see seq-prepare-store.md. The steps below are the store phase; the file
@@ -53,21 +53,14 @@ DB                      Chunker       Trigrams      KeyChain
  |          create C record: C[chunkid] ->           |
  |            hash, trigrams, tokens,    |            |
  |            attrs, [fileid]            |            |
- |          accumulate trigrams for T batch          |
- |          accumulate tokens for W batch            |
+ |          accumulate postings for T batch          |
  |                                       |            |
  |      collect (chunkid, location) for F record     |
- |      merge tokens into file-level bag |            |
  |                                       |            |
  |  batch T record updates:              |            |
  |    for each affected trigram:         |            |
- |      read T[tri], append chunkids,   |            |
- |      write T[tri]                     |            |
- |                                       |            |
- |  batch W record updates:              |            |
- |    for each affected token hash:      |            |
- |      read W[hash], append chunkids,  |            |
- |      write W[hash]                    |            |
+ |      read T[tri], drop dead,         |            |
+ |      append postings, write [R778]    |            |
  |                                       |            |
  |  create F record: F[fileid] ->        |            |
  |    modTime, contentHash, fileLength,  |            |

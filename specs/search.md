@@ -42,7 +42,7 @@ Fits `ScoreFunc` signature directly. Pure function, no extra state.
 
 ## BM25
 
-Standard term frequency / inverse document frequency scoring. Uses per-trigram TF from the chunk's C record and corpus-wide IDF from T record value lengths.
+Standard term frequency / inverse document frequency scoring. Uses per-trigram TF from the T postings (each carries its chunk's count) and corpus-wide IDF from each T record's live postings.
 
 BM25 needs IDF data that isn't available through the `ScoreFunc` signature. Solution: a closure factory that captures IDF and average document length, returning a `ScoreFunc`.
 
@@ -50,16 +50,16 @@ BM25 needs IDF data that isn't available through the `ScoreFunc` signature. Solu
 func ScoreBM25(idf map[uint32]float64, avgTokenCount float64) ScoreFunc
 ```
 
-The caller pre-computes IDF from T record value lengths and average token count from I record counters, then passes the returned closure as a `ScoreFunc`. No signature change needed.
+The caller pre-computes IDF from the T records' live posting counts and average token count from I record counters, then passes the returned closure as a `ScoreFunc`. No signature change needed.
 
 ### BM25 formula
 
 For each query trigram t in the chunk:
-- `tf(t)` = trigram count in the chunk (from C record)
-- `idf(t) = ln((N - df(t) + 0.5) / (df(t) + 0.5) + 1)` where N = total chunks, df(t) = T record value length
+- `tf(t)` = trigram count in the chunk (from its T posting)
+- `idf(t) = ln((N - df(t) + 0.5) / (df(t) + 0.5) + 1)` where N = total chunks, df(t) = the number of live postings in t's T record (dead chunks skipped)
 - `score += idf(t) * (tf(t) * (k1 + 1)) / (tf(t) + k1 * (1 - b + b * dl/avgdl))`
 - `k1 = 1.2`, `b = 0.75` (standard defaults)
-- `dl` = chunk token count, `avgdl` = average chunk token count across corpus
+- `dl` = the chunk's distinct-token count (`CRecord.DistinctTokens`), `avgdl` = the `totalTokens` counter (summed token counts) over total chunks. The two are not the same measure; that is how the scorer has always worked, and this migration keeps it
 
 ### BM25 helper
 
@@ -163,7 +163,7 @@ microfts2 ships stock filter functions:
 
 ### Trigram count lookup
 
-Per-query T record reads: look up each query trigram's document frequency from T record value length. Typically 3-10 index reads per query.
+Per-query T record reads: each query trigram's document frequency is its T record's live postings, counted while the record is decoded for candidates (once per query). Typically 3-10 index reads per query.
 
 The total chunk count is derived from the database (sum of file chunk counts from F records, or maintained as a counter).
 
