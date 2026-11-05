@@ -40,15 +40,15 @@ Overlapping chunking strategies produce shared content across adjacent windows. 
 
 ### Record types
 
-| Prefix | Key                    | Value                                 | Purpose                                                          |
-|--------|------------------------|---------------------------------------|------------------------------------------------------------------|
-| I      | name: str              | empty (value encoded in key)          | Config settings, data-in-key pattern                             |
-| H      | hash: 32               | chunkid: varint                       | Content hash → chunkid lookup                                    |
-| C      | chunkid: varint        | hash + contentLen + token counts + attrs + fileids | Per-chunk: identity, length, metadata, files        |
-| F      | fileid: varint         | metadata + name + chunks              | Per-file: staleness info, ordered chunk list                     |
-| N      | chain-byte + name: str | (varies by chain-byte)                | Filename → fileid mapping via key chains                         |
-| T      | trigram: 3             | postings: chunkid delta + count...    | Trigram inverted index, with each chunk's count                  |
-| D      | chunkid: varint        | empty                                 | Dead set: chunks removed but still in some posting list          |
+| Prefix | Key                    | Value                                              | Purpose                                                 |
+|--------|------------------------|----------------------------------------------------|---------------------------------------------------------|
+| I      | name: str              | empty (value encoded in key)                       | Config settings, data-in-key pattern                    |
+| H      | hash: 32               | chunkid: varint                                    | Content hash → chunkid lookup                           |
+| C      | chunkid: varint        | hash + contentLen + token counts + attrs + fileids | Per-chunk: identity, length, metadata, files            |
+| F      | fileid: varint         | metadata + name + chunks                           | Per-file: staleness info, ordered chunk list            |
+| N      | chain-byte + name: str | (varies by chain-byte)                             | Filename → fileid mapping via key chains                |
+| T      | trigram: 3             | postings: chunkid delta + count...                 | Trigram inverted index, with each chunk's count         |
+| D      | chunkid: varint        | empty                                              | Dead set: chunks removed but still in some posting list |
 
 ### Record details
 
