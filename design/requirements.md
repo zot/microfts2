@@ -634,6 +634,7 @@
 - **R355:** No cross-deduplication between overlay and the index (separate chunkid spaces)
 - **R356:** Overlay lifecycle tied to `*DB` handle — created on first use, destroyed on `Close()` or process exit
 - **R357:** Individual tmp:// documents can be removed explicitly
+- **R799:** After `Close`, `AddTmpFile`, `UpdateTmpFile` and `AppendTmpFile` return `ErrClosed` and touch no overlay; `Close` also uses up the lazy creation, so a first tmp:// write after it creates no fresh overlay
 - **R358:** `AddTmpFile(path, strategy string, content []byte) (uint64, error)` — chunks content, stores in overlay, returns fileid (counting down)
 - **R359:** `AddTmpFile` requires registered chunking strategy; content must be valid UTF-8
 - **R360:** `AddTmpFile` returns `ErrAlreadyIndexed` if path is already in the overlay

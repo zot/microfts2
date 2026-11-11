@@ -69,6 +69,7 @@
 **Expected:** three results — "2-2" Missing with empty content, "3-3" "c\n", "4-4" "d\n"
 **Refs:** crc-DB.md, seq-tmp-search.md, R701, R702
 **Code:** overlay_test.go
+**Alarm:** 1
 **Fire alarm:** feed getChunksTmp's chunker a positional collector (index the yielded chunks by count, as before); red is "2-2" carrying "c\n"
 **Inject:** db.go:DB.getChunksTmp
 **Pulled:** 2026-10-24 — rang: "2-2" carried "c\n"
@@ -107,3 +108,27 @@
 **Input:** AddTmpFile (2 chunks), AppendTmpFile with WithAppendChunkCallback (1 chunk)
 **Expected:** callback slice has 1 entry matching the appended chunk
 **Refs:** crc-Overlay.md, seq-tmp-add.md, R483
+
+## Test: tmp:// writes after Close return ErrClosed
+**Purpose:** a late tmp:// write gets an error, not a nil-overlay panic
+**Input:** a DB closed with its overlay used, and one closed with it never used; then AddTmpFile, UpdateTmpFile and AppendTmpFile
+**Expected:** each returns ErrClosed, in both cases
+**Refs:** crc-DB.md, R799
+**Code:** overlay_test.go
+**Alarm:** 2
+**Fire alarm:** drop the nil check in UpdateTmpFile, the panic ark hit: the test dies with a nil pointer dereference in overlay.updateFile
+**Inject:** db.go:DB.UpdateTmpFile
+@alarm-hash: c5c33b0477b21f68
+**Pulled:** 2026-11-11 — rang: the nil check removed from UpdateTmpFile, the test died with a nil pointer dereference at overlay.go:125, the panic ark hit; restored clean
+
+## Test: no fresh overlay after Close
+**Purpose:** Close uses up the lazy creation, so a DB whose overlay was never used cannot grow one after Close
+**Input:** the never-used case of the test above
+**Expected:** AddTmpFile after Close returns ErrClosed
+**Refs:** crc-DB.md, R799
+**Code:** overlay_test.go
+**Alarm:** 3
+**Fire alarm:** drop the `overlayOnce.Do` in Close: the never-used DB gets a fresh overlay and "usedFirst=false: AddTmpFile after Close = <nil>, want ErrClosed"
+**Inject:** db.go:DB.Close
+@alarm-hash: c49488716255c8df
+**Pulled:** 2026-11-11 — rang: the overlayOnce.Do removed from Close, "usedFirst=false: AddTmpFile after Close = <nil>, want ErrClosed"; restored clean

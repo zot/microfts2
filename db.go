@@ -37,6 +37,9 @@ var ErrAlreadyIndexed = errors.New("file already indexed")
 // not hold. RemoveFiles skips such a path instead of failing the batch. R755
 var ErrNotIndexed = errors.New("file not found")
 
+// ErrClosed is returned by a tmp:// write made after Close. R799
+var ErrClosed = errors.New("microfts2: database closed")
+
 // ErrAppendBoundary is returned by AppendChunks when the registered chunker is
 // not an AppendAwareChunker and produces zero chunks from non-empty content —
 // the appended bytes likely straddle a chunk boundary the chunker can't see
@@ -1022,11 +1025,13 @@ func (db *DB) Close() error {
 		db.bolt.Close()
 		db.bolt = nil
 	}
-	db.overlay = nil // R356: overlay destroyed on Close
+	db.overlayOnce.Do(func() {}) // R799: no fresh overlay after Close
+	db.overlay = nil             // R356: overlay destroyed on Close
 	return nil
 }
 
 // ensureOverlay lazily creates the overlay on first use (thread-safe). R356
+// After Close it returns nil (R799).
 func (db *DB) ensureOverlay() *overlay {
 	db.overlayOnce.Do(func() {
 		db.overlay = newOverlay()
@@ -1042,7 +1047,11 @@ func (db *DB) AddTmpFile(path, strategy string, content []byte, opts ...IndexOpt
 	for _, o := range opts {
 		o.applyIndex(&cfg)
 	}
-	return db.ensureOverlay().addFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
+	o := db.ensureOverlay()
+	if o == nil {
+		return 0, ErrClosed // R799
+	}
+	return o.addFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
 // CRC: crc-DB.md | Seq: seq-tmp-add.md | R361, R362, R363, R481
@@ -1052,7 +1061,11 @@ func (db *DB) UpdateTmpFile(path, strategy string, content []byte, opts ...Index
 	for _, o := range opts {
 		o.applyIndex(&cfg)
 	}
-	return db.ensureOverlay().updateFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
+	o := db.ensureOverlay()
+	if o == nil {
+		return ErrClosed // R799
+	}
+	return o.updateFile(path, strategy, content, db, cfg.chunkCallback, cfg.indexedChunkCallback)
 }
 
 // CRC: crc-DB.md | R428-R442, R483
@@ -1060,7 +1073,11 @@ func (db *DB) UpdateTmpFile(path, strategy string, content []byte, opts ...Index
 // it doesn't exist. New chunks are indexed from the appended content without
 // touching existing chunks.
 func (db *DB) AppendTmpFile(path, strategy string, content []byte, opts ...AppendOption) (uint64, error) {
-	return db.ensureOverlay().appendFile(path, strategy, content, db, opts)
+	o := db.ensureOverlay()
+	if o == nil {
+		return 0, ErrClosed // R799
+	}
+	return o.appendFile(path, strategy, content, db, opts)
 }
 
 // CRC: crc-DB.md | Seq: seq-tmp-add.md | R364, R365

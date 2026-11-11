@@ -29,6 +29,7 @@ Chunk IDs within the overlay also count down from a separate counter starting at
 - Tied to the `*DB` handle — lives as long as the DB is open
 - No persistence. Process dies → gone. If content is worth keeping, the caller writes a file and indexes it normally.
 - Individual tmp:// documents can be removed explicitly
+- After `Close`, adding, updating or appending a tmp:// document returns `ErrClosed` rather than touching an overlay that no longer exists. A write that arrives late, after its caller's shutdown began, gets an error it can report instead of a panic (found 2026-11-11 by ark, whose tests left a ticker writing a tmp:// document after closing the index).
 
 ## Adding Documents
 

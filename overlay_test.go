@@ -3,6 +3,7 @@ package microfts2
 // CRC: crc-Overlay.md | test-Overlay.md
 
 import (
+	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -681,5 +682,34 @@ func TestAppendTmpFileAutoCreateFiresIndexedChunkCallback(t *testing.T) {
 	}
 	if len(fired) != 2 {
 		t.Fatalf("expected 2 fires from auto-create path, got %d", len(fired))
+	}
+}
+
+// CRC: crc-DB.md | Test: test-Overlay.md | R799
+//
+// A tmp:// write after Close returns ErrClosed rather than panicking on the
+// destroyed overlay — whether or not the overlay was ever used before Close.
+func TestTmpWritesAfterCloseReturnErrClosed(t *testing.T) {
+	for _, usedFirst := range []bool{true, false} {
+		db, err := Create(filepath.Join(t.TempDir(), "testdb"), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.AddStrategyFunc("line", LineChunkFunc)
+		if usedFirst {
+			if _, err := db.AddTmpFile("tmp://s/doc", "line", []byte("before close\n")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db.Close()
+		if _, err := db.AddTmpFile("tmp://s/new", "line", []byte("x\n")); !errors.Is(err, ErrClosed) {
+			t.Errorf("usedFirst=%v: AddTmpFile after Close = %v, want ErrClosed", usedFirst, err)
+		}
+		if err := db.UpdateTmpFile("tmp://s/doc", "line", []byte("x\n")); !errors.Is(err, ErrClosed) {
+			t.Errorf("usedFirst=%v: UpdateTmpFile after Close = %v, want ErrClosed", usedFirst, err)
+		}
+		if _, err := db.AppendTmpFile("tmp://s/doc", "line", []byte("x\n")); !errors.Is(err, ErrClosed) {
+			t.Errorf("usedFirst=%v: AppendTmpFile after Close = %v, want ErrClosed", usedFirst, err)
+		}
 	}
 }
