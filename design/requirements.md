@@ -775,10 +775,11 @@
 ## Feature: DB Copy and Cache Invalidation
 **Source:** specs/api.md
 
-- **R459:** `Copy() *DB` — shallow copy sharing the index, overlay, and chunker registry; caches nil
-- **R460:** Copy shares `bolt`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
+- **~~R459:~~** (Retired T142 — see R800) `Copy() *DB` — shallow copy sharing the index, overlay, and chunker registry; caches nil
+- **~~R460:~~** (Retired T143 — see R800) Copy shares `bolt`, `dbName`, `settings`, `trigrams`, `overlay`, `chunkers`
 - **R461:** Copy sets `pathCache`, `pathToID`, `frecordCache` to nil — lazy reload from the index
 - **R462:** (inferred) Copy does not copy `overlayOnce` — overlay pointer is shared directly, already initialized
+- **R800:** `Copy() *DB` — a copy for use on another goroutine, sharing `bolt`, `dbName`, `trigrams`, `overlay`, `chunkers` and `settings`. The chunker registry is copy-on-write: `AddChunker`, `AddStrategy`, `AddStrategyFunc` and `RemoveStrategy` build a fresh `chunkers` or `ChunkingStrategies` map, change it, and assign it, never writing a published map, so a copy's maps are never written; a copy keeps the strategies registered when it was made
 - **R463:** `InvalidateCaches()` — nils `pathCache`, `pathToID`, `frecordCache` on the receiver
 - **R464:** `InvalidateCaches` does NOT reset `overlayOnce`
 

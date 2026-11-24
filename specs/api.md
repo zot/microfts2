@@ -329,17 +329,32 @@ Support for read/write path separation in a closure actor. The caller runs reads
 ## Copy
 
 ```go
-// Copy returns a shallow copy of the DB suitable for indexing in a
-// separate goroutine. The copy shares the bbolt handle, overlay, and
-// chunker registry. Caches are nil — the copy will lazy-load from
-// committed bbolt state if needed.
+// Copy returns a shallow copy of the DB suitable for use on a separate
+// goroutine. The copy shares the bbolt handle, overlay and chunker
+// registry. Caches are nil — the copy will lazy-load from committed bbolt
+// state if needed.
 func (db *DB) Copy() *DB
 ```
 
 - `bolt`: shared (same `*bbolt.DB`) — bbolt handles concurrent readers/single writer natively
-- `dbName`, `settings`, `trigrams`: shared (read-only or safe to share)
+- `dbName`, `trigrams`: shared (read-only)
 - `overlay`: shared (has its own `sync.RWMutex`)
-- `chunkers`: shared (read-only during writes — only updated by config, which runs synchronously in the main actor)
+- `chunkers`, and `settings` with its `ChunkingStrategies`: shared, because the
+  chunker registry is copy-on-write. Registering or removing a strategy
+  (`AddChunker`, `AddStrategy`, `AddStrategyFunc`, `RemoveStrategy`) builds a
+  fresh map, changes it, and assigns it; no published map is ever written. So
+  a copy, read on another goroutine, keeps the registry as it was when the
+  copy was made, and the next copy sees later changes. (Found 2026-11-24 by
+  ark, which reads copies off its actor while a config reload may register
+  chunkers. Writing the maps in place made that a data race; cloning them in
+  `Copy` still iterated a map a writer could be changing, which the Go
+  runtime stops with a fatal "concurrent map iteration and map write".)
+- What remains: a writer assigns the map field, one pointer word, while
+  `Copy` may be reading it on another goroutine. Go's memory model calls that
+  a data race, though it cannot tear or fault the way a map write during
+  iteration does. microfts2 leaves it to its caller: a caller that writes the
+  registry from one goroutine (ark does it only on its DB actor) and copies
+  from others accepts it; one that wants none serializes the two.
 - `overlayOnce`: not copied — overlay is already initialized on the source, and the copy shares the overlay pointer directly
 - `pathCache`, `pathToID`, `frecordCache`: nil — forces lazy reload from committed bbolt state, avoids stale data from the source's cache
 

@@ -370,8 +370,32 @@
 ## Test: Copy shares env but has nil caches
 **Purpose:** Copy() returns a DB with shared env and nil caches
 **Input:** create DB, add a file (populates pathCache), call Copy()
-**Expected:** copy.env == original.env, copy.overlay == original.overlay, copy.chunkers == original.chunkers, copy.pathCache == nil, copy.pathToID == nil, copy.frecordCache == nil
+**Expected:** copy.env == original.env, copy.overlay == original.overlay, copy.chunkers holds the same strategies as original.chunkers, copy.pathCache == nil, copy.pathToID == nil, copy.frecordCache == nil
 **Refs:** crc-DB.md, R459, R460, R461, R462
+
+## Test: Copy owns its chunker registry
+**Purpose:** R800. A strategy registered or removed on the original after `Copy()` does not reach the copy's maps: the registry is copy-on-write, so the maps a copy shares are never written.
+**Input:** create DB with the `line` chunker, call Copy(); then AddChunker("later") and RemoveStrategy("line") on the original.
+**Expected:** the copy's `chunkers` and `settings.ChunkingStrategies` still hold `line` and do not hold `later`; the original holds `later` and not `line`.
+**Refs:** crc-DB.md, R800
+**Code:** db_test.go
+**Alarm:** 55
+**Fire alarm:** make the writers change the published maps in place again (`db.chunkers[name] = c` and the strategy-table twin in `AddChunker`). The copy sees `later`.
+**Inject:** db.go:AddChunker
+@alarm-hash: a348ccdaaa110ae5
+**Pulled:** 2026-11-24 — 2026-11-24 — rang (ark #286, copy-on-write). AddChunker, AddStrategy and RemoveStrategy writing the published maps in place: "a chunker added to the original after Copy reached the copy's registry", its strategy-table twin, and "removing a strategy from the original removed it from the copy". Restore cmp-identical.
+
+## Test: copies under concurrent registration
+**Purpose:** R800. One goroutine registers and removes strategies in a loop (`AddChunker`, `AddStrategy`, `RemoveStrategy`) while another makes copies and iterates their maps; nothing stops the process.
+**Input:** a test DB; 500 ms of registry writes on the test goroutine, copies and full iteration of each copy's two maps on another.
+**Expected:** the loop finishes (measured: 8,305 writes against 1.2 million copies read).
+**Refs:** crc-DB.md, R800
+**Code:** db_test.go
+**Alarm:** 56
+**Fire alarm:** two injections, each a version this replaced. Write the maps in place and share them in `Copy` (before ark #286); or write in place and clone in `Copy` (#286's first version). Either way the runtime stops the test binary with a fatal concurrent map access.
+**Inject:** db.go:AddChunker, db.go:Copy
+@alarm-hash: 2a52e6838a15260d
+**Pulled:** 2026-11-24 — 2026-11-24 — rang twice (ark #286). In-place writers with Copy sharing the maps (the pre-#286 code): "fatal error: concurrent map iteration and map write". In-place writers with Copy cloning the maps (#286's first version): "fatal error: concurrent map clone and map write". Each within 10 ms. Restores cmp-identical.
 
 ## Test: Copy can perform index reads
 **Purpose:** the copy is functional for indexing

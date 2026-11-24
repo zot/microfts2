@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"regexp"
@@ -1276,11 +1277,11 @@ func (db *DB) NewSearchCache() func() {
 	return func() { db.frecordCache = nil }
 }
 
-// CRC: crc-DB.md | R459, R460, R461, R462
-// Copy returns a shallow copy of the DB sharing the bbolt handle, overlay,
-// and chunker registry. Caches are nil — the copy lazy-loads from
-// committed bbolt state. Intended for short-lived write transactions
-// in a separate goroutine.
+// CRC: crc-DB.md | R461, R462, R800
+// Copy returns a shallow copy of the DB sharing the bbolt handle, overlay and
+// chunker registry, for use on another goroutine. The registry is
+// copy-on-write (see withEntry), so the maps the copy shares are never
+// written. Caches are nil — the copy lazy-loads from committed bbolt state.
 func (db *DB) Copy() *DB {
 	return &DB{
 		bolt:     db.bolt,
@@ -4274,8 +4275,27 @@ func LineChunkFunc(_ string, content []byte, yield func(Chunk) bool) error {
 
 // --- Strategy management ---
 
+// withEntry and withoutEntry are the chunker registry's only writes: each
+// returns a fresh map, leaving m untouched, because m may be shared by a Copy
+// being read on another goroutine. The caller assigns the result. R800
+// CRC: crc-DB.md | R800
+func withEntry[V any](m map[string]V, key string, v V) map[string]V {
+	out := make(map[string]V, len(m)+1)
+	maps.Copy(out, m)
+	out[key] = v
+	return out
+}
+
+// CRC: crc-DB.md | R800
+func withoutEntry[V any](m map[string]V, key string) map[string]V {
+	out := maps.Clone(m)
+	delete(out, key)
+	return out
+}
+
+// CRC: crc-DB.md | R800
 func (db *DB) AddStrategy(name, cmd string) error {
-	db.settings.ChunkingStrategies[name] = cmd
+	db.settings.ChunkingStrategies = withEntry(db.settings.ChunkingStrategies, name, cmd)
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := db.bucket(tx)
 		if b == nil {
@@ -4317,8 +4337,9 @@ func (db *DB) AddChunker(name string, c any) error {
 	if !isChunker && !isFileChunker {
 		return fmt.Errorf("chunker %q must implement Chunker or FileChunker", name)
 	}
-	db.chunkers[name] = c
-	db.settings.ChunkingStrategies[name] = "" // empty cmd marks chunker strategy
+	// R800: copy-on-write; a published map is never written.
+	db.chunkers = withEntry(db.chunkers, name, c)
+	db.settings.ChunkingStrategies = withEntry(db.settings.ChunkingStrategies, name, "") // empty cmd marks chunker strategy
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := db.bucket(tx)
 		if b == nil {
@@ -4354,9 +4375,10 @@ func (db *DB) indexChunk(c Chunk) collectedChunk {
 	}
 }
 
+// CRC: crc-DB.md | R800
 func (db *DB) RemoveStrategy(name string) error {
-	delete(db.settings.ChunkingStrategies, name)
-	delete(db.chunkers, name)
+	db.settings.ChunkingStrategies = withoutEntry(db.settings.ChunkingStrategies, name)
+	db.chunkers = withoutEntry(db.chunkers, name)
 	return db.bolt.Update(func(tx *bbolt.Tx) error {
 		b := db.bucket(tx)
 		if b == nil {

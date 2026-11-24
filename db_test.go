@@ -3269,7 +3269,7 @@ func TestDBCopy(t *testing.T) {
 		t.Error("copy should share the bbolt handle")
 	}
 	if len(cp.chunkers) != len(db.chunkers) {
-		t.Error("copy should share chunkers")
+		t.Error("copy should carry the same chunkers")
 	}
 
 	// Caches nil on copy.
@@ -4720,4 +4720,79 @@ func TestFileSummariesMatchFileInfo(t *testing.T) {
 			t.Errorf("file %d: zero chunks, the fixture gives every file at least one", s.FileID)
 		}
 	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R800
+// A copy owns its chunker registry and strategy table: registering or removing
+// a strategy on the original afterwards does not touch the copy's maps, so a
+// copy read on another goroutine never races the registration.
+func TestCopyOwnsChunkerRegistry(t *testing.T) {
+	db, _ := testDB(t)
+	cp := db.Copy()
+	if err := db.AddChunker("later", FuncChunker{Fn: LineChunkFunc}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RemoveStrategy("line"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cp.chunkers["later"]; ok {
+		t.Error("a chunker added to the original after Copy reached the copy's registry: the maps are shared (R800)")
+	}
+	if _, ok := cp.settings.ChunkingStrategies["later"]; ok {
+		t.Error("a strategy added to the original after Copy reached the copy's strategy table: the maps are shared (R800)")
+	}
+	if _, ok := cp.chunkers["line"]; !ok {
+		t.Error("removing a strategy from the original removed it from the copy")
+	}
+	if _, ok := db.chunkers["later"]; !ok {
+		t.Error("the original lost the chunker it registered")
+	}
+}
+
+// CRC: crc-DB.md | Test: test-DB.md | R800
+// Copies read off one goroutine while another registers and removes strategies.
+// With the registry written in place, or cloned inside Copy, the Go runtime
+// stops the process with "concurrent map iteration and map write" (or a
+// concurrent map read and write); copy-on-write leaves every map a copy holds
+// untouched, so the loop finishes.
+func TestChunkerRegistryCopiesUnderConcurrentRegistration(t *testing.T) {
+	db, _ := testDB(t)
+	stop := make(chan struct{})
+	done := make(chan int)
+	go func() {
+		copies := 0
+		for {
+			select {
+			case <-stop:
+				done <- copies
+				return
+			default:
+			}
+			cp := db.Copy()
+			for name := range cp.chunkers {
+				_ = cp.resolveChunker(name)
+			}
+			for name, cmd := range cp.settings.ChunkingStrategies {
+				_, _ = name, cmd
+			}
+			copies++
+		}
+	}()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	writes := 0
+	for time.Now().Before(deadline) {
+		name := fmt.Sprintf("s%d", writes%8)
+		if err := db.AddChunker(name, FuncChunker{Fn: LineChunkFunc}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.AddStrategy(name+"-cmd", "cat"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.RemoveStrategy(name); err != nil {
+			t.Fatal(err)
+		}
+		writes++
+	}
+	close(stop)
+	t.Logf("%d registry writes, %d copies read", writes, <-done)
 }

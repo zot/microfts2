@@ -230,3 +230,5 @@ Go idiomatic error returns. CLI prints to stderr and exits non-zero.
 - T139: R687 retired by R790 (2026-11-04 postings carry the counts; C records carry no lists; no W records (DB format 6))
 - T140: R781 retired by R797 (2026-11-05 ordered-id-keys: format 7)
 - T141: R782 retired by R798 (2026-11-05 ordered-id-keys: format 7)
+- T142: R459 retired by R800 (2026-11-24 ark #286: Copy clones the chunker registry and strategy table instead of sharing them)
+- T143: R460 retired by R800 (2026-11-24 ark #286: Copy clones chunkers and settings.ChunkingStrategies; it shares only bolt, dbName, trigrams, overlay)
